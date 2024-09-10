@@ -969,6 +969,7 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 	if err != nil {
 		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("finding project with id: '%s'", options.ProjectIdentifier))
 	}
+
 	limit := model.DefaultWaterfallVersionLimit
 	if limitOpt := utility.FromIntPtr(options.Limit); limitOpt != 0 {
 		if limitOpt > model.MaxWaterfallVersionLimit {
@@ -977,6 +978,7 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 
 		limit = limitOpt
 	}
+
 	requesters := options.Requesters
 	if len(requesters) == 0 {
 		requesters = evergreen.SystemVersionRequesterTypes
@@ -986,11 +988,14 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 	minOrderOpt := utility.FromIntPtr(options.MinOrder)
 
 	opts := model.WaterfallOptions{
-		Limit:      limit,
-		Requesters: requesters,
-		MaxOrder:   maxOrderOpt,
-		MinOrder:   minOrderOpt,
+		BuildVariantFilters: options.BuildVariantFilters,
+		Limit:               limit,
+		Requesters:          requesters,
+		MaxOrder:            maxOrderOpt,
+		MinOrder:            minOrderOpt,
 	}
+
+	hasFilters := model.WaterfallHasFilters(ctx, opts)
 
 	activeVersions, err := model.GetActiveWaterfallVersions(ctx, projectId, opts)
 	if err != nil {
@@ -1018,9 +1023,17 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 	// Something like this: https://github.com/evergreen-ci/evergreen/blob/bf8f12ec2eefe61f0cf9bcc594924c7be8f91d1b/graphql/query_resolver.go#L869-L938
 	// All other filters can be applied in the GetActiveWaterfallVersions pipeline, ensuring `limit` matching versions have been returned.
 
-	activeVersionIds := []string{}
-	for _, v := range activeVersions {
-		activeVersionIds = append(activeVersionIds, v.Id)
+	var activeVersionIds []string
+	if hasFilters {
+		activeVersionIds, err = findMatchingVersions(ctx, activeVersions, opts)
+		if err != nil {
+			return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding matching versions: %s", err.Error()))
+		}
+	} else {
+		for _, v := range activeVersions {
+			activeVersionIds = append(activeVersionIds, v.Id)
+		}
+
 	}
 
 	waterfallVersions := groupInactiveVersions(ctx, activeVersionIds, allVersions)

@@ -8,7 +8,12 @@
       "activated": true,
       "author": "mohamed.khelif",
       "status": "failed",
-      "order": 39
+      "order": 39,
+      "build_variants_status": {
+        "activated": true,
+        "build_id": "evergreen_version39_build",
+        "build_variant": "e2e"
+      }
     },
     {
       "_id": "evergreen_version0",
@@ -67,7 +72,7 @@
       "build_variants_status": {
         "activated": true,
         "build_id": "evergreen_version3_build",
-        "build_variant": "lint"
+        "build_variant": "e2e"
       }
     },
     {
@@ -88,7 +93,12 @@
       "activated": true,
       "author": "mohamed.khelif",
       "status": "created",
-      "order": 45
+      "order": 45,
+      "build_variants_status": {
+        "activated": true,
+        "build_id": "evergreen_version5_build",
+        "build_variant": "lint"
+      }
     }
   ],
   "tasks": [
@@ -156,7 +166,33 @@
       "activated": true,
       "build_variant": "lint",
       "build_variant_display_name": "Linter",
+      "build_id": "evergreen_version5_build",
+      "create_time": {
+        "$date": "2020-01-01T00:00:05Z"
+      },
+      "display_task_id": ""
+    },
+    {
+      "_id": "task_6",
+      "version": "evergreen_version3",
+      "status": "dispatched",
+      "display_name": "Dispatched Task",
+      "activated": true,
+      "build_variant": "e2e",
       "build_id": "evergreen_version3_build",
+      "create_time": {
+        "$date": "2020-01-01T00:00:05Z"
+      },
+      "display_task_id": ""
+    },
+    {
+      "_id": "task_7",
+      "version": "evergreen_version39",
+      "status": "success",
+      "display_name": "Successful Task",
+      "activated": true,
+      "build_variant": "e2e",
+      "build_id": "evergreen_version39_build",
       "create_time": {
         "$date": "2020-01-01T00:00:05Z"
       },
@@ -207,6 +243,18 @@
     {
       "_id": "evergreen_version3_build",
       "activated": true,
+      "build_variant": "e2e",
+      "display_name": "End to End test",
+      "tasks": [
+        {
+          "id": "task_6"
+        }
+      ],
+      "version": "evergreen_version3"
+    },
+    {
+      "_id": "evergreen_version5_build",
+      "activated": true,
       "build_variant": "lint",
       "display_name": "Linter",
       "tasks": [
@@ -215,6 +263,18 @@
         }
       ],
       "version": "evergreen_version5"
+    },
+    {
+      "_id": "evergreen_version39_build",
+      "activated": true,
+      "build_variant": "e2e",
+      "display_name": "End to End test",
+      "tasks": [
+        {
+          "id": "task_7"
+        }
+      ],
+      "version": "evergreen_version39"
     }
   ]
 }

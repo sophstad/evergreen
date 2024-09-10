@@ -6,6 +6,7 @@ input WaterfallOptions {
   maxOrder: Int
   projectIdentifier: String! @requireProjectAccess(permission: TASKS, access: VIEW)
   requesters: [String!]
+  buildVariantFilters: [String!]
 }
 
 type WaterfallTask {

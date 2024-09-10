@@ -39,10 +39,15 @@ type WaterfallBuildVariant struct {
 }
 
 type WaterfallOptions struct {
-	Limit      int      `bson:"-" json:"-"`
-	MaxOrder   int      `bson:"-" json:"-"`
-	MinOrder   int      `bson:"-" json:"-"`
-	Requesters []string `bson:"-" json:"-"`
+	BuildVariantFilters []string `bson:"-" json:"-"`
+	Limit               int      `bson:"-" json:"-"`
+	MaxOrder            int      `bson:"-" json:"-"`
+	MinOrder            int      `bson:"-" json:"-"`
+	Requesters          []string `bson:"-" json:"-"`
+}
+
+func WaterfallHasFilters(ctx context.Context, options WaterfallOptions) bool {
+	return len(options.BuildVariantFilters) > 0
 }
 
 // GetActiveWaterfallVersions returns at most `opts.limit` activated versions for a given project.
@@ -54,6 +59,12 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 
 	if opts.MaxOrder != 0 && opts.MinOrder != 0 {
 		return nil, errors.New("cannot provide both max and min order options")
+	}
+
+	limit := opts.Limit
+	if WaterfallHasFilters(ctx, opts) {
+		// Overfetch active versions since some will likely not match filters
+		limit = MaxWaterfallVersionLimit
 	}
 
 	match := bson.M{
@@ -77,12 +88,12 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 
 	if pagingBackward {
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: 1}})
-		pipeline = append(pipeline, bson.M{"$limit": DefaultWaterfallQueryCount})
+		pipeline = append(pipeline, bson.M{"$limit": limit})
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
 
 	} else {
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
-		pipeline = append(pipeline, bson.M{"$limit": DefaultWaterfallQueryCount})
+		pipeline = append(pipeline, bson.M{"$limit": limit})
 
 	}
 

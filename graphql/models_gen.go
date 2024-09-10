@@ -604,9 +604,10 @@ type WaterfallOptions struct {
 	// Return versions with an order greater than minOrder. Used for paginating backward.
 	MinOrder *int `json:"minOrder,omitempty"`
 	// Return versions with an order lower than maxOrder. Used for paginating forward.
-	MaxOrder          *int     `json:"maxOrder,omitempty"`
-	ProjectIdentifier string   `json:"projectIdentifier"`
-	Requesters        []string `json:"requesters,omitempty"`
+	MaxOrder            *int     `json:"maxOrder,omitempty"`
+	ProjectIdentifier   string   `json:"projectIdentifier"`
+	Requesters          []string `json:"requesters,omitempty"`
+	BuildVariantFilters []string `json:"buildVariantFilters,omitempty"`
 }
 
 type WaterfallVersion struct {

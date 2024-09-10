@@ -1370,3 +1370,56 @@ func groupInactiveVersions(ctx context.Context, activeVersionIds []string, versi
 	}
 	return waterfallVersions
 }
+
+func findMatchingVersions(ctx context.Context, activeVersions []model.Version, options model.WaterfallOptions) ([]string, error) {
+	// Matches number of connections in concurrentlyBuildVersionsMatchingTasksMap
+	sliceSize := 20
+
+	versionsCheckedCount := 0
+	matchingActiveVersionIds := []string{}
+	limit := options.Limit
+
+	for len(matchingActiveVersionIds) < limit && versionsCheckedCount < len(activeVersions) {
+		if len(activeVersions) == 0 {
+			break
+		}
+
+		// If we have checked more versions than the MaxMainlineCommitVersionLimit, break out of the loop.
+		if versionsCheckedCount >= model.MaxWaterfallVersionLimit {
+			if len(matchingActiveVersionIds) == 0 {
+				return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("Matching version not found in %d most recent versions", model.MaxWaterfallVersionLimit))
+			}
+			break
+		}
+
+		var versionsMatchingTasksMap map[string]bool
+		sliceEnd := len(activeVersions)
+		if (versionsCheckedCount + sliceSize) < sliceEnd {
+			sliceEnd = versionsCheckedCount + sliceSize
+		}
+		activeVersionsSlice := activeVersions[versionsCheckedCount:sliceEnd]
+		filters := task.HasMatchingTasksOptions{
+			Variants:                   options.BuildVariantFilters,
+			IncludeNeverActivatedTasks: true,
+		}
+		versionsMatchingTasksMap, err := concurrentlyBuildVersionsMatchingTasksMap(ctx, activeVersionsSlice, filters)
+		if err != nil {
+			return nil, InternalServerError.Send(ctx, err.Error())
+		}
+
+		// Loop through the current versions to check for matching versions.
+		for _, v := range activeVersionsSlice {
+			versionsCheckedCount++
+
+			if versionsMatchingTasksMap[v.Id] {
+				matchingActiveVersionIds = append(matchingActiveVersionIds, v.Id)
+			}
+
+			if len(matchingActiveVersionIds) >= limit {
+				break
+			}
+		}
+	}
+
+	return matchingActiveVersionIds, nil
+}

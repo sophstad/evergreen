@@ -9,6 +9,36 @@
             "prevPageOrder": 0,
             "buildVariants": [
               {
+                "id": "e2e",
+                "displayName": "End to End test",
+                "builds": [
+                  {
+                    "activated": true,
+                    "id": "evergreen_version39_build",
+                    "tasks": [
+                      {
+                        "status": "success",
+                        "id": "task_7",
+                        "displayName": "Successful Task"
+                      }
+                    ],
+                    "version": "evergreen_version39"
+                  },
+                  {
+                    "activated": true,
+                    "id": "evergreen_version3_build",
+                    "tasks": [
+                      {
+                        "status": "dispatched",
+                        "id": "task_6",
+                        "displayName": "Dispatched Task"
+                      }
+                    ],
+                    "version": "evergreen_version3"
+                  }
+                ]
+              },
+              {
                 "id": "enterprise-ubuntu1604-64",
                 "displayName": "Ubuntu 16.04",
                 "builds": [
@@ -49,10 +79,12 @@
                 ]
               },
               {
+                "id": "lint",
+                "displayName": "Linter",
                 "builds": [
                   {
                     "activated": true,
-                    "id": "evergreen_version3_build",
+                    "id": "evergreen_version5_build",
                     "tasks": [
                       {
                         "displayName": "Task Number 5",
@@ -62,9 +94,7 @@
                     ],
                     "version": "evergreen_version5"
                   }
-                ],
-                "displayName": "Linter",
-                "id": "lint"
+                ]
               }
             ],
             "versions": [
@@ -249,6 +279,16 @@
                 }
               }
             ]
+          }
+        }
+      }
+    },
+    {
+      "query_file": "filters.graphql",
+      "result": {
+        "data": {
+          "waterfall": {
+            "nextPageOrder": 39
           }
         }
       }

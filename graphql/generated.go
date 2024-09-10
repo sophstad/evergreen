@@ -77818,7 +77818,7 @@ func (ec *executionContext) unmarshalInputWaterfallOptions(ctx context.Context, 
 		asMap["limit"] = 5
 	}
 
-	fieldsInOrder := [...]string{"limit", "minOrder", "maxOrder", "projectIdentifier", "requesters"}
+	fieldsInOrder := [...]string{"limit", "minOrder", "maxOrder", "projectIdentifier", "requesters", "buildVariantFilters"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -77881,6 +77881,13 @@ func (ec *executionContext) unmarshalInputWaterfallOptions(ctx context.Context, 
 				return it, err
 			}
 			it.Requesters = data
+		case "buildVariantFilters":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("buildVariantFilters"))
+			data, err := ec.unmarshalOString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.BuildVariantFilters = data
 		}
 	}
 
