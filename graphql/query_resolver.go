@@ -1005,12 +1005,14 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 	// Since GetAllWaterfallVersions uses an inclusive order range ($gte instead of $gt), add 1 to our minimum range
 	minVersionOrder := minOrderOpt + 1
 	if minOrderOpt == 0 {
+		// Only use the last active version order number if no minOrder was provided. Using the activeVersions bounds may omit inactive versions between the min and the last active version found.
 		minVersionOrder = activeVersions[len(activeVersions)-1].RevisionOrderNumber
 	}
 
 	// Same as above, but subtract for max order
 	maxVersionOrder := maxOrderOpt - 1
 	if maxOrderOpt == 0 {
+		// Same as above: only use the first active version if no maxOrder was specified to avoid omitting inactive versions.
 		maxVersionOrder = activeVersions[0].RevisionOrderNumber
 	}
 
@@ -1036,7 +1038,7 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 
 	}
 
-	waterfallVersions := groupInactiveVersions(ctx, activeVersionIds, allVersions)
+	waterfallVersions := groupInactiveVersions(activeVersionIds, allVersions)
 
 	buildVariants, err := model.GetWaterfallBuildVariants(ctx, activeVersionIds)
 	if err != nil {
@@ -1049,15 +1051,10 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 		bv = append(bv, &bCopy)
 	}
 
-	// If a max order was specified, use this as the new min and vice versa. If not, take this value from the bounds of the returned versions.
+	// Return the min and max orders returned to be used as parameters for navigating to the next page
 	prevPageOrder := allVersions[0].RevisionOrderNumber
-	if maxOrderOpt > prevPageOrder {
-		prevPageOrder = maxOrderOpt
-	}
 	nextPageOrder := allVersions[len(allVersions)-1].RevisionOrderNumber
-	if minOrderOpt != 0 && minOrderOpt < nextPageOrder {
-		nextPageOrder = minOrderOpt
-	}
+
 	// If loading base page, there's no prev page to navigate to regardless of max order
 	if maxOrderOpt == 0 && minOrderOpt == 0 {
 		prevPageOrder = 0

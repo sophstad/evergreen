@@ -87,8 +87,10 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 	pipeline := []bson.M{{"$match": match}}
 
 	if pagingBackward {
+		// When querying with a $gt param, sort ascending so we can take `limit` versions nearest to the MinOrder param
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: 1}})
 		pipeline = append(pipeline, bson.M{"$limit": limit})
+		// Then apply an acending sort so these versions are returned in the expected descending order
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
 
 	} else {
@@ -110,10 +112,10 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 	return res, nil
 }
 
-/* GetAllWaterfallVersions returns all of a project's versions within an inclusive range of orders. */
+// GetAllWaterfallVersions returns all of a project's versions within an inclusive range of orders.
 func GetAllWaterfallVersions(ctx context.Context, projectId string, minOrder int, maxOrder int) ([]Version, error) {
 	if minOrder >= maxOrder {
-		return nil, errors.New("minOrder must be greater than maxOrder")
+		return nil, errors.New("minOrder must be less than maxOrder")
 	}
 
 	match := bson.M{

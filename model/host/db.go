@@ -693,7 +693,7 @@ func FindByTemporaryExemptionsExpiringBetween(ctx context.Context, lowerBound ti
 // either they do not have an agent yet or their agents have not communicated
 // recently.
 func NeedsAgentDeploy(currentTime time.Time) bson.M {
-	cutoffTime := currentTime.Add(-MaxLCTInterval)
+	cutoffTime := currentTime.Add(-MaxAgentUnresponsiveInterval)
 	bootstrapKey := bsonutil.GetDottedKeyName(DistroKey, distro.BootstrapSettingsKey, distro.BootstrapSettingsMethodKey)
 	return bson.M{
 		StartedByKey:     evergreen.User,
@@ -738,7 +738,7 @@ func NeedsAgentMonitorDeploy(currentTime time.Time) bson.M {
 			}},
 			{"$or": []bson.M{
 				{LastCommunicationTimeKey: utility.ZeroTime},
-				{LastCommunicationTimeKey: bson.M{"$lte": currentTime.Add(-MaxUncommunicativeInterval)}},
+				{LastCommunicationTimeKey: bson.M{"$lte": currentTime.Add(-MaxAgentMonitorUnresponsiveInterval)}},
 				{LastCommunicationTimeKey: bson.M{"$exists": false}},
 			}},
 		},
@@ -1741,10 +1741,12 @@ func SyncPermanentExemptions(ctx context.Context, permanentlyExempt []string) er
 			},
 		})
 		catcher.Wrap(err, "marking newly-added hosts as permanently exempt")
-		grip.InfoWhen(res.ModifiedCount > 0, message.Fields{
-			"message":   "marked newly-added hosts as permanently exempt",
-			"num_hosts": res.ModifiedCount,
-		})
+		if res != nil && res.ModifiedCount > 0 {
+			grip.Info(message.Fields{
+				"message":   "marked newly-added hosts as permanently exempt",
+				"num_hosts": res.ModifiedCount,
+			})
+		}
 	}
 
 	res, err := coll.UpdateMany(ctx, isSleepScheduleApplicable(bson.M{
