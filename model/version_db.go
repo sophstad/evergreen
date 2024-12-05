@@ -21,6 +21,15 @@ const (
 )
 
 var (
+	VersionByProjectIdAndCreateTimeIndex = bson.D{
+		{Key: VersionIdentifierKey, Value: 1},
+		{Key: VersionRequesterKey, Value: 1},
+		{Key: VersionRevisionOrderNumberKey, Value: -1},
+		{Key: VersionCreateTimeKey, Value: 1},
+	}
+)
+
+var (
 	// bson fields for the version struct
 	VersionIdKey                                = bsonutil.MustHaveTag(Version{}, "Id")
 	VersionCreateTimeKey                        = bsonutil.MustHaveTag(Version{}, "CreateTime")
@@ -160,7 +169,9 @@ func FindVersionByProjectIdAndCreateTime(ctx context.Context, projectId string, 
 	version, err := VersionFindOneContext(
 		ctx,
 		byProjectIdAndCreateTime(projectId, createTime),
-		options.FindOne().SetSort(bson.M{VersionRevisionOrderNumberKey: -1}))
+		options.FindOne().SetSort(bson.M{VersionRevisionOrderNumberKey: -1}),
+		options.FindOne().SetHint(VersionByProjectIdAndCreateTimeIndex),
+	)
 	if err != nil {
 		return nil, errors.Wrap(err, "finding version by create time")
 	}
