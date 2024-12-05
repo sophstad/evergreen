@@ -119,6 +119,7 @@ var (
 	IsAutomaticRestartKey                  = bsonutil.MustHaveTag(Task{}, "IsAutomaticRestart")
 	CommitQueueMergeKey                    = bsonutil.MustHaveTag(Task{}, "CommitQueueMerge")
 	DisplayStatusKey                       = bsonutil.MustHaveTag(Task{}, "DisplayStatus")
+	DisplayStatusCacheKey                  = bsonutil.MustHaveTag(Task{}, "DisplayStatusCache")
 	BaseTaskKey                            = bsonutil.MustHaveTag(Task{}, "BaseTask")
 	BuildVariantDisplayNameKey             = bsonutil.MustHaveTag(Task{}, "BuildVariantDisplayName")
 	IsEssentialToSucceedKey                = bsonutil.MustHaveTag(Task{}, "IsEssentialToSucceed")
@@ -188,17 +189,26 @@ var (
 		},
 	}
 
-	updateDisplayTasksAndTasksSet = bson.M{"$set": bson.M{
-		CanResetKey: true,
-		ExecutionKey: bson.M{
-			"$add": bson.A{"$" + ExecutionKey, 1},
+	addDisplayStatusCache = bson.M{
+		"$addFields": bson.M{
+			DisplayStatusCacheKey: DisplayStatusExpression,
 		},
-	}}
-	updateDisplayTasksAndTasksUnset = bson.M{"$unset": bson.A{
-		AbortedKey,
-		AbortInfoKey,
-		OverrideDependenciesKey,
-	}}
+	}
+
+	updateDisplayTasksAndTasksSet = bson.M{
+		"$set": bson.M{
+			CanResetKey: true,
+
+			ExecutionKey: bson.M{
+				"$add": bson.A{"$" + ExecutionKey, 1},
+			},
+		}}
+	updateDisplayTasksAndTasksUnset = bson.M{
+		"$unset": bson.A{
+			AbortedKey,
+			AbortInfoKey,
+			OverrideDependenciesKey,
+		}}
 
 	// This should reflect Task.GetDisplayStatus()
 	DisplayStatusExpression = bson.M{
@@ -2856,7 +2866,7 @@ func abortAndMarkResetTasks(ctx context.Context, filter bson.M, taskIDs []string
 					ResetFailedWhenFinishedKey,
 				},
 			},
-			addDisplayStatus,
+			addDisplayStatusCache,
 		},
 	)
 

@@ -3865,6 +3865,7 @@ func TestAbortVersionTasks(t *testing.T) {
 	require.NotNil(t, otherExecTask)
 	assert.True(t, otherExecTask.Aborted)
 	assert.NotEmpty(t, otherExecTask.AbortInfo.TaskID)
+	assert.Equal(t, evergreen.TaskAborted, otherExecTask.DisplayStatusCache)
 }
 
 func TestArchive(t *testing.T) {
