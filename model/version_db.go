@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	adb "github.com/mongodb/anser/db"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const (
@@ -97,6 +100,18 @@ func byLatestProjectVersion(projectId string) bson.M {
 	}
 }
 
+func byProjectIdAndCreateTime(projectId string, createTime time.Time) bson.M {
+	return bson.M{
+		VersionIdentifierKey: projectId,
+		VersionCreateTimeKey: bson.M{
+			"$lte": createTime,
+		},
+		VersionRequesterKey: bson.M{
+			"$in": evergreen.SystemVersionRequesterTypes,
+		},
+	}
+}
+
 // FindLatestRevisionAndAuthorForProject returns the latest revision and author ID for the project, and returns an error if it's not found.
 func FindLatestRevisionAndAuthorForProject(projectId string) (string, string, error) {
 	v, err := VersionFindOne(db.Query(byLatestProjectVersion(projectId)).
@@ -140,18 +155,16 @@ func VersionByProjectIdAndRevisionPrefix(projectId, revisionPrefix string) db.Q 
 		})
 }
 
-// VersionByProjectIdAndCreateTime finds the most recent system-requested version created on or before a specified createTime.
-func VersionByProjectIdAndCreateTime(projectId string, createTime time.Time) db.Q {
-	return db.Query(
-		bson.M{
-			VersionIdentifierKey: projectId,
-			VersionCreateTimeKey: bson.M{
-				"$lte": createTime,
-			},
-			VersionRequesterKey: bson.M{
-				"$in": evergreen.SystemVersionRequesterTypes,
-			},
-		}).Sort([]string{"-" + VersionRevisionOrderNumberKey})
+// FindVersionByProjectIdAndCreateTime finds the most recent system-requested version created on or before a specified createTime.
+func FindVersionByProjectIdAndCreateTime(ctx context.Context, projectId string, createTime time.Time) (*Version, error) {
+	version, err := VersionFindOneContext(
+		ctx,
+		byProjectIdAndCreateTime(projectId, createTime),
+		options.FindOne().SetSort(bson.M{VersionRevisionOrderNumberKey: -1}))
+	if err != nil {
+		return nil, errors.Wrap(err, "finding version by create time")
+	}
+	return version, nil
 }
 
 // ByProjectIdAndOrder finds non-patch versions for the given project with revision
@@ -303,6 +316,23 @@ func VersionFindOne(query db.Q) (*Version, error) {
 		return nil, nil
 	}
 	return version, err
+}
+
+func VersionFindOneContext(ctx context.Context, query bson.M, options ...*options.FindOneOptions) (*Version, error) {
+	res := evergreen.GetEnvironment().DB().Collection(VersionCollection).FindOne(ctx, query, options...)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "finding version")
+	}
+
+	version := &Version{}
+	if err := res.Decode(version); err != nil {
+		return nil, errors.Wrap(err, "decoding version")
+	}
+
+	return version, nil
 }
 
 func VersionFindOneId(id string) (*Version, error) {
