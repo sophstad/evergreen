@@ -12,6 +12,7 @@ import (
 	"github.com/evergreen-ci/utility"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 func TestVersionByMostRecentNonIgnored(t *testing.T) {
@@ -326,7 +327,14 @@ func TestFindBaseVersionForVersion(t *testing.T) {
 }
 
 func TestVersionByProjectIdAndRevisionPrefix(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	assert.NoError(t, db.ClearCollections(VersionCollection))
+
+	_, err := evergreen.GetEnvironment().DB().Collection(VersionCollection).Indexes().CreateOne(context.Background(), mongo.IndexModel{Keys: VersionByProjectIdAndCreateTimeIndex})
+	assert.NoError(t, err)
+
 	ts := time.Now()
 	v1 := Version{
 		Id:                  "v1",
@@ -366,28 +374,28 @@ func TestVersionByProjectIdAndRevisionPrefix(t *testing.T) {
 
 	assert.NoError(t, db.InsertMany(VersionCollection, v1, v2, v3, v4, v5))
 
-	v, err := VersionFindOne(VersionByProjectIdAndCreateTime("proj", ts))
+	v, err := FindVersionByProjectIdAndCreateTime(ctx, "proj", ts)
 	assert.NoError(t, err)
 	assert.Equal(t, v.Id, "v1")
 
-	v, err = VersionFindOne(VersionByProjectIdAndCreateTime("proj", ts.Add(-3*utility.Day)))
+	v, err = FindVersionByProjectIdAndCreateTime(ctx, "proj", ts.Add(-3*utility.Day))
 	assert.NoError(t, err)
 	assert.Equal(t, v.Id, "v4")
 
-	v, err = VersionFindOne(VersionByProjectIdAndCreateTime("proj", ts.Add(-2*utility.Day).Add(-30*time.Minute)))
+	v, err = FindVersionByProjectIdAndCreateTime(ctx, "proj", ts.Add(-2*utility.Day).Add(-30*time.Minute))
 	assert.NoError(t, err)
 	assert.Equal(t, v.Id, "v3")
 
-	v, err = VersionFindOne(VersionByProjectIdAndCreateTime("proj", ts.Add(-2*utility.Day)))
+	v, err = FindVersionByProjectIdAndCreateTime(ctx, "proj", ts.Add(-2*utility.Day))
 	assert.NoError(t, err)
 	assert.Equal(t, v.Id, "v3")
 
-	v, err = VersionFindOne(VersionByProjectIdAndCreateTime("proj_2", ts.Add(-2*utility.Day)))
+	v, err = FindVersionByProjectIdAndCreateTime(ctx, "proj_2", ts.Add(-2*utility.Day))
 	assert.NoError(t, err)
 	assert.Equal(t, v.Id, "v2")
 
 	// Does not match on patch requester
-	v, err = VersionFindOne(VersionByProjectIdAndCreateTime("proj", ts.Add(-5*utility.Day)))
+	v, err = FindVersionByProjectIdAndCreateTime(ctx, "proj", ts.Add(-5*utility.Day))
 	assert.NoError(t, err)
 	assert.Nil(t, v)
 }

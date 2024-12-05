@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
+	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
@@ -76,6 +77,14 @@ func insertFileDocsToDB(ctx context.Context, fn string, db *mongo.Database) erro
 			{Keys: host.DistroIdStatusIndex},
 		}); err != nil {
 			return errors.Wrap(err, "creating host index")
+		}
+	case model.VersionCollection:
+		if _, err = collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
+			{
+				Keys: model.VersionByProjectIdAndCreateTimeIndex,
+			},
+		}); err != nil {
+			return errors.Wrap(err, "creating version indexes")
 		}
 	}
 	scanner := bufio.NewScanner(file)
