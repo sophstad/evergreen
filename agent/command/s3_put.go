@@ -22,6 +22,20 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	s3PutAttribute = "evergreen.command.s3_put"
+)
+
+var (
+	s3PutBucketAttribute               = fmt.Sprintf("%s.bucket", s3PutAttribute)
+	s3PutTemporaryCredentialsAttribute = fmt.Sprintf("%s.temporary_credentials", s3PutAttribute)
+	s3PutVisibilityAttribute           = fmt.Sprintf("%s.visibility", s3PutAttribute)
+	s3PutPermissionsAttribute          = fmt.Sprintf("%s.permissions", s3PutAttribute)
+	s3PutRemotePathAttribute           = fmt.Sprintf("%s.remote_path", s3PutAttribute)
 )
 
 // s3pc is a command to put a resource to an S3 bucket and download it to
@@ -47,6 +61,9 @@ type s3put struct {
 	// RemoteFile is the filepath to store the file to,
 	// within an S3 bucket. Is a prefix when multiple files are uploaded via LocalFilesIncludeFilter.
 	RemoteFile string `mapstructure:"remote_file" plugin:"expand"`
+
+	// remoteFile is the file path without any expansions applied.
+	remoteFile string
 
 	// PreservePath, when set to true, causes multi part uploads uploaded with LocalFilesIncludeFilter to
 	// preserve the original folder structure instead of putting all the files into the same folder
@@ -194,6 +211,8 @@ func (s3pc *s3put) validate() error {
 // Apply the expansions from the relevant task config
 // to all appropriate fields of the s3put.
 func (s3pc *s3put) expandParams(conf *internal.TaskConfig) error {
+	s3pc.remoteFile = s3pc.RemoteFile
+
 	var err error
 	if err = util.ExpandValues(s3pc, &conf.Expansions); err != nil {
 		return errors.Wrap(err, "applying expansions")
@@ -285,6 +304,14 @@ func (s3pc *s3put) Execute(ctx context.Context,
 		return nil
 	}
 
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.String(s3PutBucketAttribute, s3pc.Bucket),
+		attribute.Bool(s3PutTemporaryCredentialsAttribute, s3pc.AwsSessionToken != ""),
+		attribute.String(s3PutVisibilityAttribute, s3pc.Visibility),
+		attribute.String(s3PutPermissionsAttribute, s3pc.Permissions),
+		attribute.String(s3PutRemotePathAttribute, s3pc.remoteFile),
+	)
+
 	// create pail bucket
 	httpClient := utility.GetHTTPClient()
 	httpClient.Timeout = s3HTTPClientTimeout
@@ -346,9 +373,10 @@ func (s3pc *s3put) putWithRetry(ctx context.Context, comm client.Communicator, l
 	backoffCounter := getS3OpBackoff()
 
 	var (
-		err           error
-		uploadedFiles []string
-		filesList     []string
+		err               error
+		uploadedFiles     []string
+		filesList         []string
+		skippedFilesCount int
 	)
 
 	timer := time.NewTimer(0)
@@ -379,17 +407,24 @@ retryLoop:
 				}
 				filesList, err = b.Build()
 				if err != nil {
-					return errors.Wrapf(err, "processing local files include filter '%s'",
-						strings.Join(s3pc.LocalFilesIncludeFilter, " "))
+					// Skip erroring since local files include filter should treat files as optional.
+					if strings.Contains(err.Error(), utility.WalkThroughError) {
+						logger.Task().Warningf("Error while building file list: %s", err.Error())
+						return nil
+					} else {
+						return errors.Wrapf(err, "processing local files include filter '%s'",
+							strings.Join(s3pc.LocalFilesIncludeFilter, " "))
+					}
 				}
 				if len(filesList) == 0 {
-					logger.Task().Infof("File filter '%s' matched no files.", strings.Join(s3pc.LocalFilesIncludeFilter, " "))
+					logger.Task().Warningf("File filter '%s' matched no files.", strings.Join(s3pc.LocalFilesIncludeFilter, " "))
 					return nil
 				}
 			}
 
 			// reset to avoid duplicated uploaded references
 			uploadedFiles = []string{}
+			skippedFilesCount = 0
 
 		uploadLoop:
 			for _, fpath := range filesList {
@@ -416,6 +451,8 @@ retryLoop:
 						return errors.Wrapf(err, "checking if file '%s' exists", remoteName)
 					}
 					if exists {
+						skippedFilesCount++
+
 						logger.Task().Infof("Not uploading file '%s' because remote file '%s' already exists. Continuing to upload other files.", fpath, remoteName)
 						continue uploadLoop
 					}
@@ -469,9 +506,11 @@ retryLoop:
 
 	logger.Task().WarningWhen(strings.Contains(s3pc.Bucket, "."), "Bucket names containing dots that are created after Sept. 30, 2020 are not guaranteed to have valid attached URLs.")
 
-	if len(uploadedFiles) != len(filesList) && !s3pc.skipMissing {
-		logger.Task().Infof("Attempted to upload %d files, %d successfully uploaded.", len(filesList), len(uploadedFiles))
-		return errors.Errorf("uploaded %d files of %d requested", len(uploadedFiles), len(filesList))
+	processedCount := skippedFilesCount + len(uploadedFiles)
+
+	if processedCount != len(filesList) && !s3pc.skipMissing {
+		logger.Task().Infof("Attempted to upload %d files, %d successfully uploaded.", len(filesList), processedCount)
+		return errors.Errorf("uploaded %d files of %d requested", processedCount, len(filesList))
 	}
 
 	return nil

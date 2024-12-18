@@ -1371,7 +1371,10 @@ func (s *projectSuite) TestBuildProjectTVPairsWithDisplayTaskWithDependencies() 
 			s.Contains(vt.Tasks, "very_task")
 			s.Require().Len(vt.DisplayTasks, 1)
 			s.Equal("memes", vt.DisplayTasks[0].Name)
-			s.Empty(vt.DisplayTasks[0].ExecTasks)
+			s.Len(vt.DisplayTasks[0].ExecTasks, 3)
+			s.Contains(vt.DisplayTasks[0].ExecTasks, "9001_task")
+			s.Contains(vt.DisplayTasks[0].ExecTasks, "very_task")
+			s.Contains(vt.DisplayTasks[0].ExecTasks, "another_disabled_task")
 		} else if vt.Variant == "bv_2" {
 			s.Len(vt.Tasks, 1)
 			s.Contains(vt.Tasks, "a_task_2")
@@ -1731,13 +1734,9 @@ func TestFindProjectsSuite(t *testing.T) {
 				EventType:    event.EventTypeProjectModified,
 				ResourceId:   projectId,
 				Data: &ProjectChangeEvent{
-					User: username,
-					Before: ProjectSettingsEvent{
-						ProjectSettings: before,
-					},
-					After: ProjectSettingsEvent{
-						ProjectSettings: after,
-					},
+					User:   username,
+					Before: NewProjectSettingsEvent(before),
+					After:  NewProjectSettingsEvent(after),
 				},
 			}
 

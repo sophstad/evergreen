@@ -53,15 +53,14 @@ func (*agentCedarConfig) Parse(_ context.Context, _ *http.Request) error { retur
 
 func (h *agentCedarConfig) Run(ctx context.Context) gimlet.Responder {
 	return gimlet.NewJSONResponse(apimodels.CedarConfig{
-		BaseURL:             h.config.BaseURL,
-		GRPCBaseURL:         h.config.GRPCBaseURL,
-		RPCPort:             h.config.RPCPort,
-		Username:            h.config.User,
-		APIKey:              h.config.APIKey,
-		Insecure:            h.config.Insecure,
-		SendToCedarDisabled: h.config.SendToCedarDisabled,
-		SPSURL:              h.config.SPSURL,
-		SendRatioSPS:        h.config.SendRatioSPS,
+		BaseURL:      h.config.BaseURL,
+		GRPCBaseURL:  h.config.GRPCBaseURL,
+		RPCPort:      h.config.RPCPort,
+		Username:     h.config.User,
+		APIKey:       h.config.APIKey,
+		Insecure:     h.config.Insecure,
+		SPSURL:       h.config.SPSURL,
+		SPSKanopyURL: h.config.SPSKanopyURL,
 	})
 }
 
@@ -587,7 +586,7 @@ func (h *getParserProjectHandler) Run(ctx context.Context) gimlet.Responder {
 			Message:    fmt.Sprintf("parser project '%s' not found", v.Id),
 		})
 	}
-	projBytes, err := pp.RetryMarshalBSON(5)
+	projBytes, err := pp.MarshalBSON()
 	if err != nil {
 		return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "marshalling project bytes to bson"))
 	}

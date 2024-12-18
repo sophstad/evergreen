@@ -119,6 +119,7 @@ var (
 	IsAutomaticRestartKey                  = bsonutil.MustHaveTag(Task{}, "IsAutomaticRestart")
 	CommitQueueMergeKey                    = bsonutil.MustHaveTag(Task{}, "CommitQueueMerge")
 	DisplayStatusKey                       = bsonutil.MustHaveTag(Task{}, "DisplayStatus")
+	DisplayStatusCacheKey                  = bsonutil.MustHaveTag(Task{}, "DisplayStatusCache")
 	BaseTaskKey                            = bsonutil.MustHaveTag(Task{}, "BaseTask")
 	BuildVariantDisplayNameKey             = bsonutil.MustHaveTag(Task{}, "BuildVariantDisplayName")
 	IsEssentialToSucceedKey                = bsonutil.MustHaveTag(Task{}, "IsEssentialToSucceed")
@@ -185,6 +186,12 @@ var (
 	addDisplayStatus = bson.M{
 		"$addFields": bson.M{
 			DisplayStatusKey: DisplayStatusExpression,
+		},
+	}
+
+	addDisplayStatusCache = bson.M{
+		"$addFields": bson.M{
+			DisplayStatusCacheKey: DisplayStatusExpression,
 		},
 	}
 
@@ -1826,7 +1833,7 @@ func updateAllTasksForAllMatchingDependencies(ctx context.Context, taskIDs []str
 					"else": false,
 				}}},
 			},
-			addDisplayStatus,
+			addDisplayStatusCache,
 		},
 	); err != nil {
 		return errors.Wrap(err, "updating matching dependencies")
@@ -2728,22 +2735,6 @@ func enableDisabledTasks(taskIDs []string) error {
 	return err
 }
 
-// SetHasAnnotations sets a task's HasAnnotations flag, indicating
-// that there are annotations with populated IssuesKey for its
-// id / execution pair.
-func SetHasAnnotations(ctx context.Context, taskId string, execution int) error {
-	err := UpdateOneContext(
-		ctx,
-		ByIdAndExecution(taskId, execution),
-		[]bson.M{
-			bson.M{"$set": bson.M{
-				HasAnnotationsKey: true,
-			}},
-			addDisplayStatus,
-		})
-	return errors.Wrapf(err, "marking task '%s' as having annotations", taskId)
-}
-
 // IncNumNextTaskDispatches sets the number of times a host has requested this
 // task and execution as its next task.
 func (t *Task) IncNumNextTaskDispatches() error {
@@ -2758,20 +2749,19 @@ func (t *Task) IncNumNextTaskDispatches() error {
 	return nil
 }
 
-// UnsetHasAnnotations unsets a task's HasAnnotations flag, indicating
-// that there are no longer any annotations with populated IssuesKey for its
-// id / execution pair.
-func UnsetHasAnnotations(ctx context.Context, taskId string, execution int) error {
+// UpdateHasAnnotations updates a task's HasAnnotations flag, indicating if there
+// are any annotations with populated IssuesKey for its id / execution pair.
+func UpdateHasAnnotations(ctx context.Context, taskId string, execution int, hasAnnotations bool) error {
 	err := UpdateOneContext(
 		ctx,
 		ByIdAndExecution(taskId, execution),
 		[]bson.M{
 			bson.M{"$set": bson.M{
-				HasAnnotationsKey: false,
+				HasAnnotationsKey: hasAnnotations,
 			}},
-			addDisplayStatus,
+			addDisplayStatusCache,
 		})
-	return errors.Wrapf(err, "marking task '%s' as having no annotations", taskId)
+	return errors.Wrapf(err, "updating HasAnnotations field for task '%s'", taskId)
 }
 
 type NumExecutionsForIntervalInput struct {
@@ -2856,7 +2846,7 @@ func abortAndMarkResetTasks(ctx context.Context, filter bson.M, taskIDs []string
 					ResetFailedWhenFinishedKey,
 				},
 			},
-			addDisplayStatus,
+			addDisplayStatusCache,
 		},
 	)
 

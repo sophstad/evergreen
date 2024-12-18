@@ -294,14 +294,15 @@ const (
 	DefaultSleepScheduleTimeZone     = "America/New_York"
 
 	// host resource tag names
-	TagName             = "name"
-	TagDistro           = "distro"
-	TagEvergreenService = "evergreen-service"
-	TagUsername         = "username"
-	TagOwner            = "owner"
-	TagMode             = "mode"
-	TagStartTime        = "start-time"
-	TagExpireOn         = "expire-on"
+	TagName              = "name"
+	TagDistro            = "distro"
+	TagEvergreenService  = "evergreen-service"
+	TagUsername          = "username"
+	TagOwner             = "owner"
+	TagMode              = "mode"
+	TagStartTime         = "start-time"
+	TagExpireOn          = "expire-on"
+	TagAllowRemoteAccess = "AllowRemoteAccess"
 
 	FinderVersionLegacy    = "legacy"
 	FinderVersionParallel  = "parallel"
@@ -359,10 +360,11 @@ const (
 	// to tear down a task group. This is set one minute longer than the agent's maxTeardownGroupTimeout.
 	MaxTeardownGroupThreshold = 4 * time.Minute
 
-	SaveGenerateTasksError     = "error saving config in `generate.tasks`"
-	TasksAlreadyGeneratedError = "generator already ran and generated tasks"
-	KeyTooLargeToIndexError    = "key too large to index"
-	InvalidDivideInputError    = "$divide only supports numeric types"
+	SaveGenerateTasksError          = "error saving config in `generate.tasks`"
+	TasksAlreadyGeneratedError      = "generator already ran and generated tasks"
+	KeyTooLargeToIndexError         = "key too large to index"
+	InvalidDivideInputError         = "$divide only supports numeric types"
+	FetchingTaskDataUnfinishedError = "fetching task data not finished"
 
 	// ContainerHealthDashboard is the name of the Splunk dashboard that displays
 	// charts relating to the health of container tasks.
@@ -557,6 +559,7 @@ const (
 	ContentLengthHeader = "Content-Length"
 	APIUserHeader       = "Api-User"
 	APIKeyHeader        = "Api-Key"
+	EnvironmentHeader   = "X-Evergreen-Environment"
 )
 
 const (

@@ -37,8 +37,8 @@ func MoveIssueToSuspectedIssue(ctx context.Context, taskId string, taskExecution
 	if err != nil {
 		return errors.Wrapf(err, "finding and modifying task annotation for execution %d of task '%s'", taskExecution, taskId)
 	}
-	if annotation != nil && len(annotation.Issues) == 0 {
-		return UnsetHasAnnotations(ctx, taskId, taskExecution)
+	if len(annotation.Issues) == 0 {
+		return UpdateHasAnnotations(ctx, taskId, taskExecution, false)
 	}
 	return nil
 }
@@ -60,7 +60,7 @@ func MoveSuspectedIssueToIssue(ctx context.Context, taskId string, taskExecution
 	); err != nil {
 		return err
 	}
-	return SetHasAnnotations(ctx, taskId, taskExecution)
+	return UpdateHasAnnotations(ctx, taskId, taskExecution, true)
 }
 
 // AddIssueToAnnotation adds an issue onto an existing annotation and marks its associated task document
@@ -80,7 +80,7 @@ func AddIssueToAnnotation(ctx context.Context, taskId string, execution int, iss
 	); err != nil {
 		return errors.Wrapf(err, "adding task annotation issue for task '%s'", taskId)
 	}
-	return SetHasAnnotations(ctx, taskId, execution)
+	return UpdateHasAnnotations(ctx, taskId, execution, true)
 }
 
 // RemoveIssueFromAnnotation removes an issue from an existing annotation, and unsets its
@@ -100,8 +100,8 @@ func RemoveIssueFromAnnotation(ctx context.Context, taskId string, execution int
 	if err != nil {
 		return errors.Wrapf(err, "finding and removing issue for task annotation for execution %d of task '%s'", execution, taskId)
 	}
-	if annotation != nil && len(annotation.Issues) == 0 {
-		return UnsetHasAnnotations(ctx, taskId, execution)
+	if len(annotation.Issues) == 0 {
+		return UpdateHasAnnotations(ctx, taskId, execution, false)
 	}
 	return nil
 }
@@ -153,9 +153,12 @@ func UpsertAnnotation(ctx context.Context, a *annotations.TaskAnnotation, userDi
 	); err != nil {
 		return errors.Wrapf(err, "adding task annotation for task '%s'", a.TaskId)
 	}
-	if a.Issues != nil && len(a.Issues) > 0 {
-		return SetHasAnnotations(ctx, a.TaskId, a.TaskExecution)
+
+	if a.Issues != nil {
+		hasAnnotations := len(a.Issues) > 0
+		return UpdateHasAnnotations(ctx, a.TaskId, a.TaskExecution, hasAnnotations)
 	}
+
 	return nil
 }
 
@@ -196,8 +199,11 @@ func PatchAnnotation(ctx context.Context, a *annotations.TaskAnnotation, userDis
 	); err != nil {
 		return errors.Wrapf(err, "updating task annotation for '%s'", a.TaskId)
 	}
-	if a.Issues != nil && len(a.Issues) > 0 {
-		return SetHasAnnotations(ctx, a.TaskId, a.TaskExecution)
+
+	if a.Issues != nil {
+		hasAnnotations := len(a.Issues) > 0
+		return UpdateHasAnnotations(ctx, a.TaskId, a.TaskExecution, hasAnnotations)
 	}
+
 	return nil
 }

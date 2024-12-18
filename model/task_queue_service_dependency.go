@@ -484,7 +484,13 @@ func (d *basicCachedDAGDispatcherImpl) tryMarkNextTaskGroupTaskDispatched(taskGr
 		// next is a *TaskQueueItem, sourced for d.taskGroups (map[string]schedulableUnit) tasks' field, which in turn is a []TaskQueueItem.
 		// taskGroupTask is a *TaskQueueItem sourced from d.nodeItemMap, which is a map[node.ID()]*TaskQueueItem.
 		node := d.getNodeByItemID(next.Id)
+		if node == nil {
+			return nil
+		}
 		taskGroupTask := d.getItemByNodeID(node.ID())
+		if taskGroupTask == nil {
+			return nil
+		}
 		taskGroupTask.IsDispatched = true
 		return next
 	}
@@ -507,14 +513,6 @@ func (d *basicCachedDAGDispatcherImpl) getTaskGroup(taskGroupID string) (schedul
 			hasDispatchableTask = true
 		}
 	}
-	grip.DebugWhen(!hasDispatchableTask, message.Fields{
-		"investigation": "DEVPROD-12086",
-		"message":       "group has no ready tasks, skipping",
-		"group":         taskGroupUnit.group,
-		"variant":       taskGroupUnit.variant,
-		"project":       taskGroupUnit.project,
-		"version":       taskGroupUnit.version,
-	})
 	return taskGroupUnit, true, hasDispatchableTask
 }
 
@@ -595,6 +593,9 @@ func getMaxConcurrentLargeParserProjTasks(settings *evergreen.Settings) int {
 }
 
 func (d *basicCachedDAGDispatcherImpl) nextTaskGroupTask(unit schedulableUnit) *TaskQueueItem {
+	if len(d.taskGroups[unit.id].tasks) != len(unit.tasks) {
+		return nil
+	}
 	for i, nextTaskQueueItem := range unit.tasks {
 		// Dispatch this task if all of the following are true:
 		// (a) it's not marked as dispatched in the in-memory queue.

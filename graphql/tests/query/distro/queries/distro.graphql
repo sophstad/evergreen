@@ -8,6 +8,7 @@ query {
         numProcesses
       }
     }
+    execUser
     name
     plannerSettings {
       mainlineTimeInQueueFactor
@@ -15,5 +16,6 @@ query {
     provider
     providerSettingsList
     user
+    singleTaskDistro
   }
 }

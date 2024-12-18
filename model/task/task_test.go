@@ -1797,7 +1797,7 @@ func TestAddDependency(t *testing.T) {
 			require.NotZero(t, updated)
 			require.Len(t, updated.DependsOn, len(depTaskIds))
 			assert.True(t, updated.DependsOn[0].Unattainable)
-			assert.Equal(t, evergreen.TaskStatusBlocked, updated.DisplayStatus)
+			assert.Equal(t, evergreen.TaskStatusBlocked, updated.DisplayStatusCache)
 		},
 		"AddsDependencyForSameTaskButDifferentStatus": func(t *testing.T, tsk *Task) {
 			assert.NoError(t, tsk.AddDependency(ctx, Dependency{
@@ -1835,7 +1835,7 @@ func TestAddDependency(t *testing.T) {
 			for _, d := range updated.DependsOn {
 				assert.NotEqual(t, d.TaskId, depTaskIds[2].TaskId)
 			}
-			assert.Equal(t, evergreen.TaskWillRun, updated.DisplayStatus)
+			assert.Equal(t, evergreen.TaskWillRun, updated.DisplayStatusCache)
 		},
 	} {
 		t.Run(tName, func(t *testing.T) {
@@ -3865,6 +3865,7 @@ func TestAbortVersionTasks(t *testing.T) {
 	require.NotNil(t, otherExecTask)
 	assert.True(t, otherExecTask.Aborted)
 	assert.NotEmpty(t, otherExecTask.AbortInfo.TaskID)
+	assert.Equal(t, evergreen.TaskAborted, otherExecTask.DisplayStatusCache)
 }
 
 func TestArchive(t *testing.T) {
@@ -3885,7 +3886,7 @@ func TestArchive(t *testing.T) {
 		assert.Zero(t, dbTask.AbortInfo)
 	}
 
-	checkEventLogHostTaskExecutions := func(t *testing.T, hostID, oldTaskID string, execution int) {
+	checkEventLogHostTaskExecutions := func(t *testing.T, hostID, oldTaskID string, _ int) {
 		dbTask, err := FindOneOldId(oldTaskID)
 		require.NoError(t, err)
 		require.NotZero(t, dbTask)
@@ -4018,7 +4019,7 @@ func TestArchiveFailedOnly(t *testing.T) {
 		assert.Nil(t, nextExecution)
 	}
 
-	checkEventLogHostTaskExecutions := func(t *testing.T, hostID, oldTaskID string, execution int) {
+	checkEventLogHostTaskExecutions := func(t *testing.T, hostID, oldTaskID string, _ int) {
 		dbTask, err := FindOneOldId(oldTaskID)
 		require.NoError(t, err)
 		require.NotZero(t, dbTask)

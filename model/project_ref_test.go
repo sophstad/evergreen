@@ -1076,7 +1076,8 @@ func checkAndSetProjectVarsSynced(t *testing.T, projRef *ProjectRef, isRepoRef b
 // project vars all include the project ID as a prefix.
 func checkParametersNamespacedByProject(t *testing.T, vars ProjectVars) {
 	projectID := vars.Id
-	commonAndProjectIDPrefix := fmt.Sprintf("/%s/%s/", strings.TrimSuffix(strings.TrimPrefix(evergreen.GetEnvironment().Settings().Providers.AWS.ParameterStore.Prefix, "/"), "/"), projectID)
+
+	commonAndProjectIDPrefix := fmt.Sprintf("/%s/%s/", strings.TrimSuffix(strings.TrimPrefix(evergreen.GetEnvironment().Settings().ParameterStore.Prefix, "/"), "/"), GetVarsParameterPath(projectID))
 	for _, pm := range vars.Parameters {
 		assert.True(t, strings.HasPrefix(pm.ParameterName, commonAndProjectIDPrefix), "parameter name '%s' should have standard prefix '%s'", pm.ParameterName, commonAndProjectIDPrefix)
 	}
@@ -1460,7 +1461,7 @@ func TestDefaultRepoBySection(t *testing.T) {
 				AppID:      9999,
 				PrivateKey: []byte("repo-secret"),
 			}
-			err = githubapp.UpsertGithubAppAuth(&auth)
+			err = GitHubAppAuthUpsert(&auth)
 			assert.NoError(t, err)
 			assert.NoError(t, DefaultSectionToRepo(id, ProjectPageGithubAppSettingsSection, "me"))
 			pRefFromDb, err = FindBranchProjectRef(id)
@@ -1534,6 +1535,14 @@ func TestDefaultRepoBySection(t *testing.T) {
 				ParameterStoreEnabled: true,
 			}
 			assert.NoError(t, pRef.Insert())
+
+			repoRef := RepoRef{
+				ProjectRef: ProjectRef{
+					Id:                    pRef.RepoRefId,
+					ParameterStoreEnabled: true,
+				},
+			}
+			assert.NoError(t, repoRef.Upsert())
 
 			pVars := ProjectVars{
 				Id:          pRef.Id,
@@ -1786,13 +1795,13 @@ func TestSetGithubAppCredentials(t *testing.T) {
 	samplePrivateKey := []byte("private_key")
 	for name, test := range map[string]func(t *testing.T, p *ProjectRef){
 		"NoCredentialsWhenNoneExist": func(t *testing.T, p *ProjectRef) {
-			app, err := githubapp.FindOneGithubAppAuth(p.Id)
+			app, err := GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Nil(t, app)
 		},
 		"CredentialsCanBeSet": func(t *testing.T, p *ProjectRef) {
 			require.NoError(t, p.SetGithubAppCredentials(sampleAppId, samplePrivateKey))
-			app, err := githubapp.FindOneGithubAppAuth(p.Id)
+			app, err := GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Equal(t, sampleAppId, app.AppID)
 			assert.Equal(t, samplePrivateKey, app.PrivateKey)
@@ -1800,28 +1809,28 @@ func TestSetGithubAppCredentials(t *testing.T) {
 		"CredentialsCanBeRemovedByEmptyAppIDAndEmptyPrivateKey": func(t *testing.T, p *ProjectRef) {
 			// Add credentials.
 			require.NoError(t, p.SetGithubAppCredentials(sampleAppId, samplePrivateKey))
-			app, err := githubapp.FindOneGithubAppAuth(p.Id)
+			app, err := GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Equal(t, sampleAppId, app.AppID)
 			assert.Equal(t, samplePrivateKey, app.PrivateKey)
 
 			// Remove credentials.
 			require.NoError(t, p.SetGithubAppCredentials(0, []byte("")))
-			app, err = githubapp.FindOneGithubAppAuth(p.Id)
+			app, err = GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Nil(t, app)
 		},
 		"CredentialsCanBeRemovedByEmptyAppIDAndNilPrivateKey": func(t *testing.T, p *ProjectRef) {
 			// Add credentials.
 			require.NoError(t, p.SetGithubAppCredentials(sampleAppId, samplePrivateKey))
-			app, err := githubapp.FindOneGithubAppAuth(p.Id)
+			app, err := GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Equal(t, sampleAppId, app.AppID)
 			assert.Equal(t, samplePrivateKey, app.PrivateKey)
 
 			// Remove credentials.
 			require.NoError(t, p.SetGithubAppCredentials(0, nil))
-			app, err = githubapp.FindOneGithubAppAuth(p.Id)
+			app, err = GitHubAppAuthFindOne(p.Id)
 			require.NoError(t, err)
 			assert.Nil(t, app)
 		},
@@ -1859,7 +1868,8 @@ func TestSetGithubAppCredentials(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, db.ClearCollections(ProjectRefCollection, githubapp.GitHubAppAuthCollection))
 			p := &ProjectRef{
-				Id: "id1",
+				Id:                    "id1",
+				ParameterStoreEnabled: true,
 			}
 			require.NoError(t, p.Insert())
 			test(t, p)
