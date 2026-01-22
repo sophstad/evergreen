@@ -64,3 +64,8 @@ requireAdmin is used to restrict certain actions to admins.
 """
 
 directive @requireAdmin on FIELD_DEFINITION
+
+"""
+defer is used to defer the execution of a field or fragment.
+"""
+directive @defer(if: Boolean = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT

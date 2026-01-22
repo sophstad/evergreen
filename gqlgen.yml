@@ -13,6 +13,9 @@ resolver:
   layout: follow-schema
   dir: graphql
   filename_template: "{name}_resolver.go"
+directives:
+  defer:
+    skip_runtime: true
 models:
   AdminSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAdminSettings

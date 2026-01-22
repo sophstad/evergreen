@@ -99,6 +99,21 @@ func NewUIServer(env evergreen.Environment, queue amboy.Queue, home string) (*UI
 	return uis, nil
 }
 
+// conditionallyCompressGraphQL wraps a GraphQL handler with compression,
+// but skips compression for multipart/mixed responses (used by @defer directive).
+// This allows streaming responses for @defer while maintaining compression for regular queries.
+func (uis *UIServer) conditionallyCompressGraphQL(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// "Accepts: multipart/mixed" indicates @defer usage
+		acceptHeader := r.Header.Get("Accept")
+		if strings.Contains(acceptHeader, "multipart/mixed") {
+			handler(w, r)
+		} else {
+			handlers.CompressHandler(http.HandlerFunc(handler)).ServeHTTP(w, r)
+		}
+	}
+}
+
 // LoggedError logs the given error and writes an HTTP response with its details formatted
 // as JSON if the request headers indicate that it's acceptable (or plaintext otherwise).
 func (uis *UIServer) LoggedError(w http.ResponseWriter, r *http.Request, code int, err error) {
@@ -174,9 +189,7 @@ func (uis *UIServer) GetServiceApp() *gimlet.APIApp {
 	app.AddRoute("/graphql").Wrap(allowsCORS, needsLogin).Handler(playground.ApolloSandboxHandler("GraphQL playground", "/graphql/query")).Get()
 	app.AddRoute("/graphql/query").
 		Wrap(allowsCORS, needsLoginNoRedirect).
-		Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handlers.CompressHandler(http.HandlerFunc(graphql.Handler(uis.Settings.Api.URL, true))).ServeHTTP(w, r)
-		})).
+		Handler(http.HandlerFunc(uis.conditionallyCompressGraphQL(graphql.Handler(uis.Settings.Api.URL, true)))).
 		Post().Get()
 
 	// MCP-only GraphQL (queries only, no mutations)

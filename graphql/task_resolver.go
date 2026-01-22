@@ -388,30 +388,32 @@ func (r *taskResolver) FailedTestCount(ctx context.Context, obj *restModel.APITa
 
 // Files is the resolver for the files field.
 func (r *taskResolver) Files(ctx context.Context, obj *restModel.APITask) (*TaskFiles, error) {
-	emptyTaskFiles := TaskFiles{
-		FileCount:    0,
-		GroupedFiles: []*GroupedFiles{},
-	}
+	// For @defer support, always use a background context.
+	// gqlgen cancels the request context after sending the initial response,
+	// which breaks database calls in deferred resolvers.
+	// See: https://github.com/99designs/gqlgen/issues/2771
+	filesCtx := context.Background()
+
 	groupedFilesList := []*GroupedFiles{}
 	fileCount := 0
 
 	if obj.DisplayOnly {
-		execTasks, err := task.Find(ctx, task.ByIds(utility.FromStringPtrSlice(obj.ExecutionTasks)))
+		execTasks, err := task.Find(filesCtx, task.ByIds(utility.FromStringPtrSlice(obj.ExecutionTasks)))
 		if err != nil {
-			return &emptyTaskFiles, ResourceNotFound.Send(ctx, err.Error())
+			return nil, ResourceNotFound.Send(filesCtx, err.Error())
 		}
 		for _, execTask := range execTasks {
-			groupedFiles, err := getGroupedFiles(ctx, execTask.DisplayName, execTask.Id, obj.Execution)
+			groupedFiles, err := getGroupedFiles(filesCtx, execTask.DisplayName, execTask.Id, obj.Execution)
 			if err != nil {
-				return &emptyTaskFiles, err
+				return nil, err
 			}
 			fileCount += len(groupedFiles.Files)
 			groupedFilesList = append(groupedFilesList, groupedFiles)
 		}
 	} else {
-		groupedFiles, err := getGroupedFiles(ctx, utility.FromStringPtr(obj.DisplayName), utility.FromStringPtr(obj.Id), obj.Execution)
+		groupedFiles, err := getGroupedFiles(filesCtx, utility.FromStringPtr(obj.DisplayName), utility.FromStringPtr(obj.Id), obj.Execution)
 		if err != nil {
-			return &emptyTaskFiles, err
+			return nil, err
 		}
 		fileCount += len(groupedFiles.Files)
 		groupedFilesList = append(groupedFilesList, groupedFiles)

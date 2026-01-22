@@ -62110,9 +62110,9 @@ func (ec *executionContext) _Task_files(ctx context.Context, field graphql.Colle
 			return ec.resolvers.Task().Files(ctx, obj)
 		},
 		nil,
-		ec.marshalNTaskFiles2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFiles,
+		ec.marshalOTaskFiles2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFiles,
 		true,
-		true,
+		false,
 	)
 }
 
@@ -101694,16 +101694,13 @@ func (ec *executionContext) _Task(ctx context.Context, sel ast.SelectionSet, obj
 		case "files":
 			field := field
 
-			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
 				defer func() {
 					if r := recover(); r != nil {
 						ec.Error(ctx, ec.Recover(ctx, r))
 					}
 				}()
 				res = ec._Task_files(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&fs.Invalids, 1)
-				}
 				return res
 			}
 
@@ -111998,20 +111995,6 @@ func (ec *executionContext) marshalNTaskEventLogEntry2ᚖgithubᚗcomᚋevergree
 	return ec._TaskEventLogEntry(ctx, sel, v)
 }
 
-func (ec *executionContext) marshalNTaskFiles2githubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFiles(ctx context.Context, sel ast.SelectionSet, v TaskFiles) graphql.Marshaler {
-	return ec._TaskFiles(ctx, sel, &v)
-}
-
-func (ec *executionContext) marshalNTaskFiles2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFiles(ctx context.Context, sel ast.SelectionSet, v *TaskFiles) graphql.Marshaler {
-	if v == nil {
-		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
-			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
-		}
-		return graphql.Null
-	}
-	return ec._TaskFiles(ctx, sel, v)
-}
-
 func (ec *executionContext) unmarshalNTaskFilterOptions2githubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFilterOptions(ctx context.Context, v any) (TaskFilterOptions, error) {
 	res, err := ec.unmarshalInputTaskFilterOptions(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -116601,6 +116584,13 @@ func (ec *executionContext) unmarshalOTaskCountOptions2ᚖgithubᚗcomᚋevergre
 
 func (ec *executionContext) marshalOTaskEndDetail2githubᚗcomᚋevergreenᚑciᚋevergreenᚋrestᚋmodelᚐApiTaskEndDetail(ctx context.Context, sel ast.SelectionSet, v model.ApiTaskEndDetail) graphql.Marshaler {
 	return ec._TaskEndDetail(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalOTaskFiles2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐTaskFiles(ctx context.Context, sel ast.SelectionSet, v *TaskFiles) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._TaskFiles(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalOTaskInfo2githubᚗcomᚋevergreenᚑciᚋevergreenᚋrestᚋmodelᚐTaskInfo(ctx context.Context, sel ast.SelectionSet, v model.TaskInfo) graphql.Marshaler {

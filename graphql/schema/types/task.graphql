@@ -93,7 +93,7 @@ type Task {
   executionTasksFull: [Task!]
   expectedDuration: Duration
   failedTestCount: Int!
-  files: TaskFiles!
+  files: TaskFiles
   finishTime: Time
   generatedBy: String
   generatedByName: String

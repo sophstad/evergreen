@@ -9,6 +9,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/transport"
 	"github.com/evergreen-ci/gimlet"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
@@ -19,7 +20,7 @@ import (
 
 // Handler returns a gimlet http handler func used as the gql route handler
 func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *http.Request) {
-	srv := handler.NewDefaultServer(NewExecutableSchema(New(apiURL)))
+	srv := handler.New(NewExecutableSchema(New(apiURL)))
 
 	// Send OTEL traces for each request.
 	// Only create spans for resolved fields.
@@ -61,6 +62,12 @@ func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *
 		})
 		return errors.New("internal server error")
 	})
+
+	srv.AddTransport(transport.Options{})
+	srv.AddTransport(transport.GET{})
+	// MultipartMixed must come before POST to handle @defer requests
+	srv.AddTransport(transport.MultipartMixed{})
+	srv.AddTransport(transport.POST{})
 
 	srv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
 		fieldCtx := graphql.GetFieldContext(ctx)
