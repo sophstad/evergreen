@@ -38,6 +38,10 @@ type WaterfallBuild struct {
 	Tasks        []WaterfallTask `bson:"tasks" json:"tasks"`
 }
 
+type ActiveWaterfallVersion struct {
+	Version
+}
+
 type WaterfallBuildVariant struct {
 	Id          string           `bson:"_id" json:"_id"`
 	DisplayName string           `bson:"display_name" json:"display_name"`

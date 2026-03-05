@@ -1213,6 +1213,21 @@ func (r *queryResolver) Waterfall(ctx context.Context, options WaterfallOptions)
 			HasNextPage:            nextPageOrder > 0,
 			HasPrevPage:            prevPageOrder > 0,
 		},
+		Versions: func() []WaterfallVersion {
+			activeIdSet := make(map[string]bool, len(activeVersionIds))
+			for _, id := range activeVersionIds {
+				activeIdSet[id] = true
+			}
+			vers := make([]WaterfallVersion, len(allVersions))
+			for i := range allVersions {
+				if activeIdSet[allVersions[i].Id] {
+					vers[i] = &model.ActiveWaterfallVersion{Version: allVersions[i]}
+				} else {
+					vers[i] = allVersions[i]
+				}
+			}
+			return vers
+		}(),
 	}
 
 	return results, nil

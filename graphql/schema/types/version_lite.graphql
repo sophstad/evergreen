@@ -1,0 +1,12 @@
+type VersionLite {
+  id: String!
+  activated: Boolean
+  createTime: Time!
+  errors: [String!]!
+  gitTags: [GitTag!]
+  message: String!
+  order: Int!
+  requester: String!
+  revision: String!
+  user: User!
+}

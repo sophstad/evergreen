@@ -2,6 +2,7 @@
 #
 # Refer to https://gqlgen.com/config/
 # for detailed .gqlgen.yml documentation.
+omit_interface_checks: true
 omit_gqlgen_file_notice: true
 schema:
   - graphql/schema/**/*.graphql
@@ -14,6 +15,13 @@ resolver:
   dir: graphql
   filename_template: "{name}_resolver.go"
 models:
+  ActiveVersion:
+    model: github.com/evergreen-ci/evergreen/model.ActiveWaterfallVersion
+    fields:
+      order:
+        fieldName: "RevisionOrderNumber"
+      waterfallBuilds:
+        resolver: true
   AdminSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAdminSettings
     fields:
@@ -977,6 +985,11 @@ models:
     fields:
       status:
         resolver: true
+  VersionLite:
+    model: github.com/evergreen-ci/evergreen/model.Version
+    fields:
+      order:
+        fieldName: "RevisionOrderNumber"
   VersionToRestart:
     model: github.com/evergreen-ci/evergreen/model.VersionToRestart
   Volume:

@@ -35,16 +35,18 @@ type WaterfallBuild {
   tasks: [WaterfallTask!]!
 }
 
-type WaterfallBuildVariant {
+type ActiveVersion {
   id: String!
-  builds: [WaterfallBuild!]!
-  displayName: String!
-  version: String!
-}
-
-type WaterfallVersion {
-  inactiveVersions: [Version!]
-  version: Version
+  activated: Boolean
+  createTime: Time!
+  errors: [String!]!
+  gitTags: [GitTag!]
+  message: String!
+  order: Int!
+  requester: String!
+  revision: String!
+  user: User!
+  waterfallBuilds: [WaterfallBuild!]
 }
 
 type WaterfallPagination {
@@ -56,7 +58,10 @@ type WaterfallPagination {
   prevPageOrder: Int!
 }
 
+union WaterfallVersion = ActiveVersion | VersionLite
+
 type Waterfall {
   flattenedVersions: [Version!]!
+  versions: [WaterfallVersion!]!
   pagination: WaterfallPagination!
 }

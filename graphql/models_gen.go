@@ -15,6 +15,9 @@ import (
 	"github.com/evergreen-ci/evergreen/thirdparty"
 )
 
+type WaterfallVersion interface {
+}
+
 type AbortInfo struct {
 	BuildVariantDisplayName string `json:"buildVariantDisplayName"`
 	NewVersion              string `json:"newVersion"`
@@ -751,6 +754,7 @@ type VolumeHost struct {
 
 type Waterfall struct {
 	FlattenedVersions []*model.APIVersion  `json:"flattenedVersions"`
+	Versions          []WaterfallVersion   `json:"versions"`
 	Pagination        *WaterfallPagination `json:"pagination"`
 }
 
@@ -781,11 +785,6 @@ type WaterfallPagination struct {
 	MostRecentVersionOrder int      `json:"mostRecentVersionOrder"`
 	NextPageOrder          int      `json:"nextPageOrder"`
 	PrevPageOrder          int      `json:"prevPageOrder"`
-}
-
-type WaterfallVersion struct {
-	InactiveVersions []*model.APIVersion `json:"inactiveVersions,omitempty"`
-	Version          *model.APIVersion   `json:"version,omitempty"`
 }
 
 type AccessLevel string
