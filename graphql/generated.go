@@ -2231,6 +2231,7 @@ type ComplexityRoot struct {
 		BuildVariantStats        func(childComplexity int, options BuildVariantOptions) int
 		BuildVariants            func(childComplexity int, options BuildVariantOptions) int
 		ChildVersions            func(childComplexity int) int
+		Cost                     func(childComplexity int) int
 		CreateTime               func(childComplexity int) int
 		Errors                   func(childComplexity int) int
 		ExternalLinksForMetadata func(childComplexity int) int
@@ -2695,6 +2696,7 @@ type VersionResolver interface {
 	Manifest(ctx context.Context, obj *model.APIVersion) (*Manifest, error)
 
 	Patch(ctx context.Context, obj *model.APIVersion) (*model.APIPatch, error)
+
 	PreviousVersion(ctx context.Context, obj *model.APIVersion) (*model.APIVersion, error)
 
 	ProjectMetadata(ctx context.Context, obj *model.APIVersion) (*model.APIProjectRef, error)
@@ -11962,6 +11964,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Version.ChildVersions(childComplexity), true
+	case "Version.cost":
+		if e.complexity.Version.Cost == nil {
+			break
+		}
+
+		return e.complexity.Version.Cost(childComplexity), true
 	case "Version.createTime":
 		if e.complexity.Version.CreateTime == nil {
 			break
@@ -34685,6 +34693,8 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_rolledUpVersions(
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -34711,6 +34721,8 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_rolledUpVersions(
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -34747,8 +34759,6 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_rolledUpVersions(
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -34800,6 +34810,8 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_version(_ context
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -34826,6 +34838,8 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_version(_ context
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -34862,8 +34876,6 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_version(_ context
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -40602,6 +40614,8 @@ func (ec *executionContext) fieldContext_Mutation_restartVersions(ctx context.Co
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -40628,6 +40642,8 @@ func (ec *executionContext) fieldContext_Mutation_restartVersions(ctx context.Co
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -40664,8 +40680,6 @@ func (ec *executionContext) fieldContext_Mutation_restartVersions(ctx context.Co
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -43919,6 +43933,8 @@ func (ec *executionContext) fieldContext_Patch_versionFull(_ context.Context, fi
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -43945,6 +43961,8 @@ func (ec *executionContext) fieldContext_Patch_versionFull(_ context.Context, fi
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -43981,8 +43999,6 @@ func (ec *executionContext) fieldContext_Patch_versionFull(_ context.Context, fi
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -51804,6 +51820,8 @@ func (ec *executionContext) fieldContext_Query_version(ctx context.Context, fiel
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -51830,6 +51848,8 @@ func (ec *executionContext) fieldContext_Query_version(ctx context.Context, fiel
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -51866,8 +51886,6 @@ func (ec *executionContext) fieldContext_Query_version(ctx context.Context, fiel
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -63199,6 +63217,8 @@ func (ec *executionContext) fieldContext_Task_versionMetadata(_ context.Context,
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -63225,6 +63245,8 @@ func (ec *executionContext) fieldContext_Task_versionMetadata(_ context.Context,
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -63261,8 +63283,6 @@ func (ec *executionContext) fieldContext_Task_versionMetadata(_ context.Context,
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -68484,6 +68504,8 @@ func (ec *executionContext) fieldContext_UpstreamProject_version(_ context.Conte
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -68510,6 +68532,8 @@ func (ec *executionContext) fieldContext_UpstreamProject_version(_ context.Conte
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -68546,8 +68570,6 @@ func (ec *executionContext) fieldContext_UpstreamProject_version(_ context.Conte
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -69767,6 +69789,8 @@ func (ec *executionContext) fieldContext_Version_baseVersion(_ context.Context, 
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -69793,6 +69817,8 @@ func (ec *executionContext) fieldContext_Version_baseVersion(_ context.Context, 
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -69829,8 +69855,6 @@ func (ec *executionContext) fieldContext_Version_baseVersion(_ context.Context, 
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -70009,6 +70033,8 @@ func (ec *executionContext) fieldContext_Version_childVersions(_ context.Context
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -70035,6 +70061,8 @@ func (ec *executionContext) fieldContext_Version_childVersions(_ context.Context
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -70071,10 +70099,47 @@ func (ec *executionContext) fieldContext_Version_childVersions(_ context.Context
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Version_cost(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Version_cost,
+		func(ctx context.Context) (any, error) {
+			return obj.Cost, nil
+		},
+		nil,
+		ec.marshalOCost2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Version_cost(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Version",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "onDemandEC2Cost":
+				return ec.fieldContext_Cost_onDemandEC2Cost(ctx, field)
+			case "adjustedEC2Cost":
+				return ec.fieldContext_Cost_adjustedEC2Cost(ctx, field)
+			case "s3ArtifactPutCost":
+				return ec.fieldContext_Cost_s3ArtifactPutCost(ctx, field)
+			case "s3LogPutCost":
+				return ec.fieldContext_Cost_s3LogPutCost(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Cost", field.Name)
 		},
 	}
 	return fc, nil
@@ -70571,6 +70636,45 @@ func (ec *executionContext) fieldContext_Version_patch(_ context.Context, field 
 	return fc, nil
 }
 
+func (ec *executionContext) _Version_predictedCost(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Version_predictedCost,
+		func(ctx context.Context) (any, error) {
+			return obj.PredictedCost, nil
+		},
+		nil,
+		ec.marshalOCost2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Version_predictedCost(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Version",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "onDemandEC2Cost":
+				return ec.fieldContext_Cost_onDemandEC2Cost(ctx, field)
+			case "adjustedEC2Cost":
+				return ec.fieldContext_Cost_adjustedEC2Cost(ctx, field)
+			case "s3ArtifactPutCost":
+				return ec.fieldContext_Cost_s3ArtifactPutCost(ctx, field)
+			case "s3LogPutCost":
+				return ec.fieldContext_Cost_s3LogPutCost(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Cost", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Version_previousVersion(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -70615,6 +70719,8 @@ func (ec *executionContext) fieldContext_Version_previousVersion(_ context.Conte
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -70641,6 +70747,8 @@ func (ec *executionContext) fieldContext_Version_previousVersion(_ context.Conte
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -70677,8 +70785,6 @@ func (ec *executionContext) fieldContext_Version_previousVersion(_ context.Conte
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -71392,45 +71498,6 @@ func (ec *executionContext) fieldContext_Version_waterfallBuilds(_ context.Conte
 				return ec.fieldContext_WaterfallBuild_tasks(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type WaterfallBuild", field.Name)
-		},
-	}
-	return fc, nil
-}
-
-func (ec *executionContext) _Version_predictedCost(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
-	return graphql.ResolveField(
-		ctx,
-		ec.OperationContext,
-		field,
-		ec.fieldContext_Version_predictedCost,
-		func(ctx context.Context) (any, error) {
-			return obj.PredictedCost, nil
-		},
-		nil,
-		ec.marshalOCost2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost,
-		true,
-		false,
-	)
-}
-
-func (ec *executionContext) fieldContext_Version_predictedCost(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	fc = &graphql.FieldContext{
-		Object:     "Version",
-		Field:      field,
-		IsMethod:   false,
-		IsResolver: false,
-		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			switch field.Name {
-			case "onDemandEC2Cost":
-				return ec.fieldContext_Cost_onDemandEC2Cost(ctx, field)
-			case "adjustedEC2Cost":
-				return ec.fieldContext_Cost_adjustedEC2Cost(ctx, field)
-			case "s3ArtifactPutCost":
-				return ec.fieldContext_Cost_s3ArtifactPutCost(ctx, field)
-			case "s3LogPutCost":
-				return ec.fieldContext_Cost_s3LogPutCost(ctx, field)
-			}
-			return nil, fmt.Errorf("no field named %q was found under type Cost", field.Name)
 		},
 	}
 	return fc, nil
@@ -72228,6 +72295,8 @@ func (ec *executionContext) fieldContext_Waterfall_flattenedVersions(_ context.C
 				return ec.fieldContext_Version_buildVariantStats(ctx, field)
 			case "childVersions":
 				return ec.fieldContext_Version_childVersions(ctx, field)
+			case "cost":
+				return ec.fieldContext_Version_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_Version_createTime(ctx, field)
 			case "errors":
@@ -72254,6 +72323,8 @@ func (ec *executionContext) fieldContext_Waterfall_flattenedVersions(_ context.C
 				return ec.fieldContext_Version_parameters(ctx, field)
 			case "patch":
 				return ec.fieldContext_Version_patch(ctx, field)
+			case "predictedCost":
+				return ec.fieldContext_Version_predictedCost(ctx, field)
 			case "previousVersion":
 				return ec.fieldContext_Version_previousVersion(ctx, field)
 			case "project":
@@ -72290,8 +72361,6 @@ func (ec *executionContext) fieldContext_Waterfall_flattenedVersions(_ context.C
 				return ec.fieldContext_Version_warnings(ctx, field)
 			case "waterfallBuilds":
 				return ec.fieldContext_Version_waterfallBuilds(ctx, field)
-			case "predictedCost":
-				return ec.fieldContext_Version_predictedCost(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Version", field.Name)
 		},
@@ -103918,6 +103987,8 @@ func (ec *executionContext) _Version(ctx context.Context, sel ast.SelectionSet, 
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "cost":
+			out.Values[i] = ec._Version_cost(ctx, field, obj)
 		case "createTime":
 			out.Values[i] = ec._Version_createTime(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
@@ -104126,6 +104197,8 @@ func (ec *executionContext) _Version(ctx context.Context, sel ast.SelectionSet, 
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "predictedCost":
+			out.Values[i] = ec._Version_predictedCost(ctx, field, obj)
 		case "previousVersion":
 			field := field
 
@@ -104564,8 +104637,6 @@ func (ec *executionContext) _Version(ctx context.Context, sel ast.SelectionSet, 
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
-		case "predictedCost":
-			out.Values[i] = ec._Version_predictedCost(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
