@@ -4921,6 +4921,10 @@ func TestTaskCostIsZero(t *testing.T) {
 	assert.False(t, nonZeroBoth.IsZero())
 	nonZeroS3 := cost.Cost{S3ArtifactPutCost: 0.00005}
 	assert.False(t, nonZeroS3.IsZero())
+	nonZeroEBSThroughputOnDemand := cost.Cost{OnDemandEBSThroughputCost: 0.1}
+	assert.False(t, nonZeroEBSThroughputOnDemand.IsZero())
+	nonZeroEBSThroughputAdjusted := cost.Cost{AdjustedEBSThroughputCost: 0.1}
+	assert.False(t, nonZeroEBSThroughputAdjusted.IsZero())
 }
 
 func TestUpdateTaskCost(t *testing.T) {
@@ -4940,7 +4944,7 @@ func TestUpdateTaskCost(t *testing.T) {
 		assert.True(t, task.TaskCost.IsZero())
 	})
 
-	t.Run("DoesNotCalculateS3Cost", func(t *testing.T) {
+	t.Run("CalculatesS3PutCostFromArtifactUsage", func(t *testing.T) {
 		require.NoError(t, db.Clear(Collection))
 		task := Task{
 			Id:        "s3_cost",
@@ -4950,16 +4954,20 @@ func TestUpdateTaskCost(t *testing.T) {
 		require.NoError(t, task.Insert(ctx))
 
 		require.NoError(t, task.UpdateTaskCost(ctx))
-		assert.Equal(t, float64(0), task.TaskCost.S3ArtifactPutCost)
+		var costCfg evergreen.CostConfig
+		require.NoError(t, costCfg.Get(ctx))
+		expected := s3usage.CalculateS3PutCostWithConfig(1000, &costCfg)
+		assert.InDelta(t, expected, task.TaskCost.S3ArtifactPutCost, 1e-9)
 	})
 
-	t.Run("CalculatesOnlyEC2Cost", func(t *testing.T) {
+	t.Run("CalculatesEC2AndS3Costs", func(t *testing.T) {
 		require.NoError(t, db.ClearCollections(Collection, distro.Collection, evergreen.ConfigCollection))
 
 		costConfig := evergreen.CostConfig{
 			FinanceFormula:      0.6,
 			SavingsPlanDiscount: 0.5,
 			OnDemandDiscount:    0.04,
+			EBSCost:             evergreen.EBSCostConfig{EBSDiscount: 0},
 		}
 		require.NoError(t, costConfig.Set(ctx))
 
@@ -4983,7 +4991,8 @@ func TestUpdateTaskCost(t *testing.T) {
 		require.NoError(t, task.UpdateTaskCost(ctx))
 		assert.True(t, task.TaskCost.OnDemandEC2Cost > 0)
 		assert.True(t, task.TaskCost.AdjustedEC2Cost > 0)
-		assert.Equal(t, float64(0), task.TaskCost.S3ArtifactPutCost)
+		expectedS3 := s3usage.CalculateS3PutCostWithConfig(1000, &costConfig)
+		assert.InDelta(t, expectedS3, task.TaskCost.S3ArtifactPutCost, 1e-9)
 	})
 
 	t.Run("SkipsUpdateWhenNoCostsCalculated", func(t *testing.T) {
