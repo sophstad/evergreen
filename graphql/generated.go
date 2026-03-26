@@ -76,6 +76,7 @@ type ResolverRoot interface {
 	TicketFields() TicketFieldsResolver
 	User() UserResolver
 	Version() VersionResolver
+	VersionLite() VersionLiteResolver
 	Volume() VolumeResolver
 	AdminSettingsInput() AdminSettingsInputResolver
 	ContainerPoolInput() ContainerPoolInputResolver
@@ -1922,6 +1923,7 @@ type ComplexityRoot struct {
 		Tests                   func(childComplexity int, opts *TestFilterOptions) int
 		TimeTaken               func(childComplexity int) int
 		TotalTestCount          func(childComplexity int) int
+		Version                 func(childComplexity int) int
 		VersionMetadata         func(childComplexity int) int
 	}
 
@@ -2288,6 +2290,29 @@ type ComplexityRoot struct {
 		VersionTiming            func(childComplexity int) int
 		Warnings                 func(childComplexity int) int
 		WaterfallBuilds          func(childComplexity int) int
+	}
+
+	VersionLite struct {
+		Activated         func(childComplexity int) int
+		Branch            func(childComplexity int) int
+		Cost              func(childComplexity int) int
+		CreateTime        func(childComplexity int) int
+		Errors            func(childComplexity int) int
+		FinishTime        func(childComplexity int) int
+		Id                func(childComplexity int) int
+		Ignored           func(childComplexity int) int
+		Message           func(childComplexity int) int
+		Order             func(childComplexity int) int
+		Patch             func(childComplexity int) int
+		Project           func(childComplexity int) int
+		ProjectIdentifier func(childComplexity int) int
+		Repo              func(childComplexity int) int
+		Requester         func(childComplexity int) int
+		Revision          func(childComplexity int) int
+		StartTime         func(childComplexity int) int
+		UpstreamProject   func(childComplexity int) int
+		User              func(childComplexity int) int
+		Warnings          func(childComplexity int) int
 	}
 
 	VersionTasks struct {
@@ -2686,6 +2711,7 @@ type TaskResolver interface {
 	Tests(ctx context.Context, obj *model.APITask, opts *TestFilterOptions) (*TaskTestResult, error)
 
 	TotalTestCount(ctx context.Context, obj *model.APITask) (int, error)
+	Version(ctx context.Context, obj *model.APITask) (*model1.Version, error)
 	VersionMetadata(ctx context.Context, obj *model.APITask) (*model.APIVersion, error)
 }
 type TaskLogsResolver interface {
@@ -2740,6 +2766,15 @@ type VersionResolver interface {
 	VersionTiming(ctx context.Context, obj *model.APIVersion) (*VersionTiming, error)
 	Warnings(ctx context.Context, obj *model.APIVersion) ([]string, error)
 	WaterfallBuilds(ctx context.Context, obj *model.APIVersion) ([]*model1.WaterfallBuild, error)
+}
+type VersionLiteResolver interface {
+	Order(ctx context.Context, obj *model1.Version) (int, error)
+	Patch(ctx context.Context, obj *model1.Version) (*model.APIPatch, error)
+	Project(ctx context.Context, obj *model1.Version) (string, error)
+	ProjectIdentifier(ctx context.Context, obj *model1.Version) (string, error)
+
+	UpstreamProject(ctx context.Context, obj *model1.Version) (*UpstreamProject, error)
+	User(ctx context.Context, obj *model1.Version) (*model.APIDBUser, error)
 }
 type VolumeResolver interface {
 	Host(ctx context.Context, obj *model.APIVolume) (*model.APIHost, error)
@@ -10770,6 +10805,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Task.TotalTestCount(childComplexity), true
+	case "Task.version":
+		if e.complexity.Task.Version == nil {
+			break
+		}
+
+		return e.complexity.Task.Version(childComplexity), true
 	case "Task.versionMetadata":
 		if e.complexity.Task.VersionMetadata == nil {
 			break
@@ -12317,6 +12358,127 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.Version.WaterfallBuilds(childComplexity), true
 
+	case "VersionLite.activated":
+		if e.complexity.VersionLite.Activated == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Activated(childComplexity), true
+	case "VersionLite.branch":
+		if e.complexity.VersionLite.Branch == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Branch(childComplexity), true
+	case "VersionLite.cost":
+		if e.complexity.VersionLite.Cost == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Cost(childComplexity), true
+	case "VersionLite.createTime":
+		if e.complexity.VersionLite.CreateTime == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.CreateTime(childComplexity), true
+	case "VersionLite.errors":
+		if e.complexity.VersionLite.Errors == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Errors(childComplexity), true
+	case "VersionLite.finishTime":
+		if e.complexity.VersionLite.FinishTime == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.FinishTime(childComplexity), true
+	case "VersionLite.id":
+		if e.complexity.VersionLite.Id == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Id(childComplexity), true
+	case "VersionLite.ignored":
+		if e.complexity.VersionLite.Ignored == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Ignored(childComplexity), true
+	case "VersionLite.message":
+		if e.complexity.VersionLite.Message == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Message(childComplexity), true
+	case "VersionLite.order":
+		if e.complexity.VersionLite.Order == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Order(childComplexity), true
+	case "VersionLite.patch":
+		if e.complexity.VersionLite.Patch == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Patch(childComplexity), true
+	case "VersionLite.project":
+		if e.complexity.VersionLite.Project == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Project(childComplexity), true
+	case "VersionLite.projectIdentifier":
+		if e.complexity.VersionLite.ProjectIdentifier == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.ProjectIdentifier(childComplexity), true
+	case "VersionLite.repo":
+		if e.complexity.VersionLite.Repo == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Repo(childComplexity), true
+	case "VersionLite.requester":
+		if e.complexity.VersionLite.Requester == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Requester(childComplexity), true
+	case "VersionLite.revision":
+		if e.complexity.VersionLite.Revision == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Revision(childComplexity), true
+	case "VersionLite.startTime":
+		if e.complexity.VersionLite.StartTime == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.StartTime(childComplexity), true
+	case "VersionLite.upstreamProject":
+		if e.complexity.VersionLite.UpstreamProject == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.UpstreamProject(childComplexity), true
+	case "VersionLite.user":
+		if e.complexity.VersionLite.User == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.User(childComplexity), true
+	case "VersionLite.warnings":
+		if e.complexity.VersionLite.Warnings == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.Warnings(childComplexity), true
+
 	case "VersionTasks.count":
 		if e.complexity.VersionTasks.Count == nil {
 			break
@@ -12914,7 +13076,7 @@ func (ec *executionContext) introspectType(name string) (*introspection.Type, er
 	return introspection.WrapTypeFromDef(ec.Schema(), ec.Schema().Types[name]), nil
 }
 
-//go:embed "schema/directives.graphql" "schema/mutation.graphql" "schema/query.graphql" "schema/scalars.graphql" "schema/types/adminSettings/auth.graphql" "schema/types/adminSettings/background_processing.graphql" "schema/types/adminSettings/external_communications.graphql" "schema/types/adminSettings/okta_service.graphql" "schema/types/adminSettings/other.graphql" "schema/types/adminSettings/providers.graphql" "schema/types/adminSettings/runners.graphql" "schema/types/adminSettings/service_flags.graphql" "schema/types/adminSettings/web.graphql" "schema/types/annotation.graphql" "schema/types/config.graphql" "schema/types/distro.graphql" "schema/types/host.graphql" "schema/types/image.graphql" "schema/types/issue_link.graphql" "schema/types/logkeeper.graphql" "schema/types/mainline_commits.graphql" "schema/types/patch.graphql" "schema/types/permissions.graphql" "schema/types/project.graphql" "schema/types/project_settings.graphql" "schema/types/project_vars.graphql" "schema/types/repo_ref.graphql" "schema/types/repo_settings.graphql" "schema/types/spawn.graphql" "schema/types/subscriptions.graphql" "schema/types/task.graphql" "schema/types/task_history.graphql" "schema/types/task_logs.graphql" "schema/types/task_queue_item.graphql" "schema/types/ticket_fields.graphql" "schema/types/user.graphql" "schema/types/version.graphql" "schema/types/volume.graphql" "schema/types/waterfall.graphql"
+//go:embed "schema/directives.graphql" "schema/mutation.graphql" "schema/query.graphql" "schema/scalars.graphql" "schema/types/adminSettings/auth.graphql" "schema/types/adminSettings/background_processing.graphql" "schema/types/adminSettings/external_communications.graphql" "schema/types/adminSettings/okta_service.graphql" "schema/types/adminSettings/other.graphql" "schema/types/adminSettings/providers.graphql" "schema/types/adminSettings/runners.graphql" "schema/types/adminSettings/service_flags.graphql" "schema/types/adminSettings/web.graphql" "schema/types/annotation.graphql" "schema/types/config.graphql" "schema/types/distro.graphql" "schema/types/host.graphql" "schema/types/image.graphql" "schema/types/issue_link.graphql" "schema/types/logkeeper.graphql" "schema/types/mainline_commits.graphql" "schema/types/patch.graphql" "schema/types/permissions.graphql" "schema/types/project.graphql" "schema/types/project_settings.graphql" "schema/types/project_vars.graphql" "schema/types/repo_ref.graphql" "schema/types/repo_settings.graphql" "schema/types/spawn.graphql" "schema/types/subscriptions.graphql" "schema/types/task.graphql" "schema/types/task_history.graphql" "schema/types/task_logs.graphql" "schema/types/task_queue_item.graphql" "schema/types/ticket_fields.graphql" "schema/types/user.graphql" "schema/types/version-lite.graphql" "schema/types/version.graphql" "schema/types/volume.graphql" "schema/types/waterfall.graphql"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -12962,6 +13124,7 @@ var sources = []*ast.Source{
 	{Name: "schema/types/task_queue_item.graphql", Input: sourceData("schema/types/task_queue_item.graphql"), BuiltIn: false},
 	{Name: "schema/types/ticket_fields.graphql", Input: sourceData("schema/types/ticket_fields.graphql"), BuiltIn: false},
 	{Name: "schema/types/user.graphql", Input: sourceData("schema/types/user.graphql"), BuiltIn: false},
+	{Name: "schema/types/version-lite.graphql", Input: sourceData("schema/types/version-lite.graphql"), BuiltIn: false},
 	{Name: "schema/types/version.graphql", Input: sourceData("schema/types/version.graphql"), BuiltIn: false},
 	{Name: "schema/types/volume.graphql", Input: sourceData("schema/types/volume.graphql"), BuiltIn: false},
 	{Name: "schema/types/waterfall.graphql", Input: sourceData("schema/types/waterfall.graphql"), BuiltIn: false},
@@ -19981,6 +20144,8 @@ func (ec *executionContext) fieldContext_AdminTasksToRestartPayload_tasksToResta
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -28429,6 +28594,8 @@ func (ec *executionContext) fieldContext_GroupedBuildVariant_tasks(_ context.Con
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -31924,6 +32091,8 @@ func (ec *executionContext) fieldContext_Image_latestTask(_ context.Context, fie
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -34654,6 +34823,8 @@ func (ec *executionContext) fieldContext_LogkeeperBuild_task(_ context.Context, 
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -38626,6 +38797,8 @@ func (ec *executionContext) fieldContext_Mutation_abortTask(ctx context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -38845,6 +39018,8 @@ func (ec *executionContext) fieldContext_Mutation_overrideTaskDependencies(ctx c
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -39064,6 +39239,8 @@ func (ec *executionContext) fieldContext_Mutation_restartTask(ctx context.Contex
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -39283,6 +39460,8 @@ func (ec *executionContext) fieldContext_Mutation_scheduleTasks(ctx context.Cont
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -39502,6 +39681,8 @@ func (ec *executionContext) fieldContext_Mutation_setTaskPriority(ctx context.Co
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -39721,6 +39902,8 @@ func (ec *executionContext) fieldContext_Mutation_setTaskPriorities(ctx context.
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -39940,6 +40123,8 @@ func (ec *executionContext) fieldContext_Mutation_unscheduleTask(ctx context.Con
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -41184,6 +41369,8 @@ func (ec *executionContext) fieldContext_Mutation_scheduleUndispatchedBaseTasks(
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -51356,6 +51543,8 @@ func (ec *executionContext) fieldContext_Query_task(ctx context.Context, field g
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -51575,6 +51764,8 @@ func (ec *executionContext) fieldContext_Query_taskAllExecutions(ctx context.Con
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -59927,6 +60118,8 @@ func (ec *executionContext) fieldContext_Task_baseTask(_ context.Context, field 
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -60721,6 +60914,8 @@ func (ec *executionContext) fieldContext_Task_displayTask(_ context.Context, fie
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -61116,6 +61311,8 @@ func (ec *executionContext) fieldContext_Task_executionTasksFull(_ context.Conte
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -61532,6 +61729,8 @@ func (ec *executionContext) fieldContext_Task_generator(_ context.Context, field
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -61981,6 +62180,8 @@ func (ec *executionContext) fieldContext_Task_nextTask(_ context.Context, field 
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -62188,6 +62389,8 @@ func (ec *executionContext) fieldContext_Task_nextTaskCompleted(_ context.Contex
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -62395,6 +62598,8 @@ func (ec *executionContext) fieldContext_Task_nextTaskFailing(_ context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -62602,6 +62807,8 @@ func (ec *executionContext) fieldContext_Task_nextTaskPassing(_ context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -62966,6 +63173,8 @@ func (ec *executionContext) fieldContext_Task_prevTask(_ context.Context, field 
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -63173,6 +63382,8 @@ func (ec *executionContext) fieldContext_Task_prevTaskCompleted(_ context.Contex
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -63380,6 +63591,8 @@ func (ec *executionContext) fieldContext_Task_prevTaskFailing(_ context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -63587,6 +63800,8 @@ func (ec *executionContext) fieldContext_Task_prevTaskPassing(_ context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -64442,6 +64657,77 @@ func (ec *executionContext) fieldContext_Task_totalTestCount(_ context.Context, 
 		IsResolver: true,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Task_version(ctx context.Context, field graphql.CollectedField, obj *model.APITask) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Task_version,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.Task().Version(ctx, obj)
+		},
+		nil,
+		ec.marshalNVersionLite2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚐVersion,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Task_version(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Task",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_VersionLite_id(ctx, field)
+			case "activated":
+				return ec.fieldContext_VersionLite_activated(ctx, field)
+			case "branch":
+				return ec.fieldContext_VersionLite_branch(ctx, field)
+			case "cost":
+				return ec.fieldContext_VersionLite_cost(ctx, field)
+			case "createTime":
+				return ec.fieldContext_VersionLite_createTime(ctx, field)
+			case "errors":
+				return ec.fieldContext_VersionLite_errors(ctx, field)
+			case "finishTime":
+				return ec.fieldContext_VersionLite_finishTime(ctx, field)
+			case "ignored":
+				return ec.fieldContext_VersionLite_ignored(ctx, field)
+			case "message":
+				return ec.fieldContext_VersionLite_message(ctx, field)
+			case "order":
+				return ec.fieldContext_VersionLite_order(ctx, field)
+			case "patch":
+				return ec.fieldContext_VersionLite_patch(ctx, field)
+			case "project":
+				return ec.fieldContext_VersionLite_project(ctx, field)
+			case "projectIdentifier":
+				return ec.fieldContext_VersionLite_projectIdentifier(ctx, field)
+			case "repo":
+				return ec.fieldContext_VersionLite_repo(ctx, field)
+			case "requester":
+				return ec.fieldContext_VersionLite_requester(ctx, field)
+			case "revision":
+				return ec.fieldContext_VersionLite_revision(ctx, field)
+			case "startTime":
+				return ec.fieldContext_VersionLite_startTime(ctx, field)
+			case "upstreamProject":
+				return ec.fieldContext_VersionLite_upstreamProject(ctx, field)
+			case "user":
+				return ec.fieldContext_VersionLite_user(ctx, field)
+			case "warnings":
+				return ec.fieldContext_VersionLite_warnings(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type VersionLite", field.Name)
 		},
 	}
 	return fc, nil
@@ -65823,6 +66109,8 @@ func (ec *executionContext) fieldContext_TaskHistory_tasks(_ context.Context, fi
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -70006,6 +70294,8 @@ func (ec *executionContext) fieldContext_UpstreamProject_task(_ context.Context,
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -73116,6 +73406,708 @@ func (ec *executionContext) fieldContext_Version_waterfallBuilds(_ context.Conte
 	return fc, nil
 }
 
+func (ec *executionContext) _VersionLite_id(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_id,
+		func(ctx context.Context) (any, error) {
+			return obj.Id, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_activated(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_activated,
+		func(ctx context.Context) (any, error) {
+			return obj.Activated, nil
+		},
+		nil,
+		ec.marshalOBoolean2ᚖbool,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_activated(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_branch(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_branch,
+		func(ctx context.Context) (any, error) {
+			return obj.Branch, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_branch(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_cost(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_cost,
+		func(ctx context.Context) (any, error) {
+			return obj.Cost, nil
+		},
+		nil,
+		ec.marshalOCost2githubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_cost(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "onDemandEC2Cost":
+				return ec.fieldContext_Cost_onDemandEC2Cost(ctx, field)
+			case "adjustedEC2Cost":
+				return ec.fieldContext_Cost_adjustedEC2Cost(ctx, field)
+			case "s3ArtifactPutCost":
+				return ec.fieldContext_Cost_s3ArtifactPutCost(ctx, field)
+			case "s3LogPutCost":
+				return ec.fieldContext_Cost_s3LogPutCost(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Cost", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_createTime(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_createTime,
+		func(ctx context.Context) (any, error) {
+			return obj.CreateTime, nil
+		},
+		nil,
+		ec.marshalNTime2timeᚐTime,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_createTime(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Time does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_errors(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_errors,
+		func(ctx context.Context) (any, error) {
+			return obj.Errors, nil
+		},
+		nil,
+		ec.marshalNString2ᚕstringᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_errors(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_finishTime(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_finishTime,
+		func(ctx context.Context) (any, error) {
+			return obj.FinishTime, nil
+		},
+		nil,
+		ec.marshalOTime2timeᚐTime,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_finishTime(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Time does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_ignored(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_ignored,
+		func(ctx context.Context) (any, error) {
+			return obj.Ignored, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_ignored(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_message(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_message,
+		func(ctx context.Context) (any, error) {
+			return obj.Message, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_message(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_order(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_order,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().Order(ctx, obj)
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_order(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_patch(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_patch,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().Patch(ctx, obj)
+		},
+		nil,
+		ec.marshalOPatch2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋrestᚋmodelᚐAPIPatch,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_patch(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Patch_id(ctx, field)
+			case "activated":
+				return ec.fieldContext_Patch_activated(ctx, field)
+			case "alias":
+				return ec.fieldContext_Patch_alias(ctx, field)
+			case "author":
+				return ec.fieldContext_Patch_author(ctx, field)
+			case "authorDisplayName":
+				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
+			case "baseTaskStatuses":
+				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
+			case "builds":
+				return ec.fieldContext_Patch_builds(ctx, field)
+			case "childPatchAliases":
+				return ec.fieldContext_Patch_childPatchAliases(ctx, field)
+			case "childPatches":
+				return ec.fieldContext_Patch_childPatches(ctx, field)
+			case "createTime":
+				return ec.fieldContext_Patch_createTime(ctx, field)
+			case "description":
+				return ec.fieldContext_Patch_description(ctx, field)
+			case "duration":
+				return ec.fieldContext_Patch_duration(ctx, field)
+			case "generatedTaskCounts":
+				return ec.fieldContext_Patch_generatedTaskCounts(ctx, field)
+			case "githash":
+				return ec.fieldContext_Patch_githash(ctx, field)
+			case "githubPatchData":
+				return ec.fieldContext_Patch_githubPatchData(ctx, field)
+			case "hidden":
+				return ec.fieldContext_Patch_hidden(ctx, field)
+			case "includedLocalModules":
+				return ec.fieldContext_Patch_includedLocalModules(ctx, field)
+			case "moduleCodeChanges":
+				return ec.fieldContext_Patch_moduleCodeChanges(ctx, field)
+			case "parameters":
+				return ec.fieldContext_Patch_parameters(ctx, field)
+			case "patchNumber":
+				return ec.fieldContext_Patch_patchNumber(ctx, field)
+			case "patchTriggerAliases":
+				return ec.fieldContext_Patch_patchTriggerAliases(ctx, field)
+			case "project":
+				return ec.fieldContext_Patch_project(ctx, field)
+			case "projectID":
+				return ec.fieldContext_Patch_projectID(ctx, field)
+			case "projectIdentifier":
+				return ec.fieldContext_Patch_projectIdentifier(ctx, field)
+			case "projectMetadata":
+				return ec.fieldContext_Patch_projectMetadata(ctx, field)
+			case "status":
+				return ec.fieldContext_Patch_status(ctx, field)
+			case "taskCount":
+				return ec.fieldContext_Patch_taskCount(ctx, field)
+			case "tasks":
+				return ec.fieldContext_Patch_tasks(ctx, field)
+			case "taskStatuses":
+				return ec.fieldContext_Patch_taskStatuses(ctx, field)
+			case "time":
+				return ec.fieldContext_Patch_time(ctx, field)
+			case "user":
+				return ec.fieldContext_Patch_user(ctx, field)
+			case "variants":
+				return ec.fieldContext_Patch_variants(ctx, field)
+			case "variantsTasks":
+				return ec.fieldContext_Patch_variantsTasks(ctx, field)
+			case "versionFull":
+				return ec.fieldContext_Patch_versionFull(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Patch", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_project(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_project,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().Project(ctx, obj)
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_project(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_projectIdentifier(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_projectIdentifier,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().ProjectIdentifier(ctx, obj)
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_projectIdentifier(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_repo(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_repo,
+		func(ctx context.Context) (any, error) {
+			return obj.Repo, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_repo(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_requester(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_requester,
+		func(ctx context.Context) (any, error) {
+			return obj.Requester, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_requester(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_revision(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_revision,
+		func(ctx context.Context) (any, error) {
+			return obj.Revision, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_revision(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_startTime(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_startTime,
+		func(ctx context.Context) (any, error) {
+			return obj.StartTime, nil
+		},
+		nil,
+		ec.marshalOTime2timeᚐTime,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_startTime(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Time does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_upstreamProject(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_upstreamProject,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().UpstreamProject(ctx, obj)
+		},
+		nil,
+		ec.marshalOUpstreamProject2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐUpstreamProject,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_upstreamProject(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "owner":
+				return ec.fieldContext_UpstreamProject_owner(ctx, field)
+			case "project":
+				return ec.fieldContext_UpstreamProject_project(ctx, field)
+			case "repo":
+				return ec.fieldContext_UpstreamProject_repo(ctx, field)
+			case "resourceID":
+				return ec.fieldContext_UpstreamProject_resourceID(ctx, field)
+			case "revision":
+				return ec.fieldContext_UpstreamProject_revision(ctx, field)
+			case "task":
+				return ec.fieldContext_UpstreamProject_task(ctx, field)
+			case "triggerID":
+				return ec.fieldContext_UpstreamProject_triggerID(ctx, field)
+			case "triggerType":
+				return ec.fieldContext_UpstreamProject_triggerType(ctx, field)
+			case "version":
+				return ec.fieldContext_UpstreamProject_version(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type UpstreamProject", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_user(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_user,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().User(ctx, obj)
+		},
+		nil,
+		ec.marshalNUser2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋrestᚋmodelᚐAPIDBUser,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_user(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "betaFeatures":
+				return ec.fieldContext_User_betaFeatures(ctx, field)
+			case "displayName":
+				return ec.fieldContext_User_displayName(ctx, field)
+			case "emailAddress":
+				return ec.fieldContext_User_emailAddress(ctx, field)
+			case "parsleyFilters":
+				return ec.fieldContext_User_parsleyFilters(ctx, field)
+			case "parsleySettings":
+				return ec.fieldContext_User_parsleySettings(ctx, field)
+			case "patches":
+				return ec.fieldContext_User_patches(ctx, field)
+			case "permissions":
+				return ec.fieldContext_User_permissions(ctx, field)
+			case "settings":
+				return ec.fieldContext_User_settings(ctx, field)
+			case "subscriptions":
+				return ec.fieldContext_User_subscriptions(ctx, field)
+			case "userId":
+				return ec.fieldContext_User_userId(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type User", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_warnings(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_warnings,
+		func(ctx context.Context) (any, error) {
+			return obj.Warnings, nil
+		},
+		nil,
+		ec.marshalNString2ᚕstringᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_warnings(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _VersionTasks_count(ctx context.Context, field graphql.CollectedField, obj *VersionTasks) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -73343,6 +74335,8 @@ func (ec *executionContext) fieldContext_VersionTasks_data(_ context.Context, fi
 				return ec.fieldContext_Task_timeTaken(ctx, field)
 			case "totalTestCount":
 				return ec.fieldContext_Task_totalTestCount(ctx, field)
+			case "version":
+				return ec.fieldContext_Task_version(ctx, field)
 			case "versionMetadata":
 				return ec.fieldContext_Task_versionMetadata(ctx, field)
 			}
@@ -103322,6 +104316,42 @@ func (ec *executionContext) _Task(ctx context.Context, sel ast.SelectionSet, obj
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "version":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Task_version(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "versionMetadata":
 			field := field
 
@@ -106612,6 +107642,308 @@ func (ec *executionContext) _Version(ctx context.Context, sel ast.SelectionSet, 
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var versionLiteImplementors = []string{"VersionLite"}
+
+func (ec *executionContext) _VersionLite(ctx context.Context, sel ast.SelectionSet, obj *model1.Version) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, versionLiteImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("VersionLite")
+		case "id":
+			out.Values[i] = ec._VersionLite_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "activated":
+			out.Values[i] = ec._VersionLite_activated(ctx, field, obj)
+		case "branch":
+			out.Values[i] = ec._VersionLite_branch(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "cost":
+			out.Values[i] = ec._VersionLite_cost(ctx, field, obj)
+		case "createTime":
+			out.Values[i] = ec._VersionLite_createTime(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "errors":
+			out.Values[i] = ec._VersionLite_errors(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "finishTime":
+			out.Values[i] = ec._VersionLite_finishTime(ctx, field, obj)
+		case "ignored":
+			out.Values[i] = ec._VersionLite_ignored(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "message":
+			out.Values[i] = ec._VersionLite_message(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "order":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_order(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "patch":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_patch(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "project":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_project(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "projectIdentifier":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_projectIdentifier(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "repo":
+			out.Values[i] = ec._VersionLite_repo(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "requester":
+			out.Values[i] = ec._VersionLite_requester(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "revision":
+			out.Values[i] = ec._VersionLite_revision(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "startTime":
+			out.Values[i] = ec._VersionLite_startTime(ctx, field, obj)
+		case "upstreamProject":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_upstreamProject(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "user":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_user(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "warnings":
+			out.Values[i] = ec._VersionLite_warnings(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -113389,6 +114721,20 @@ func (ec *executionContext) marshalNVersion2ᚖgithubᚗcomᚋevergreenᚑciᚋe
 	return ec._Version(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNVersionLite2githubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚐVersion(ctx context.Context, sel ast.SelectionSet, v model1.Version) graphql.Marshaler {
+	return ec._VersionLite(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNVersionLite2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚐVersion(ctx context.Context, sel ast.SelectionSet, v *model1.Version) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._VersionLite(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNVersionTasks2githubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐVersionTasks(ctx context.Context, sel ast.SelectionSet, v VersionTasks) graphql.Marshaler {
 	return ec._VersionTasks(ctx, sel, &v)
 }
@@ -114336,6 +115682,10 @@ func (ec *executionContext) unmarshalOContainerPoolsConfigInput2ᚖgithubᚗcom�
 	}
 	res, err := ec.unmarshalInputContainerPoolsConfigInput(ctx, v)
 	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalOCost2githubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost(ctx context.Context, sel ast.SelectionSet, v cost.Cost) graphql.Marshaler {
+	return ec._Cost(ctx, sel, &v)
 }
 
 func (ec *executionContext) marshalOCost2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋmodelᚋcostᚐCost(ctx context.Context, sel ast.SelectionSet, v *cost.Cost) graphql.Marshaler {

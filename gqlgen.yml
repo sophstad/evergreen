@@ -885,6 +885,8 @@ models:
         resolver: true
       project:
         resolver: true
+      version:
+        resolver: true
   TaskAnnotationSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskAnnotationSettings
   TaskExecutionStep:
@@ -993,6 +995,8 @@ models:
     fields:
       status:
         resolver: true
+  VersionLite:
+    model: github.com/evergreen-ci/evergreen/model.Version
   VersionToRestart:
     model: github.com/evergreen-ci/evergreen/model.VersionToRestart
   Volume:

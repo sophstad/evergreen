@@ -1,0 +1,26 @@
+"""
+VersionLite replaces version by sidestepping the APIVersion layer. It does not contain all Version fields at this time.
+"""
+type VersionLite {
+  id: String!
+  activated: Boolean
+  branch: String!
+  cost: Cost
+  createTime: Time!
+  errors: [String!]!
+  finishTime: Time
+  ignored: Boolean!
+  message: String!
+  order: Int!
+  patch: Patch
+  project: String!
+  projectIdentifier: String!
+  repo: String!
+  requester: String!
+  revision: String!
+  startTime: Time
+  upstreamProject: UpstreamProject
+  user: User!
+  warnings: [String!]!
+}
+

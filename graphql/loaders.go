@@ -18,8 +18,9 @@ type ctxKey string
 const loadersKey = ctxKey("dataloaders")
 
 type Loaders struct {
-	UserLoader    *dataloadgen.Loader[string, *restModel.APIDBUser]
-	VersionLoader *dataloadgen.Loader[string, *restModel.APIVersion]
+	APIVersionLoader *dataloadgen.Loader[string, *restModel.APIVersion]
+	UserLoader       *dataloadgen.Loader[string, *restModel.APIDBUser]
+	VersionLoader    *dataloadgen.Loader[string, *model.Version]
 }
 
 type userReader struct{}
@@ -57,9 +58,9 @@ func (u *userReader) getUsers(ctx context.Context, userIDs []string) ([]*restMod
 	return results, errs
 }
 
-type versionReader struct{}
+type apiVersionReader struct{}
 
-func (v *versionReader) getVersions(ctx context.Context, versionIDs []string) ([]*restModel.APIVersion, []error) {
+func (v *apiVersionReader) getAPIVersions(ctx context.Context, versionIDs []string) ([]*restModel.APIVersion, []error) {
 	query := db.Query(bson.M{model.VersionIdKey: bson.M{"$in": versionIDs}}).Project(bson.M{model.VersionBuildVariantsKey: 0})
 	versions, err := model.VersionFind(ctx, query)
 	if err != nil {
@@ -92,13 +93,50 @@ func (v *versionReader) getVersions(ctx context.Context, versionIDs []string) ([
 	return results, errs
 }
 
+type versionReader struct{}
+
+func (v *versionReader) getVersions(ctx context.Context, versionIDs []string) ([]*model.Version, []error) {
+	query := db.Query(bson.M{model.VersionIdKey: bson.M{"$in": versionIDs}}).Project(bson.M{model.VersionBuildVariantsKey: 0})
+	versions, err := model.VersionFind(ctx, query)
+	if err != nil {
+		// Return the same error for all requested IDs
+		errs := make([]error, len(versionIDs))
+		for i := range errs {
+			errs[i] = err
+		}
+		return nil, errs
+	}
+
+	versionMap := make(map[string]*model.Version, len(versions))
+	for i := range versions {
+		versionMap[versions[i].Id] = &versions[i]
+	}
+
+	// Build results in the same order as input IDs
+	// Return nil for versions not found
+	results := make([]*model.Version, len(versionIDs))
+	errs := make([]error, len(versionIDs))
+	for i, id := range versionIDs {
+		if dbVersion, ok := versionMap[id]; ok {
+			results[i] = dbVersion
+		}
+		// results[i] remains nil if version not found, errs[i] remains nil
+	}
+
+	return results, errs
+}
+
+const waitTime = time.Millisecond
+
 // NewLoaders instantiates data loaders for the middleware.
 func NewLoaders() *Loaders {
 	ur := &userReader{}
+	avr := &apiVersionReader{}
 	vr := &versionReader{}
 	return &Loaders{
-		UserLoader:    dataloadgen.NewLoader(ur.getUsers, dataloadgen.WithWait(time.Millisecond)),
-		VersionLoader: dataloadgen.NewLoader(vr.getVersions, dataloadgen.WithWait(time.Millisecond)),
+		APIVersionLoader: dataloadgen.NewLoader(avr.getAPIVersions, dataloadgen.WithWait(waitTime)),
+		UserLoader:       dataloadgen.NewLoader(ur.getUsers, dataloadgen.WithWait(waitTime)),
+		VersionLoader:    dataloadgen.NewLoader(vr.getVersions, dataloadgen.WithWait(waitTime)),
 	}
 }
 
@@ -116,6 +154,13 @@ func DataloaderFor(ctx context.Context) *Loaders {
 	return ctx.Value(loadersKey).(*Loaders)
 }
 
+// GetAPIVersion returns a single version by ID efficiently using the dataloader.
+// Returns nil if the version is not found.
+func GetAPIVersion(ctx context.Context, versionID string) (*restModel.APIVersion, error) {
+	loaders := DataloaderFor(ctx)
+	return loaders.APIVersionLoader.Load(ctx, versionID)
+}
+
 // GetUser returns a single user by ID efficiently using the dataloader.
 // Returns nil if the user is not found (e.g., reaped users).
 func GetUser(ctx context.Context, userID string) (*restModel.APIDBUser, error) {
@@ -125,7 +170,7 @@ func GetUser(ctx context.Context, userID string) (*restModel.APIDBUser, error) {
 
 // GetVersion returns a single version by ID efficiently using the dataloader.
 // Returns nil if the version is not found.
-func GetVersion(ctx context.Context, versionID string) (*restModel.APIVersion, error) {
+func GetVersion(ctx context.Context, versionID string) (*model.Version, error) {
 	loaders := DataloaderFor(ctx)
 	return loaders.VersionLoader.Load(ctx, versionID)
 }
