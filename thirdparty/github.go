@@ -928,43 +928,6 @@ func GetCommitEvent(ctx context.Context, owner, repo, githash string) (*github.R
 	return commit, nil
 }
 
-// GetBranchEvent gets the head of the a given branch via an API call to GitHub
-func GetBranchEvent(ctx context.Context, owner, repo, branch string) (*github.Branch, error) {
-	caller := "GetBranchEvent"
-	ctx, span := tracer.Start(ctx, caller, trace.WithAttributes(
-		attribute.String(githubEndpointAttribute, caller),
-		attribute.String(githubOwnerAttribute, owner),
-		attribute.String(githubRepoAttribute, repo),
-		attribute.String(githubRefAttribute, branch),
-	))
-	defer span.End()
-
-	token, err := getInstallationToken(ctx, owner, repo, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "getting installation token")
-	}
-
-	githubClient := getGithubClient(token, caller, retryConfig{retry: true})
-	defer githubClient.Close()
-
-	grip.Debugf("requesting github commit for '%s/%s': branch: %s\n", owner, repo, branch)
-
-	branchEvent, resp, err := githubClient.Repositories.GetBranch(ctx, owner, repo, branch, 0)
-	if resp != nil {
-		defer resp.Body.Close()
-		span.SetAttributes(attribute.Bool(githubCachedAttribute, respFromCache(resp.Response)))
-		if err != nil {
-			return nil, parseGithubErrorResponse(resp)
-		}
-	} else {
-		errMsg := fmt.Sprintf("nil response from github for '%s/%s': branch: '%s': %v", owner, repo, branch, err)
-		grip.Error(errMsg)
-		return nil, APIResponseError{errMsg}
-	}
-
-	return branchEvent, nil
-}
-
 // githubRequest performs the specified http request. If the oauth token field is empty it will not use oauth
 func githubRequest(ctx context.Context, method string, url string, oauthToken string, data any) (*http.Response, error) {
 	req, err := http.NewRequest(method, url, nil)
@@ -1717,77 +1680,6 @@ func getPatchSummariesFromCommitFiles(files []*github.CommitFile) []Summary {
 		summaries = append(summaries, summary)
 	}
 	return summaries
-}
-
-func ValidatePR(pr *github.PullRequest) error {
-	if pr == nil {
-		return errors.New("No PR provided")
-	}
-
-	catcher := grip.NewSimpleCatcher()
-	if missingUserLogin(pr) {
-		catcher.Add(errors.New("no valid user"))
-	}
-	if missingBaseSHA(pr) {
-		catcher.Add(errors.New("no valid base SHA"))
-	}
-	if missingBaseRef(pr) {
-		catcher.Add(errors.New("no valid base ref"))
-	}
-	if missingBaseRepoName(pr) {
-		catcher.Add(errors.New("no valid base repo name"))
-	}
-	if missingBaseRepoFullName(pr) {
-		catcher.Add(errors.New("no valid base repo name"))
-	}
-	if missingBaseRepoOwnerLogin(pr) {
-		catcher.Add(errors.New("no valid base repo owner login"))
-	}
-	if missingHeadSHA(pr) {
-		catcher.Add(errors.New("no valid head SHA"))
-	}
-	if pr.GetNumber() == 0 {
-		catcher.Add(errors.New("no valid pr number"))
-	}
-	if pr.GetTitle() == "" {
-		catcher.Add(errors.New("no valid title"))
-	}
-	if pr.GetHTMLURL() == "" {
-		catcher.Add(errors.New("no valid HTML URL"))
-	}
-	if pr.Merged == nil {
-		catcher.Add(errors.New("no valid merged status"))
-	}
-
-	return catcher.Resolve()
-}
-
-func missingUserLogin(pr *github.PullRequest) bool {
-	return pr.User == nil || pr.User.GetLogin() == ""
-}
-
-func missingBaseSHA(pr *github.PullRequest) bool {
-	return pr.Base == nil || pr.Base.GetSHA() == ""
-}
-
-func missingBaseRef(pr *github.PullRequest) bool {
-	return pr.Base == nil || pr.Base.GetRef() == ""
-}
-
-func missingBaseRepoName(pr *github.PullRequest) bool {
-	return pr.Base == nil || pr.Base.Repo == nil || pr.Base.Repo.GetName() == "" || pr.Base.Repo.GetFullName() == ""
-}
-
-func missingBaseRepoFullName(pr *github.PullRequest) bool {
-	return pr.Base == nil || pr.Base.Repo == nil || pr.Base.Repo.GetFullName() == ""
-}
-
-func missingBaseRepoOwnerLogin(pr *github.PullRequest) bool {
-	return pr.Base == nil || pr.Base.Repo == nil || pr.Base.Repo.Owner == nil || pr.Base.Repo.Owner.GetLogin() == ""
-}
-
-func missingHeadSHA(pr *github.PullRequest) bool {
-	return pr.Head == nil || pr.Head.GetSHA() == ""
 }
 
 // PostCommentToPullRequest posts the given comment to the associated PR.
