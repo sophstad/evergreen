@@ -1198,7 +1198,6 @@ type ComplexityRoot struct {
 		Alias                func(childComplexity int) int
 		Author               func(childComplexity int) int
 		AuthorDisplayName    func(childComplexity int) int
-		BaseTaskStatuses     func(childComplexity int) int
 		Builds               func(childComplexity int) int
 		ChildPatchAliases    func(childComplexity int) int
 		ChildPatches         func(childComplexity int) int
@@ -2318,7 +2317,6 @@ type ComplexityRoot struct {
 		Activated                func(childComplexity int) int
 		Author                   func(childComplexity int) int
 		AuthorEmail              func(childComplexity int) int
-		BaseTaskStatuses         func(childComplexity int) int
 		BaseVersion              func(childComplexity int) int
 		Branch                   func(childComplexity int) int
 		BuildVariantStats        func(childComplexity int, options BuildVariantOptions) int
@@ -2590,7 +2588,6 @@ type MutationResolver interface {
 }
 type PatchResolver interface {
 	AuthorDisplayName(ctx context.Context, obj *model.APIPatch) (string, error)
-	BaseTaskStatuses(ctx context.Context, obj *model.APIPatch) ([]string, error)
 	Builds(ctx context.Context, obj *model.APIPatch) ([]*model.APIBuild, error)
 
 	Duration(ctx context.Context, obj *model.APIPatch) (*PatchDuration, error)
@@ -2804,7 +2801,6 @@ type UserResolver interface {
 	Subscriptions(ctx context.Context, obj *model.APIDBUser) ([]*model.APISubscription, error)
 }
 type VersionResolver interface {
-	BaseTaskStatuses(ctx context.Context, obj *model.APIVersion) ([]string, error)
 	BaseVersion(ctx context.Context, obj *model.APIVersion) (*model.APIVersion, error)
 
 	BuildVariants(ctx context.Context, obj *model.APIVersion, options BuildVariantOptions) ([]*GroupedBuildVariant, error)
@@ -7495,12 +7491,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Patch.AuthorDisplayName(childComplexity), true
-	case "Patch.baseTaskStatuses":
-		if e.complexity.Patch.BaseTaskStatuses == nil {
-			break
-		}
-
-		return e.complexity.Patch.BaseTaskStatuses(childComplexity), true
 	case "Patch.builds":
 		if e.complexity.Patch.Builds == nil {
 			break
@@ -12501,12 +12491,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Version.AuthorEmail(childComplexity), true
-	case "Version.baseTaskStatuses":
-		if e.complexity.Version.BaseTaskStatuses == nil {
-			break
-		}
-
-		return e.complexity.Version.BaseTaskStatuses(childComplexity), true
 	case "Version.baseVersion":
 		if e.complexity.Version.BaseVersion == nil {
 			break
@@ -35651,8 +35635,6 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_rolledUpVersions(
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -35768,8 +35750,6 @@ func (ec *executionContext) fieldContext_MainlineCommitVersion_version(_ context
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -37300,8 +37280,6 @@ func (ec *executionContext) fieldContext_Mutation_setPatchVisibility(ctx context
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -37411,8 +37389,6 @@ func (ec *executionContext) fieldContext_Mutation_schedulePatch(ctx context.Cont
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -41656,8 +41632,6 @@ func (ec *executionContext) fieldContext_Mutation_restartVersions(ctx context.Co
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -43918,35 +43892,6 @@ func (ec *executionContext) fieldContext_Patch_authorDisplayName(_ context.Conte
 	return fc, nil
 }
 
-func (ec *executionContext) _Patch_baseTaskStatuses(ctx context.Context, field graphql.CollectedField, obj *model.APIPatch) (ret graphql.Marshaler) {
-	return graphql.ResolveField(
-		ctx,
-		ec.OperationContext,
-		field,
-		ec.fieldContext_Patch_baseTaskStatuses,
-		func(ctx context.Context) (any, error) {
-			return ec.resolvers.Patch().BaseTaskStatuses(ctx, obj)
-		},
-		nil,
-		ec.marshalNString2ᚕstringᚄ,
-		true,
-		true,
-	)
-}
-
-func (ec *executionContext) fieldContext_Patch_baseTaskStatuses(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	fc = &graphql.FieldContext{
-		Object:     "Patch",
-		Field:      field,
-		IsMethod:   true,
-		IsResolver: true,
-		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type String does not have child fields")
-		},
-	}
-	return fc, nil
-}
-
 func (ec *executionContext) _Patch_builds(ctx context.Context, field graphql.CollectedField, obj *model.APIPatch) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -44057,8 +44002,6 @@ func (ec *executionContext) fieldContext_Patch_childPatches(_ context.Context, f
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -45078,8 +45021,6 @@ func (ec *executionContext) fieldContext_Patch_versionFull(_ context.Context, fi
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -45691,8 +45632,6 @@ func (ec *executionContext) fieldContext_Patches_patches(_ context.Context, fiel
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -52358,8 +52297,6 @@ func (ec *executionContext) fieldContext_Query_patch(ctx context.Context, field 
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -54134,8 +54071,6 @@ func (ec *executionContext) fieldContext_Query_version(ctx context.Context, fiel
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -64788,8 +64723,6 @@ func (ec *executionContext) fieldContext_Task_patch(_ context.Context, field gra
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -66666,8 +66599,6 @@ func (ec *executionContext) fieldContext_Task_versionMetadata(_ context.Context,
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -72296,8 +72227,6 @@ func (ec *executionContext) fieldContext_UpstreamProject_version(_ context.Conte
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -73694,35 +73623,6 @@ func (ec *executionContext) fieldContext_Version_authorEmail(_ context.Context, 
 	return fc, nil
 }
 
-func (ec *executionContext) _Version_baseTaskStatuses(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
-	return graphql.ResolveField(
-		ctx,
-		ec.OperationContext,
-		field,
-		ec.fieldContext_Version_baseTaskStatuses,
-		func(ctx context.Context) (any, error) {
-			return ec.resolvers.Version().BaseTaskStatuses(ctx, obj)
-		},
-		nil,
-		ec.marshalNString2ᚕstringᚄ,
-		true,
-		true,
-	)
-}
-
-func (ec *executionContext) fieldContext_Version_baseTaskStatuses(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	fc = &graphql.FieldContext{
-		Object:     "Version",
-		Field:      field,
-		IsMethod:   true,
-		IsResolver: true,
-		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type String does not have child fields")
-		},
-	}
-	return fc, nil
-}
-
 func (ec *executionContext) _Version_baseVersion(ctx context.Context, field graphql.CollectedField, obj *model.APIVersion) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -73755,8 +73655,6 @@ func (ec *executionContext) fieldContext_Version_baseVersion(_ context.Context, 
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -73999,8 +73897,6 @@ func (ec *executionContext) fieldContext_Version_childVersions(_ context.Context
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -74549,8 +74445,6 @@ func (ec *executionContext) fieldContext_Version_patch(_ context.Context, field 
 				return ec.fieldContext_Patch_author(ctx, field)
 			case "authorDisplayName":
 				return ec.fieldContext_Patch_authorDisplayName(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Patch_baseTaskStatuses(ctx, field)
 			case "builds":
 				return ec.fieldContext_Patch_builds(ctx, field)
 			case "childPatchAliases":
@@ -74685,8 +74579,6 @@ func (ec *executionContext) fieldContext_Version_previousVersion(_ context.Conte
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -76866,8 +76758,6 @@ func (ec *executionContext) fieldContext_Waterfall_flattenedVersions(_ context.C
 				return ec.fieldContext_Version_author(ctx, field)
 			case "authorEmail":
 				return ec.fieldContext_Version_authorEmail(ctx, field)
-			case "baseTaskStatuses":
-				return ec.fieldContext_Version_baseTaskStatuses(ctx, field)
 			case "baseVersion":
 				return ec.fieldContext_Version_baseVersion(ctx, field)
 			case "branch":
@@ -98717,42 +98607,6 @@ func (ec *executionContext) _Patch(ctx context.Context, sel ast.SelectionSet, ob
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
-		case "baseTaskStatuses":
-			field := field
-
-			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._Patch_baseTaskStatuses(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&fs.Invalids, 1)
-				}
-				return res
-			}
-
-			if field.Deferrable != nil {
-				dfs, ok := deferred[field.Deferrable.Label]
-				di := 0
-				if ok {
-					dfs.AddField(field)
-					di = len(dfs.Values) - 1
-				} else {
-					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
-					deferred[field.Deferrable.Label] = dfs
-				}
-				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
-					return innerFunc(ctx, dfs)
-				})
-
-				// don't run the out.Concurrently() call below
-				out.Values[i] = graphql.Null
-				continue
-			}
-
-			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "builds":
 			field := field
 
@@ -109144,42 +108998,6 @@ func (ec *executionContext) _Version(ctx context.Context, sel ast.SelectionSet, 
 			if out.Values[i] == graphql.Null {
 				atomic.AddUint32(&out.Invalids, 1)
 			}
-		case "baseTaskStatuses":
-			field := field
-
-			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._Version_baseTaskStatuses(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&fs.Invalids, 1)
-				}
-				return res
-			}
-
-			if field.Deferrable != nil {
-				dfs, ok := deferred[field.Deferrable.Label]
-				di := 0
-				if ok {
-					dfs.AddField(field)
-					di = len(dfs.Values) - 1
-				} else {
-					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
-					deferred[field.Deferrable.Label] = dfs
-				}
-				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
-					return innerFunc(ctx, dfs)
-				})
-
-				// don't run the out.Concurrently() call below
-				out.Values[i] = graphql.Null
-				continue
-			}
-
-			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "baseVersion":
 			field := field
 
