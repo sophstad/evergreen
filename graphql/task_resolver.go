@@ -523,6 +523,11 @@ func (r *taskResolver) ImageID(ctx context.Context, obj *restModel.APITask) (str
 	return imageID, nil
 }
 
+// IsAutomaticRestart is the resolver for the isAutomaticRestart field.
+func (r *taskResolver) IsAutomaticRestart(ctx context.Context, obj *restModel.APITask) (bool, error) {
+	panic(fmt.Errorf("not implemented: IsAutomaticRestart - isAutomaticRestart"))
+}
+
 // IsPerfPluginEnabled is the resolver for the isPerfPluginEnabled field.
 func (r *taskResolver) IsPerfPluginEnabled(ctx context.Context, obj *restModel.APITask) (bool, error) {
 	if !evergreen.IsFinishedTaskStatus(utility.FromStringPtr(obj.Status)) {
