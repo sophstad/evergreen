@@ -3236,3 +3236,116 @@ func GetFirstTaskStartTimeForVersion(ctx context.Context, versionID string) (tim
 	}
 	return task.StartTime, nil
 }
+
+// versionTimingResult holds the primary aggregation output for GetVersionTiming.
+type versionTimingResult struct {
+	TotalTime       time.Duration `bson:"total_time"`
+	EarliestStart   time.Time     `bson:"earliest_start"`
+	LatestFinish    time.Time     `bson:"latest_finish"`
+	HasManualRetry  bool          `bson:"has_manual_retry"`
+}
+
+// oldTasksMakespanResult holds the old_tasks fallback aggregation output.
+type oldTasksMakespanResult struct {
+	EarliestStart time.Time `bson:"earliest_start"`
+	LatestFinish  time.Time `bson:"latest_finish"`
+}
+
+// GetVersionTiming computes the total time taken and makespan for a version
+// using server-side aggregation. Automatic restarts are included in the
+// makespan; manual retries trigger a conditional fallback to old_tasks to
+// recover execution 0 boundaries.
+func GetVersionTiming(ctx context.Context, versionID string) (time.Duration, time.Duration, error) {
+	ctx = utility.ContextWithAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetVersionTiming")})
+
+	// A task is included in the makespan window if it's on its first execution
+	// or was automatically restarted (programmatic retry by a failing command).
+	includeInMakespan := bson.M{"$or": bson.A{
+		bson.M{"$eq": bson.A{"$" + ExecutionKey, 0}},
+		bson.M{"$eq": bson.A{"$" + IsAutomaticRestartKey, true}},
+	}}
+
+	pipeline := []bson.M{
+		{"$match": bson.M{
+			VersionKey:     versionID,
+			DisplayOnlyKey: bson.M{"$ne": true},
+		}},
+		{"$group": bson.M{
+			"_id":        nil,
+			"total_time": bson.M{"$sum": "$" + TimeTakenKey},
+			"earliest_start": bson.M{"$min": bson.M{"$cond": bson.A{
+				includeInMakespan, "$" + StartTimeKey, nil,
+			}}},
+			"latest_finish": bson.M{"$max": bson.M{"$cond": bson.A{
+				includeInMakespan, "$" + FinishTimeKey, nil,
+			}}},
+			"has_manual_retry": bson.M{"$max": bson.M{"$cond": bson.A{
+				bson.M{"$and": bson.A{
+					bson.M{"$gt": bson.A{"$" + ExecutionKey, 0}},
+					bson.M{"$ne": bson.A{"$" + IsAutomaticRestartKey, true}},
+				}},
+				true, false,
+			}}},
+		}},
+	}
+
+	env := evergreen.GetEnvironment()
+	cursor, err := env.DB().Collection(Collection).Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, 0, errors.Wrap(err, "aggregating version timing")
+	}
+	var results []versionTimingResult
+	if err = cursor.All(ctx, &results); err != nil {
+		return 0, 0, errors.Wrap(err, "decoding version timing")
+	}
+	if len(results) == 0 {
+		return 0, 0, nil
+	}
+
+	primary := results[0]
+	timeTaken := primary.TotalTime
+	earliestStart := primary.EarliestStart
+	latestFinish := primary.LatestFinish
+
+	// If any manually retried tasks exist, their execution 0 documents live
+	// in old_tasks and may define the original makespan boundary.
+	if primary.HasManualRetry {
+		oldPipeline := []bson.M{
+			{"$match": bson.M{
+				VersionKey:     versionID,
+				ExecutionKey:   0,
+				DisplayOnlyKey: bson.M{"$ne": true},
+			}},
+			{"$group": bson.M{
+				"_id":            nil,
+				"earliest_start": bson.M{"$min": "$" + StartTimeKey},
+				"latest_finish":  bson.M{"$max": "$" + FinishTimeKey},
+			}},
+		}
+
+		oldCursor, err := env.DB().Collection(OldCollection).Aggregate(ctx, oldPipeline)
+		if err != nil {
+			return 0, 0, errors.Wrap(err, "aggregating old_tasks timing")
+		}
+		var oldResults []oldTasksMakespanResult
+		if err = oldCursor.All(ctx, &oldResults); err != nil {
+			return 0, 0, errors.Wrap(err, "decoding old_tasks timing")
+		}
+		if len(oldResults) > 0 {
+			old := oldResults[0]
+			if !utility.IsZeroTime(old.EarliestStart) && old.EarliestStart.Before(earliestStart) {
+				earliestStart = old.EarliestStart
+			}
+			if old.LatestFinish.After(latestFinish) {
+				latestFinish = old.LatestFinish
+			}
+		}
+	}
+
+	var makespan time.Duration
+	if !utility.IsZeroTime(earliestStart) && !utility.IsZeroTime(latestFinish) {
+		makespan = latestFinish.Sub(earliestStart)
+	}
+
+	return timeTaken, makespan, nil
+}

@@ -178,5 +178,6 @@ type VersionLite {
   revision: String!
   startTime: Time
   user: UserLite!
+  versionTiming: VersionTiming
   warnings: [String!]!
 }

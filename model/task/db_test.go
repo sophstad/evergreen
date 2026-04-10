@@ -2195,3 +2195,191 @@ func TestGetLatestTaskFromImage(t *testing.T) {
 	require.NotNil(t, latestTask)
 	assert.Equal(t, "t2", latestTask.Id)
 }
+
+func TestGetVersionTiming(t *testing.T) {
+	refTime := time.Date(2024, time.January, 1, 10, 0, 0, 0, time.UTC)
+
+	t.Run("NoTasksShouldReturnZero", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), timeTaken)
+		assert.Equal(t, time.Duration(0), makespan)
+	})
+
+	t.Run("BasicTimingNoRetries", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+		tasks := []Task{
+			{
+				Id:         "t1",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime,
+				FinishTime: refTime.Add(1 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+			{
+				Id:         "t2",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime.Add(30 * time.Minute),
+				FinishTime: refTime.Add(2 * time.Hour),
+				TimeTaken:  90 * time.Minute,
+			},
+		}
+		for _, task := range tasks {
+			require.NoError(t, task.Insert(t.Context()))
+		}
+
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		assert.Equal(t, 150*time.Minute, timeTaken)
+		assert.Equal(t, 2*time.Hour, makespan)
+	})
+
+	t.Run("DisplayOnlyTasksExcluded", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+		tasks := []Task{
+			{
+				Id:         "t1",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime,
+				FinishTime: refTime.Add(1 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+			{
+				Id:          "display",
+				Version:     "v1",
+				Execution:   0,
+				DisplayOnly: true,
+				StartTime:   refTime,
+				FinishTime:  refTime.Add(3 * time.Hour),
+				TimeTaken:   3 * time.Hour,
+			},
+		}
+		for _, task := range tasks {
+			require.NoError(t, task.Insert(t.Context()))
+		}
+
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		assert.Equal(t, 1*time.Hour, timeTaken)
+		assert.Equal(t, 1*time.Hour, makespan)
+	})
+
+	t.Run("AutomaticRestartIncludedInMakespan", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+		tasks := []Task{
+			{
+				Id:         "t1",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime,
+				FinishTime: refTime.Add(1 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+			{
+				// Automatically restarted task (execution > 0 but IsAutomaticRestart).
+				// Its latest execution timing should be included in the makespan.
+				Id:                 "t2",
+				Version:            "v1",
+				Execution:          1,
+				IsAutomaticRestart: true,
+				StartTime:          refTime.Add(10 * time.Minute),
+				FinishTime:         refTime.Add(3 * time.Hour),
+				TimeTaken:          170 * time.Minute,
+			},
+		}
+		for _, task := range tasks {
+			require.NoError(t, task.Insert(t.Context()))
+		}
+
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		assert.Equal(t, 1*time.Hour+170*time.Minute, timeTaken)
+		assert.Equal(t, 3*time.Hour, makespan, "makespan should include the automatic restart's latest execution window")
+	})
+
+	t.Run("ManualRetryMergesOldTasksMakespan", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+
+		// Current tasks collection: t1 on execution 0, t2 manually retried (execution 1).
+		tasks := []Task{
+			{
+				Id:         "t1",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime.Add(30 * time.Minute),
+				FinishTime: refTime.Add(2 * time.Hour),
+				TimeTaken:  90 * time.Minute,
+			},
+			{
+				Id:        "t2",
+				Version:   "v1",
+				Execution: 1,
+				StartTime: refTime.Add(5 * time.Hour),
+				// The manual retry ran much later.
+				FinishTime: refTime.Add(6 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+		}
+		for _, task := range tasks {
+			require.NoError(t, task.Insert(t.Context()))
+		}
+
+		// old_tasks: t2's execution 0 ran earlier and defined the original makespan boundary.
+		oldTask := Task{
+			Id:         MakeOldID("t2", 0),
+			Version:    "v1",
+			Execution:  0,
+			StartTime:  refTime,
+			FinishTime: refTime.Add(1 * time.Hour),
+			TimeTaken:  1 * time.Hour,
+		}
+		require.NoError(t, db.Insert(t.Context(), OldCollection, oldTask))
+
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		// timeTaken: sum of current execution time_taken values (90m + 60m).
+		assert.Equal(t, 150*time.Minute, timeTaken)
+		// makespan: merged across both collections.
+		// Primary (execution 0 only): earliest_start=refTime+30m, latest_finish=refTime+2h
+		// Old tasks: earliest_start=refTime, latest_finish=refTime+1h
+		// Merged: min(refTime+30m, refTime)=refTime, max(refTime+2h, refTime+1h)=refTime+2h
+		assert.Equal(t, 2*time.Hour, makespan)
+	})
+
+	t.Run("ManualRetryNoOldTasksGracefullyDegraded", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection, OldCollection))
+
+		tasks := []Task{
+			{
+				Id:         "t1",
+				Version:    "v1",
+				Execution:  0,
+				StartTime:  refTime,
+				FinishTime: refTime.Add(1 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+			{
+				// Manually retried but no old_tasks entry (edge case).
+				Id:         "t2",
+				Version:    "v1",
+				Execution:  1,
+				StartTime:  refTime.Add(2 * time.Hour),
+				FinishTime: refTime.Add(3 * time.Hour),
+				TimeTaken:  1 * time.Hour,
+			},
+		}
+		for _, task := range tasks {
+			require.NoError(t, task.Insert(t.Context()))
+		}
+
+		timeTaken, makespan, err := GetVersionTiming(t.Context(), "v1")
+		require.NoError(t, err)
+		assert.Equal(t, 2*time.Hour, timeTaken)
+		// Makespan uses only execution 0 task since t2 is a manual retry excluded from makespan.
+		assert.Equal(t, 1*time.Hour, makespan)
+	})
+}

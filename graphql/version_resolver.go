@@ -675,6 +675,30 @@ func (r *versionLiteResolver) User(ctx context.Context, obj *model.Version) (*us
 	return dbUser, nil
 }
 
+// VersionTiming is the resolver for the versionTiming field.
+func (r *versionLiteResolver) VersionTiming(ctx context.Context, obj *model.Version) (*VersionTiming, error) {
+	timeTaken, makespan, err := task.GetVersionTiming(ctx, obj.Id)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting timing for version '%s': %s", obj.Id, err.Error()))
+	}
+	t := timeTaken.Round(time.Second)
+	m := makespan.Round(time.Second)
+
+	var apiTimeTaken restModel.APIDuration
+	var apiMakespan restModel.APIDuration
+	if t.Seconds() != 0 {
+		apiTimeTaken = restModel.NewAPIDuration(t)
+	}
+	if m.Seconds() != 0 {
+		apiMakespan = restModel.NewAPIDuration(m)
+	}
+
+	return &VersionTiming{
+		TimeTaken: &apiTimeTaken,
+		Makespan:  &apiMakespan,
+	}, nil
+}
+
 // Version returns VersionResolver implementation.
 func (r *Resolver) Version() VersionResolver { return &versionResolver{r} }
 

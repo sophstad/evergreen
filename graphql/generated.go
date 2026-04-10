@@ -2345,6 +2345,7 @@ type ComplexityRoot struct {
 		RevisionOrderNumber func(childComplexity int) int
 		StartTime           func(childComplexity int) int
 		User                func(childComplexity int) int
+		VersionTiming       func(childComplexity int) int
 		Warnings            func(childComplexity int) int
 	}
 
@@ -2805,6 +2806,7 @@ type VersionLiteResolver interface {
 	Project(ctx context.Context, obj *model1.Version) (*model1.ProjectRef, error)
 
 	User(ctx context.Context, obj *model1.Version) (*user.DBUser, error)
+	VersionTiming(ctx context.Context, obj *model1.Version) (*VersionTiming, error)
 }
 type VolumeResolver interface {
 	Host(ctx context.Context, obj *model.APIVolume) (*model.APIHost, error)
@@ -12637,6 +12639,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.VersionLite.User(childComplexity), true
+	case "VersionLite.versionTiming":
+		if e.complexity.VersionLite.VersionTiming == nil {
+			break
+		}
+
+		return e.complexity.VersionLite.VersionTiming(childComplexity), true
 	case "VersionLite.warnings":
 		if e.complexity.VersionLite.Warnings == nil {
 			break
@@ -65428,6 +65436,8 @@ func (ec *executionContext) fieldContext_Task_version(_ context.Context, field g
 				return ec.fieldContext_VersionLite_startTime(ctx, field)
 			case "user":
 				return ec.fieldContext_VersionLite_user(ctx, field)
+			case "versionTiming":
+				return ec.fieldContext_VersionLite_versionTiming(ctx, field)
 			case "warnings":
 				return ec.fieldContext_VersionLite_warnings(ctx, field)
 			}
@@ -74820,6 +74830,41 @@ func (ec *executionContext) fieldContext_VersionLite_user(_ context.Context, fie
 				return ec.fieldContext_UserLite_id(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type UserLite", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _VersionLite_versionTiming(ctx context.Context, field graphql.CollectedField, obj *model1.Version) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_VersionLite_versionTiming,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.VersionLite().VersionTiming(ctx, obj)
+		},
+		nil,
+		ec.marshalOVersionTiming2ᚖgithubᚗcomᚋevergreenᚑciᚋevergreenᚋgraphqlᚐVersionTiming,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_VersionLite_versionTiming(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "VersionLite",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "makespan":
+				return ec.fieldContext_VersionTiming_makespan(ctx, field)
+			case "timeTaken":
+				return ec.fieldContext_VersionTiming_timeTaken(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type VersionTiming", field.Name)
 		},
 	}
 	return fc, nil
@@ -108520,6 +108565,39 @@ func (ec *executionContext) _VersionLite(ctx context.Context, sel ast.SelectionS
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "versionTiming":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._VersionLite_versionTiming(ctx, field, obj)
 				return res
 			}
 

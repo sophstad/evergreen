@@ -92,7 +92,31 @@
       "distro": "archlinux-small",
       "r": "gitter_request",
       "execution": 0,
-      "branch": "spruce"
+      "branch": "spruce",
+      "start_time": {
+        "$date": "2020-02-22T10:01:00.000Z"
+      },
+      "finish_time": {
+        "$date": "2020-02-22T10:03:00.000Z"
+      },
+      "time_taken": 120000000000
+    },
+    {
+      "_id": "taskity_task_3",
+      "order": 2568,
+      "version": "version_admin_user",
+      "host_id": "i-0bb70e2ac4c1a9ac10",
+      "distro": "archlinux-small",
+      "r": "gitter_request",
+      "execution": 0,
+      "branch": "spruce",
+      "start_time": {
+        "$date": "2020-02-22T10:00:00.000Z"
+      },
+      "finish_time": {
+        "$date": "2020-02-22T10:05:00.000Z"
+      },
+      "time_taken": 300000000000
     }
   ],
   "users": [
