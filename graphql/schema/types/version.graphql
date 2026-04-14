@@ -165,6 +165,7 @@ type VersionLite {
   id: String!
   activated: Boolean
   branch: String!
+  childVersions: [VersionLite!]
   cost: Cost
   createTime: Time!
   errors: [String!]!
