@@ -1,0 +1,8 @@
+{
+  version(versionId: "spruce_nonpatch_abc123") {
+    id
+    childVersions {
+      id
+    }
+  }
+}
