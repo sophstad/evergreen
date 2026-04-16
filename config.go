@@ -741,6 +741,10 @@ func (s *Settings) makeSplunkSender(ctx context.Context, client *http.Client, le
 		}
 	}
 
+	if s.Tracer.TraceURLTemplate != "" {
+		sender = send.NewTraceURLSender(sender, s.Tracer.TraceURLTemplate)
+	}
+
 	return sender, nil
 }
 
