@@ -8,6 +8,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/cost"
 	"github.com/evergreen-ci/evergreen/model/patch"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/utility"
 )
 
@@ -62,6 +63,21 @@ type APIVersion struct {
 	Cost *cost.Cost `json:"cost,omitempty"`
 	// Aggregated predicted cost of all tasks in the version
 	PredictedCost *cost.Cost `json:"predicted_cost,omitempty"`
+	// Aggregated S3 upload metrics across all tasks in the version
+	S3Usage *APIVersionS3Usage `json:"s3_usage,omitempty"`
+}
+
+// APIVersionS3Usage holds aggregated S3 upload metrics for a version.
+// Logs only exposes puts and bytes since per-type breakdown is not aggregated at version level.
+type APIVersionS3Usage struct {
+	Artifacts s3usage.ArtifactMetrics `json:"artifacts,omitempty"`
+	Logs      APIVersionS3LogUsage    `json:"logs,omitempty"`
+}
+
+// APIVersionS3LogUsage holds aggregated S3 log upload metrics for a version.
+type APIVersionS3LogUsage struct {
+	PutRequests int   `json:"put_requests,omitempty"`
+	UploadBytes int64 `json:"upload_bytes,omitempty"`
 }
 
 type APIGitTag struct {
@@ -141,6 +157,15 @@ func (apiVersion *APIVersion) BuildFromService(ctx context.Context, v model.Vers
 	if !v.PredictedCost.IsZero() {
 		predictedCost := v.PredictedCost
 		apiVersion.PredictedCost = &predictedCost
+	}
+	if !v.S3Usage.IsZero() {
+		apiVersion.S3Usage = &APIVersionS3Usage{
+			Artifacts: v.S3Usage.Artifacts,
+			Logs: APIVersionS3LogUsage{
+				PutRequests: v.S3Usage.Logs.PutRequests,
+				UploadBytes: v.S3Usage.Logs.UploadBytes,
+			},
+		}
 	}
 	if apiVersion.IsPatchRequester() {
 		p, err := patch.FindOneId(ctx, v.Id)
