@@ -1,6 +1,10 @@
 package cost
 
-import "github.com/mongodb/anser/bsonutil"
+import (
+	"math"
+
+	"github.com/mongodb/anser/bsonutil"
+)
 
 var (
 	OnDemandEC2CostKey               = bsonutil.MustHaveTag(Cost{}, "OnDemandEC2Cost")
@@ -80,6 +84,21 @@ func SumPerChildVersionAdjustedTotals(n int, childAt func(int) (actual, predicte
 		}
 	}
 	return
+}
+
+// RoundCost removes floating-point noise from a cost value. Values >= 0.01
+// are rounded to 2 decimal places; values < 0.01 are rounded to 2 significant
+// figures to preserve meaningful precision for very small costs.
+func RoundCost(v float64) float64 {
+	if v == 0 {
+		return 0
+	}
+	if v >= 0.01 {
+		return math.Round(v*100) / 100
+	}
+	magnitude := math.Floor(math.Log10(math.Abs(v)))
+	factor := math.Pow(10, 1-magnitude) // 2 significant figures
+	return math.Round(v*factor) / factor
 }
 
 // IsZero returns true if all cost components are zero.
