@@ -61,6 +61,7 @@ type Version {
   childVersions: [Version!]
   cost: Cost
   createTime: Time!
+  ingestTime: Time
   errors: [String!]!
   externalLinksForMetadata: [ExternalLinkForMetadata!]!
   finishTime: Time
@@ -168,6 +169,7 @@ type VersionLite {
   childVersions: [VersionLite!]
   cost: Cost
   createTime: Time!
+  ingestTime: Time
   errors: [String!]!
   finishTime: Time
   ignored: Boolean!

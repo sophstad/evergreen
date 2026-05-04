@@ -919,6 +919,11 @@ const defaultRetryFailedLogMoveLookbackMonths = 2
 // defaultRetryFailedLogMoveMaxJobsPerRun caps enqueued jobs to avoid S3 rate limiting.
 const defaultRetryFailedLogMoveMaxJobsPerRun = 50
 
+const retryFailedLogMoveFindMinLimit = 500
+const retryFailedLogMoveFindMaxLimit = 5000
+const retryFailedLogMoveCandidateMultiplier = 50
+const retryFailedLogMoveFindTimeout = 20 * time.Minute
+
 // PopulateRetryFailedLogMoveJobs finds failed tasks whose logs are still in the regular
 // bucket (move job failed or never ran) and enqueues one move-logs-to-failed-bucket job per task.
 // Caps enqueued jobs per run to avoid S3 rate limiting; newest failures are prioritized.
@@ -954,10 +959,17 @@ func PopulateRetryFailedLogMoveJobs(env evergreen.Environment) amboy.QueueOperat
 			filter[task.ProjectKey] = bson.M{"$nin": settings.Buckets.LongRetentionProjects}
 		}
 
+		// Limit find to maxJobs * multiplier, bounded by the min and max find limits.
+		queryLimit := maxJobs * retryFailedLogMoveCandidateMultiplier
+		queryLimit = max(queryLimit, retryFailedLogMoveFindMinLimit)
+		queryLimit = min(queryLimit, retryFailedLogMoveFindMaxLimit)
+
 		query := db.Query(filter).WithFields(
 			task.IdKey, task.ProjectKey, task.FinishTimeKey, task.TaskOutputInfoKey,
-		)
-		tasks, err := task.FindAll(ctx, query)
+		).Sort([]string{"-" + task.FinishTimeKey}).Limit(queryLimit)
+		findCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retryFailedLogMoveFindTimeout)
+		defer cancel()
+		tasks, err := task.FindAll(findCtx, query)
 		if err != nil {
 			return errors.Wrap(err, "finding failed tasks whose logs need moving")
 		}
@@ -1009,7 +1021,7 @@ func PopulateRetryFailedLogMoveJobs(env evergreen.Environment) amboy.QueueOperat
 			}
 			taskIDsAttempted = append(taskIDsAttempted, t.Id)
 			sourceCfg := output.TaskLogs.BucketConfig
-			catcher.Wrapf(amboy.EnqueueUniqueJob(ctx, queue, NewMoveLogsToFailedBucketJob(env, t.Id, ts, sourceCfg, MoveLogsTriggerWeeklyRetry)), "enqueueing move logs job for task '%s'", t.Id)
+			catcher.Wrapf(amboy.EnqueueUniqueJob(ctx, queue, NewMoveLogsToFailedBucketJob(env, t.Id, ts, sourceCfg, MoveLogsTriggerHourlyRetry)), "enqueueing move logs job for task '%s'", t.Id)
 		}
 
 		grip.Info(ctx, message.Fields{

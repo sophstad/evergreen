@@ -644,6 +644,21 @@ func isPopulated(buildVariantOptions *BuildVariantOptions) bool {
 	return len(buildVariantOptions.Tasks) > 0 || len(buildVariantOptions.Variants) > 0 || len(buildVariantOptions.Statuses) > 0
 }
 
+// getAuthorizedSettingsID returns the project/repo ID gated by @requireProjectAccess
+// (settings.Id, mapped from the projectId/repoId GraphQL argument). If the caller also
+// supplied projectRef.id and it differs from the authorized ID, returns an
+// InputValidationError — projectRef.id is not authorized and must not be used as the
+// write key. labelName is used in the error message ("projectId" or "repoId").
+func getAuthorizedSettingsID(ctx context.Context, settings *restModel.APIProjectSettings, labelName string) (string, error) {
+	authorizedID := utility.FromStringPtr(settings.Id)
+	if settings.ProjectRef.Id != nil {
+		if innerID := utility.FromStringPtr(settings.ProjectRef.Id); innerID != authorizedID {
+			return "", InputValidationError.Send(ctx, fmt.Sprintf("%s '%s' does not match projectRef.id '%s'", labelName, authorizedID, innerID))
+		}
+	}
+	return authorizedID, nil
+}
+
 func getRedactedAPIVarsForProject(ctx context.Context, projectId string) (*restModel.APIProjectVars, error) {
 	vars, err := model.FindOneProjectVars(ctx, projectId)
 	if err != nil {
@@ -795,9 +810,12 @@ func bbGetCreatedTicketsPointers(ctx context.Context, taskId string) ([]*thirdpa
 		}
 	}
 	settings := evergreen.GetEnvironment().Settings()
-	jiraHandler := thirdparty.NewJiraHandler(*settings.Jira.Export())
+	jiraHandler, err := thirdparty.NewJiraHandler(*settings.Jira.Export())
+	if err != nil {
+		return nil, err
+	}
 	for _, ticket := range searchTickets {
-		jiraIssue, err := jiraHandler.GetJIRATicket(ticket)
+		jiraIssue, err := jiraHandler.GetIssue(ctx, ticket)
 		if err != nil {
 			return nil, err
 		}
@@ -993,6 +1011,10 @@ func convertTestSortOptions(ctx context.Context, dbTask *task.Task, opts []*Test
 }
 
 func getBaseTaskTestResultsOptions(ctx context.Context, dbTask *task.Task) ([]task.Task, error) {
+	if dbTask == nil {
+		return nil, nil
+	}
+
 	var (
 		baseTask *task.Task
 		tasks    []task.Task

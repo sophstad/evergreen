@@ -12,6 +12,7 @@ import (
 	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/build"
+	"github.com/evergreen-ci/evergreen/model/cost"
 	"github.com/evergreen-ci/evergreen/model/manifest"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
@@ -128,6 +129,24 @@ func (r *versionResolver) ChildVersions(ctx context.Context, obj *restModel.APIV
 		return childVersions, nil
 	}
 	return nil, nil
+}
+
+// Cost is the field resolver for Version.cost. It applies RoundCost to all adjusted fields
+// so the GraphQL API returns clean values without floating-point noise.
+func (r *versionResolver) Cost(ctx context.Context, obj *restModel.APIVersion) (*cost.Cost, error) {
+	if obj.Cost == nil {
+		return nil, nil
+	}
+	rounded := cost.Cost{
+		AdjustedEC2Cost:               cost.RoundCost(obj.Cost.AdjustedEC2Cost),
+		AdjustedEBSThroughputCost:     cost.RoundCost(obj.Cost.AdjustedEBSThroughputCost),
+		AdjustedEBSStorageCost:        cost.RoundCost(obj.Cost.AdjustedEBSStorageCost),
+		AdjustedS3ArtifactPutCost:     cost.RoundCost(obj.Cost.AdjustedS3ArtifactPutCost),
+		AdjustedS3LogPutCost:          cost.RoundCost(obj.Cost.AdjustedS3LogPutCost),
+		AdjustedS3ArtifactStorageCost: cost.RoundCost(obj.Cost.AdjustedS3ArtifactStorageCost),
+		AdjustedS3LogStorageCost:      cost.RoundCost(obj.Cost.AdjustedS3LogStorageCost),
+	}
+	return &rounded, nil
 }
 
 // ExternalLinksForMetadata is the resolver for the externalLinksForMetadata field.
@@ -523,7 +542,7 @@ func (r *versionResolver) User(ctx context.Context, obj *restModel.APIVersion) (
 
 	dbUser, err := loaders.GetUser(ctx, authorId)
 	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()))
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()), err)
 	}
 	// This is most likely a reaped user, so just return their info from version
 	if dbUser == nil {
@@ -711,7 +730,7 @@ func (r *versionLiteResolver) User(ctx context.Context, obj *model.Version) (*us
 
 	dbUser, err := loaders.GetUser(ctx, obj.AuthorID)
 	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", obj.AuthorID, err.Error()))
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", obj.AuthorID, err.Error()), err)
 	}
 	// This is most likely a service user, so just return their info from version
 	if dbUser == nil {
