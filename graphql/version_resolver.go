@@ -657,24 +657,17 @@ func (r *versionLiteResolver) ChildVersions(ctx context.Context, obj *model.Vers
 	}
 	childPatchIds := foundPatch.Triggers.ChildPatches
 	if len(childPatchIds) > 0 {
-		childVersions, err := model.VersionFind(ctx,
-			db.Query(
-				bson.M{
-					model.VersionIdKey: bson.M{
-						"$in": childPatchIds,
-					},
-				},
-			))
-		if err != nil {
-			return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching child versions for patch '%s': %s", obj.Id, err.Error()))
+		childVersions := make([]*model.Version, 0, len(childPatchIds))
+		for _, cp := range childPatchIds {
+			v, err := loaders.GetVersion(ctx, cp)
+			if err != nil {
+				return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching child version '%s' for patch '%s': %s", cp, obj.Id, err.Error()))
+			}
+			if v != nil {
+				childVersions = append(childVersions, v)
+			}
 		}
-
-		childVersionPtrs := []*model.Version{}
-		for _, v := range childVersions {
-			vCopy := v
-			childVersionPtrs = append(childVersionPtrs, &vCopy)
-		}
-		return childVersionPtrs, nil
+		return childVersions, nil
 	}
 	return nil, nil
 }
