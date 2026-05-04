@@ -46,7 +46,8 @@ func (r *mutationResolver) BbCreateTicket(ctx context.Context, taskID string, ex
 	if err != nil {
 		return false, err
 	}
-	httpStatus, err := data.BbFileTicket(ctx, taskID, *execution)
+	username := mustHaveUser(ctx).Username()
+	httpStatus, err := data.BbFileTicket(ctx, taskID, *execution, username)
 	if err != nil {
 		return false, mapHTTPStatusToGqlError(ctx, httpStatus, err)
 	}
