@@ -646,8 +646,11 @@ func (r *mutationResolver) PromoteVarsToRepo(ctx context.Context, opts PromoteVa
 
 // SaveProjectSettingsForSection is the resolver for the saveProjectSettingsForSection field.
 func (r *mutationResolver) SaveProjectSettingsForSection(ctx context.Context, projectSettings *restModel.APIProjectSettings, section ProjectSettingsSection) (*restModel.APIProjectSettings, error) {
-	projectId := utility.FromStringPtr(projectSettings.ProjectRef.Id)
 	usr := mustHaveUser(ctx)
+	projectId, err := getAuthorizedSettingsID(ctx, projectSettings, "projectId")
+	if err != nil {
+		return nil, err
+	}
 	changes, err := data.SaveProjectSettingsForSection(ctx, projectId, projectSettings, model.ProjectPageSection(section), false, usr.Username())
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, err.Error())
@@ -657,9 +660,12 @@ func (r *mutationResolver) SaveProjectSettingsForSection(ctx context.Context, pr
 
 // SaveRepoSettingsForSection is the resolver for the saveRepoSettingsForSection field.
 func (r *mutationResolver) SaveRepoSettingsForSection(ctx context.Context, repoSettings *restModel.APIProjectSettings, section ProjectSettingsSection) (*restModel.APIProjectSettings, error) {
-	projectId := utility.FromStringPtr(repoSettings.ProjectRef.Id)
 	usr := mustHaveUser(ctx)
-	changes, err := data.SaveProjectSettingsForSection(ctx, projectId, repoSettings, model.ProjectPageSection(section), true, usr.Username())
+	repoId, err := getAuthorizedSettingsID(ctx, repoSettings, "repoId")
+	if err != nil {
+		return nil, err
+	}
+	changes, err := data.SaveProjectSettingsForSection(ctx, repoId, repoSettings, model.ProjectPageSection(section), true, usr.Username())
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, err.Error())
 	}
