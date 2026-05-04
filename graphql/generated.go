@@ -75657,6 +75657,8 @@ func (ec *executionContext) fieldContext_VersionLite_childVersions(_ context.Con
 				return ec.fieldContext_VersionLite_cost(ctx, field)
 			case "createTime":
 				return ec.fieldContext_VersionLite_createTime(ctx, field)
+			case "ingestTime":
+				return ec.fieldContext_VersionLite_ingestTime(ctx, field)
 			case "errors":
 				return ec.fieldContext_VersionLite_errors(ctx, field)
 			case "finishTime":
