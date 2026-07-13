@@ -9,9 +9,7 @@ import (
 	"testing"
 	"time"
 
-	cocoaMock "github.com/evergreen-ci/cocoa/mock"
 	"github.com/evergreen-ci/evergreen"
-	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/cloud/parameterstore/fakeparameter"
 	"github.com/evergreen-ci/evergreen/db"
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
@@ -213,7 +211,7 @@ func (s *ProjectPatchByIDSuite) TestRunWithCommitQueueEnabled() {
 	s.NotNil(resp.Data())
 	s.Require().Equal(http.StatusBadRequest, resp.Status())
 	errResp := (resp.Data()).(gimlet.ErrorResponse)
-	s.Equal("cannot enable commit queue without first enabling GitHub webhooks", errResp.Message)
+	s.Equal("cannot enable commit queue without a commit queue patch definition", errResp.Message)
 }
 
 func (s *ProjectPatchByIDSuite) TestRunWithValidBbConfig() {
@@ -435,105 +433,6 @@ func (s *ProjectPatchByIDSuite) TestPatchTriggerAliases() {
 	s.Nil(p.PatchTriggerAliases)
 }
 
-func (s *ProjectPatchByIDSuite) TestRotateAndDeleteProjectPodSecret() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = gimlet.AttachUser(ctx, &user.DBUser{Id: "Test1"})
-	h := s.rm.(*projectIDPatchHandler)
-	h.user = &user.DBUser{Id: "me"}
-
-	smClient, err := cloud.MakeSecretsManagerClient(ctx, s.env.Settings())
-	s.Require().NoError(err)
-	vault, err := cloud.MakeSecretsManagerVault(smClient)
-	s.Require().NoError(err)
-
-	cocoaMock.ResetGlobalSecretCache()
-	defer cocoaMock.ResetGlobalSecretCache()
-
-	// Create new pod secret.
-	body := []byte(`{
-	"container_secrets": [
-		{
-			"name": "super_secret",
-			"type": "pod_secret",
-			"should_rotate": true
-		}
-	]}`)
-	req, err := http.NewRequest(http.MethodPatch, "http://example.com/api/rest/v2/projects/dimoxinil", bytes.NewBuffer(body))
-	s.Require().NoError(err)
-	req = gimlet.SetURLVars(req, map[string]string{"project_id": "dimoxinil"})
-	s.Require().NoError(s.rm.Parse(ctx, req))
-
-	resp := s.rm.Run(ctx)
-	s.Require().NotNil(resp)
-	s.Require().NotNil(resp.Data())
-	s.Equal(http.StatusOK, resp.Status())
-
-	dbProjRef, err := serviceModel.FindBranchProjectRef(s.T().Context(), "dimoxinil")
-	s.Require().NoError(err)
-	s.Require().NotNil(dbProjRef)
-	s.Require().Len(dbProjRef.ContainerSecrets, 1)
-	s.Equal("super_secret", dbProjRef.ContainerSecrets[0].Name)
-	s.EqualValues(serviceModel.ContainerSecretPodSecret, dbProjRef.ContainerSecrets[0].Type)
-	s.NotZero(dbProjRef.ContainerSecrets[0].ExternalName)
-	s.NotZero(dbProjRef.ContainerSecrets[0].ExternalID)
-
-	externalID := dbProjRef.ContainerSecrets[0].ExternalID
-	s.Require().NotNil(vault)
-	initialStoredValue, err := vault.GetValue(ctx, externalID)
-	s.Require().NoError(err)
-	s.NotZero(initialStoredValue)
-
-	// Rotate the existing pod secret's value.
-	req, err = http.NewRequest(http.MethodPatch, "http://example.com/api/rest/v2/projects/dimoxinil", bytes.NewBuffer(body))
-	s.Require().NoError(err)
-	req = gimlet.SetURLVars(req, map[string]string{"project_id": "dimoxinil"})
-	s.Require().NoError(s.rm.Parse(ctx, req))
-
-	resp = s.rm.Run(ctx)
-	s.Require().NotNil(resp)
-	s.Require().NotNil(resp.Data())
-	s.Equal(http.StatusOK, resp.Status())
-
-	dbProjRef, err = serviceModel.FindBranchProjectRef(s.T().Context(), "dimoxinil")
-	s.Require().NoError(err)
-	s.Require().NotNil(dbProjRef)
-	s.Require().Len(dbProjRef.ContainerSecrets, 1)
-	s.Equal("super_secret", dbProjRef.ContainerSecrets[0].Name)
-	s.EqualValues(serviceModel.ContainerSecretPodSecret, dbProjRef.ContainerSecrets[0].Type)
-	s.NotZero(dbProjRef.ContainerSecrets[0].ExternalName)
-	s.NotZero(dbProjRef.ContainerSecrets[0].ExternalID)
-
-	externalID = dbProjRef.ContainerSecrets[0].ExternalID
-	s.Require().NotNil(vault)
-	newStoredValue, err := vault.GetValue(ctx, externalID)
-	s.Require().NoError(err)
-	s.NotZero(newStoredValue)
-	s.NotEqual(initialStoredValue, newStoredValue)
-
-	// Delete the existing pod secret.
-	body = []byte(`{
-		"delete_container_secrets": ["super_secret"]
-	}`)
-	req, err = http.NewRequest(http.MethodPatch, "http://example.com/api/rest/v2/projects/dimoxinil", bytes.NewBuffer(body))
-	s.Require().NoError(err)
-	req = gimlet.SetURLVars(req, map[string]string{"project_id": "dimoxinil"})
-	s.Require().NoError(s.rm.Parse(ctx, req))
-
-	resp = s.rm.Run(ctx)
-	s.Require().NotNil(resp)
-	s.Require().NotNil(resp.Data())
-	s.Equal(http.StatusOK, resp.Status())
-
-	dbProjRef, err = serviceModel.FindBranchProjectRef(s.T().Context(), "dimoxinil")
-	s.Require().NoError(err)
-	s.Require().NotNil(dbProjRef)
-	s.Empty(dbProjRef.ContainerSecrets, "container secret should have been deleted")
-
-	_, err = vault.GetValue(ctx, externalID)
-	s.Error(err, "secret should have been deleted from the vault")
-}
-
 func (s *ProjectPatchByIDSuite) TestRunWithTestSelection() {
 	ctx := s.T().Context()
 	ctx = gimlet.AttachUser(ctx, &user.DBUser{Id: "Test1"})
@@ -575,7 +474,6 @@ func (s *ProjectPatchByIDSuite) TestRunEveryMainlineCommit() {
 	pRef, err := data.FindProjectById(s.T().Context(), "dimoxinil", false, false)
 	s.NoError(err)
 	s.True(pRef.RunEveryMainlineCommit)
-	s.Equal(5, pRef.RunEveryMainlineCommitLimit)
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -630,7 +528,6 @@ func (s *ProjectPutSuite) TestParse() {
 				"display_name": "Nuts and Gum: together at last!",
 				"local_config": "",
 				"deactivate_previous": true,
-				"tracks_push_events": true,
 				"pr_testing_enabled": true,
 				"commitq_enabled": true,
 				"hidden": true,
@@ -664,7 +561,6 @@ func (s *ProjectPutSuite) TestRunNewWithValidEntity() {
 				"display_name": "Nuts and Gum: together at last!",
 				"local_config": "",
 				"deactivate_previous": true,
-				"tracks_push_events": true,
 				"pr_testing_enabled": true,
 				"commitq_enabled": true,
 				"hidden": true,
@@ -769,7 +665,6 @@ func (s *ProjectGetByIDSuite) TestRunExistingId() {
 	s.Equal(cachedProject.Id, utility.FromStringPtr(projectRef.Id))
 	s.Equal(cachedProject.DisplayName, utility.FromStringPtr(projectRef.DisplayName))
 	s.Equal(cachedProject.DeactivatePrevious, projectRef.DeactivatePrevious)
-	s.Equal(cachedProject.TracksPushEvents, projectRef.TracksPushEvents)
 	s.Equal(cachedProject.PRTestingEnabled, projectRef.PRTestingEnabled)
 	s.Equal(cachedProject.CommitQueue.Enabled, projectRef.CommitQueue.Enabled)
 	s.Equal(cachedProject.Hidden, projectRef.Hidden)
@@ -957,7 +852,6 @@ func getTestProjectRef() *serviceModel.ProjectRef {
 		Identifier:            "dimoxinil",
 		DisplayName:           "Dimoxinil",
 		DeactivatePrevious:    utility.FalsePtr(),
-		TracksPushEvents:      utility.FalsePtr(),
 		PRTestingEnabled:      utility.FalsePtr(),
 		VersionControlEnabled: utility.TruePtr(),
 		CommitQueue: serviceModel.CommitQueueParams{
@@ -1056,8 +950,8 @@ func TestGetProjectVersions(t *testing.T) {
 	h := getProjectVersionsHandler{
 		projectName: "something-else",
 		opts: serviceModel.GetVersionsOptions{
-			Requester: evergreen.AdHocRequester,
-			Limit:     20,
+			Requesters: []string{evergreen.AdHocRequester},
+			Limit:      20,
 		},
 	}
 	resp := h.Run(ctx)
@@ -1075,6 +969,117 @@ func TestGetProjectVersions(t *testing.T) {
 	assert.NoError(err)
 	assert.Contains(string(respJson), `"version_id":"v4"`)
 	assert.Contains(string(respJson), `"version_id":"v1"`)
+}
+
+func TestGetProjectVersionsParseRequesters(t *testing.T) {
+	ctx := t.Context()
+
+	for tName, tCase := range map[string]func(t *testing.T){
+		"SingleRequesterQueryParam": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions?requester=ad_hoc", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.AdHocRequester}, h.opts.Requesters)
+		},
+		"MultipleRequesterQueryParams": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions?requester=gitter_request&requester=ad_hoc", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.RepotrackerVersionRequester, evergreen.AdHocRequester}, h.opts.Requesters)
+		},
+		"DefaultsToRepotrackerWhenNoRequesterSpecified": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.RepotrackerVersionRequester}, h.opts.Requesters)
+		},
+		"RequestersInBodyUsedWhenNoQueryParam": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			body := []byte(`{"requesters": ["ad_hoc"]}`)
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions", bytes.NewReader(body))
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.AdHocRequester}, h.opts.Requesters)
+		},
+		"LegacyRequesterInBodyUsedWhenNoQueryParam": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			body := []byte(`{"requester": "ad_hoc"}`)
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions", bytes.NewReader(body))
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.AdHocRequester}, h.opts.Requesters)
+		},
+		"QueryParamOverridesBodyRequesters": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			body := []byte(`{"requesters": ["ad_hoc"]}`)
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions?requester=gitter_request", bytes.NewReader(body))
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, []string{evergreen.RepotrackerVersionRequester}, h.opts.Requesters)
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			tCase(t)
+		})
+	}
+}
+
+func TestGetProjectVersionsParseLimit(t *testing.T) {
+	ctx := t.Context()
+
+	for tName, tCase := range map[string]func(t *testing.T){
+		"DefaultsWhenUnset": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, defaultVersionLimit, h.opts.Limit)
+		},
+		"AcceptsLimitAtMax": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://example.com/rest/v2/projects/proj/versions?limit=%d", maxVersionLimit), http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, maxVersionLimit, h.opts.Limit)
+		},
+		"RejectsLimitAboveMax": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://example.com/rest/v2/projects/proj/versions?limit=%d", maxVersionLimit+1), http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			assert.Error(t, h.Parse(ctx, req))
+		},
+		"ZeroLimitDefaults": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions?limit=0", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			require.NoError(t, h.Parse(ctx, req))
+			assert.Equal(t, defaultVersionLimit, h.opts.Limit)
+		},
+		"RejectsNegativeLimit": func(t *testing.T) {
+			h := &getProjectVersionsHandler{}
+			req, err := http.NewRequest(http.MethodGet, "https://example.com/rest/v2/projects/proj/versions?limit=-1", http.NoBody)
+			require.NoError(t, err)
+			req = gimlet.SetURLVars(req, map[string]string{"project_id": "proj"})
+			assert.Error(t, h.Parse(ctx, req))
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			tCase(t)
+		})
+	}
 }
 
 func TestDeleteProject(t *testing.T) {
@@ -1115,7 +1120,6 @@ func TestDeleteProject(t *testing.T) {
 			Enabled:              true,
 			DisplayName:          fmt.Sprintf("display_%d", i),
 			RepoRefId:            "repo_ref",
-			TracksPushEvents:     utility.TruePtr(),
 			PRTestingEnabled:     utility.TruePtr(),
 			Admins:               []string{"admin0", "admin1"},
 			NotifyOnBuildFailure: utility.TruePtr(),
@@ -1693,7 +1697,7 @@ func TestModifyProjectVersions(t *testing.T) {
 			for _, b := range builds {
 				assert.NoError(b.Insert(t.Context()))
 			}
-			rm := makeModifyProjectVersionsHandler("").(*modifyProjectVersionsHandler)
+			rm := makeModifyProjectVersionsHandler().(*modifyProjectVersionsHandler)
 			test(t, rm)
 		})
 	}

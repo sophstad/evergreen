@@ -1064,18 +1064,6 @@ func TestCreateBuildFromVersion(t *testing.T) {
 		pref := &ProjectRef{
 			Id:         "projectId",
 			Identifier: "projectName",
-			ContainerSizeDefinitions: []ContainerResources{
-				{
-					Name:     "small",
-					CPU:      256,
-					MemoryMB: 128,
-				},
-				{
-					Name:     "large",
-					CPU:      512,
-					MemoryMB: 256,
-				},
-			},
 		}
 		So(pref.Insert(t.Context()), ShouldBeNil)
 
@@ -1083,31 +1071,6 @@ func TestCreateBuildFromVersion(t *testing.T) {
 			Variant: ".*"}
 		So(alias.Upsert(t.Context()), ShouldBeNil)
 		mustHaveResults := true
-		container1 := Container{
-			Name:       "container1",
-			WorkingDir: "/data",
-			Image:      "ubuntu",
-			Resources: &ContainerResources{
-				MemoryMB: 1024,
-				CPU:      512,
-			},
-			System: ContainerSystem{
-				OperatingSystem: evergreen.LinuxOS,
-				CPUArchitecture: evergreen.ArchARM64,
-			},
-			Credential: "repo_creds",
-		}
-		container2 := Container{
-			Name:       "container2",
-			WorkingDir: "/dir",
-			Image:      "windows",
-			Size:       "small",
-			System: ContainerSystem{
-				OperatingSystem: evergreen.WindowsOS,
-				CPUArchitecture: evergreen.ArchAMD64,
-				WindowsVersion:  evergreen.Windows2019,
-			},
-		}
 		parserProject := &ParserProject{
 			Identifier: utility.ToStringPtr("projectId"),
 			TaskGroups: []parserTaskGroup{
@@ -1168,7 +1131,6 @@ func TestCreateBuildFromVersion(t *testing.T) {
 					Name: "singleHostTaskGroup3",
 				},
 			},
-			Containers:    []Container{container1, container2},
 			BuildVariants: []parserBV{buildVar1, buildVar2, buildVar3, buildVar4, buildVar5},
 		}
 
@@ -1204,7 +1166,7 @@ func TestCreateBuildFromVersion(t *testing.T) {
 		}
 		So(v.Insert(t.Context()), ShouldBeNil)
 
-		project, err := TranslateProject(parserProject)
+		project, err := TranslateProject(t.Context(), parserProject)
 		So(err, ShouldBeNil)
 		So(project, ShouldNotBeNil)
 		table := NewTaskIdConfigForRepotrackerVersion(t.Context(), project, v, TVPairSet{}, "", "")
@@ -1389,38 +1351,10 @@ func TestCreateBuildFromVersion(t *testing.T) {
 				ActivateBuild:    false,
 				TaskNames:        []string{},
 			}
-			build, tasks, err := CreateBuildFromVersionNoInsert(ctx, creationInfo)
+			build, _, err := CreateBuildFromVersionNoInsert(ctx, creationInfo)
 			So(err, ShouldBeNil)
 			So(build.Id, ShouldNotEqual, "")
 			So(len(build.Tasks), ShouldEqual, 4)
-
-			bvContainerOpts := task.ContainerOptions{
-				CPU:           container1.Resources.CPU,
-				MemoryMB:      container1.Resources.MemoryMB,
-				WorkingDir:    container1.WorkingDir,
-				Image:         container1.Image,
-				OS:            container1.System.OperatingSystem,
-				Arch:          container1.System.CPUArchitecture,
-				RepoCredsName: container1.Credential,
-			}
-			taskContainerOpts := task.ContainerOptions{
-				CPU:        256,
-				MemoryMB:   128,
-				WorkingDir: container2.WorkingDir,
-				Image:      container2.Image,
-				OS:         container2.System.OperatingSystem,
-				Arch:       container2.System.CPUArchitecture,
-			}
-			for _, tsk := range tasks[:3] {
-				So(tsk.ExecutionPlatform, ShouldEqual, task.ExecutionPlatformContainer)
-				if tsk.Id != "taskE" {
-					So(tsk.Container, ShouldEqual, container1.Name)
-					So(tsk.ContainerOpts, ShouldResemble, bvContainerOpts)
-				} else {
-					So(tsk.Container, ShouldEqual, container2.Name)
-					So(tsk.ContainerOpts, ShouldResemble, taskContainerOpts)
-				}
-			}
 		})
 
 		Convey("the build should contain task caches that correspond exactly"+
@@ -2833,7 +2767,7 @@ func TestCreateTasksFromGroup(t *testing.T) {
 			},
 		},
 	}
-	bvts := CreateTasksFromGroup(in, p, evergreen.PatchVersionRequester)
+	bvts := CreateTasksFromGroup(in, p, evergreen.PatchVersionRequester, "")
 	require.Len(t, bvts, 2)
 	for _, bvtu := range bvts {
 		require.Len(t, bvtu.DependsOn, 1)
@@ -3169,104 +3103,59 @@ func TestAddNewTasks(t *testing.T) {
 	}
 }
 
-func TestRecomputeNumDependents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestAddNewTasksBatchesBuildFlagUpdates(t *testing.T) {
+	ctx := t.Context()
+	require.NoError(t, db.ClearCollections(VersionCollection, build.Collection, task.Collection))
+	defer func() {
+		assert.NoError(t, db.ClearCollections(VersionCollection, build.Collection, task.Collection))
+	}()
 
-	assert.NoError(t, db.Clear(task.Collection))
-	t1 := task.Task{
-		Id: "1",
-		DependsOn: []task.Dependency{
-			{TaskId: "2"},
-		},
-		Version: "v1",
+	buildIDs := []string{"b0", "b1", "b2"}
+	builds := []build.Build{
+		{Id: "b0", BuildVariant: "bv0", Version: "v0", Activated: true},
+		{Id: "b1", BuildVariant: "bv1", Version: "v0", Activated: true},
+		{Id: "b2", BuildVariant: "bv2", Version: "v0", Activated: true},
 	}
-	assert.NoError(t, t1.Insert(t.Context()))
-	t2 := task.Task{
-		Id: "2",
-		DependsOn: []task.Dependency{
-			{TaskId: "3"},
-		},
-		Version: "v1",
-	}
-	assert.NoError(t, t2.Insert(t.Context()))
-	t3 := task.Task{
-		Id: "3",
-		DependsOn: []task.Dependency{
-			{TaskId: "4"},
-		},
-		Version: "v1",
-	}
-	assert.NoError(t, t3.Insert(t.Context()))
-	t4 := task.Task{
-		Id: "4",
-		DependsOn: []task.Dependency{
-			{TaskId: "5"},
-		},
-		Version: "v1",
-	}
-	assert.NoError(t, t4.Insert(t.Context()))
-	t5 := task.Task{
-		Id:      "5",
-		Version: "v1",
-	}
-	assert.NoError(t, t5.Insert(t.Context()))
-
-	assert.NoError(t, RecomputeNumDependents(ctx, t3))
-	tasks, err := task.Find(ctx, task.ByVersion(t1.Version))
-	assert.NoError(t, err)
-	for i, dbTask := range tasks {
-		assert.Equal(t, i, dbTask.NumDependents)
+	for _, b := range builds {
+		require.NoError(t, b.Insert(ctx))
 	}
 
-	assert.NoError(t, RecomputeNumDependents(ctx, t5))
-	tasks, err = task.Find(ctx, task.ByVersion(t1.Version))
-	assert.NoError(t, err)
-	for i, dbTask := range tasks {
-		assert.Equal(t, i, dbTask.NumDependents)
+	v := &Version{Id: "v0", BuildIds: buildIDs}
+	require.NoError(t, v.Insert(ctx))
+
+	project := Project{
+		BuildVariants: []BuildVariant{
+			{Name: "bv0", Tasks: []BuildVariantTaskUnit{{Name: "t1", Variant: "bv0", RunOn: []string{"d0"}}}},
+			{Name: "bv1", Tasks: []BuildVariantTaskUnit{{Name: "t1", Variant: "bv1", RunOn: []string{"d0"}}}},
+			{Name: "bv2", Tasks: []BuildVariantTaskUnit{{Name: "t1", Variant: "bv2", RunOn: []string{"d0"}}}},
+		},
+		Tasks: []ProjectTask{{Name: "t1"}},
+	}
+	pairs := TaskVariantPairs{ExecTasks: []TVPair{
+		{Variant: "bv0", TaskName: "t1"},
+		{Variant: "bv1", TaskName: "t1"},
+		{Variant: "bv2", TaskName: "t1"},
+	}}
+	creationInfo := TaskCreationInfo{
+		Project:                             &project,
+		ProjectRef:                          &ProjectRef{},
+		Version:                             v,
+		Pairs:                               pairs,
+		ActivatedTasksAreEssentialToSucceed: true,
 	}
 
-	t6 := task.Task{
-		Id: "6",
-		DependsOn: []task.Dependency{
-			{TaskId: "8"},
-		},
-		Version: "v2",
-	}
-	assert.NoError(t, t6.Insert(t.Context()))
-	t7 := task.Task{
-		Id: "7",
-		DependsOn: []task.Dependency{
-			{TaskId: "8"},
-		},
-		Version: "v2",
-	}
-	assert.NoError(t, t7.Insert(t.Context()))
-	t8 := task.Task{
-		Id: "8",
-		DependsOn: []task.Dependency{
-			{TaskId: "9"},
-		},
-		Version: "v2",
-	}
-	assert.NoError(t, t8.Insert(t.Context()))
-	t9 := task.Task{
-		Id:      "9",
-		Version: "v2",
-	}
-	assert.NoError(t, t9.Insert(t.Context()))
+	_, _, err := addNewTasksToExistingBuilds(ctx, creationInfo, builds, "")
+	require.NoError(t, err)
 
-	assert.NoError(t, RecomputeNumDependents(ctx, t8))
-	tasks, err = task.Find(ctx, task.ByVersion(t6.Version))
-	assert.NoError(t, err)
-	expected := map[string]int{
-		"6": 0,
-		"7": 0,
-		"8": 2,
-		"9": 3,
-	}
-	for _, dbTask := range tasks {
-		assert.Equal(t, expected[dbTask.Id], dbTask.NumDependents)
+	for _, id := range buildIDs {
+		dbBuild, err := build.FindOneId(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, dbBuild)
+		assert.True(t, dbBuild.HasUnfinishedEssentialTask, "build '%s' should be flagged as having an unfinished essential task", id)
+
+		tasksInBuild, err := task.FindAll(ctx, db.Query(bson.M{task.BuildIdKey: id}))
+		require.NoError(t, err)
+		assert.Len(t, tasksInBuild, 1, "build '%s' should have its new task created", id)
 	}
 }
 
@@ -3432,7 +3321,7 @@ func TestCanBuildVariantEnableTestSelection(t *testing.T) {
 		}
 		assert.False(t, canBuildVariantEnableTestSelection("bv1", creationInfo))
 	})
-	t.Run("ReturnsFalseForNonPatchVersion", func(t *testing.T) {
+	t.Run("ReturnsTrueForNonPatchVersion", func(t *testing.T) {
 		creationInfo := TaskCreationInfo{
 			ProjectRef: &ProjectRef{
 				TestSelection: TestSelectionSettings{
@@ -3447,7 +3336,7 @@ func TestCanBuildVariantEnableTestSelection(t *testing.T) {
 				IncludeBuildVariants: []*regexp.Regexp{regexp.MustCompile("bv1")},
 			},
 		}
-		assert.False(t, canBuildVariantEnableTestSelection("bv1", creationInfo))
+		assert.True(t, canBuildVariantEnableTestSelection("bv1", creationInfo))
 	})
 	t.Run("ReturnsTrueIfTestSelectionDefaultEnabled", func(t *testing.T) {
 		creationInfo := TaskCreationInfo{
@@ -3543,4 +3432,52 @@ func TestIsTestSelectionEnabledForTask(t *testing.T) {
 			tCase(t, tsk, displayTasks, creationInfo)
 		})
 	}
+}
+
+func TestSetTestSelectionEnabledForTasks(t *testing.T) {
+	creationInfo := TaskCreationInfo{
+		TestSelectionParams: TestSelectionParams{
+			CanBuildVariantEnableTestSelection: true,
+		},
+	}
+	displayTaskIDsToNames := map[string]string{"dt_id": "dt"}
+
+	t.Run("DisplayTaskEnabledWhenAnyExecutionTaskEnabled", func(t *testing.T) {
+		execTasks := map[string]*task.Task{
+			"exec1": {Id: "exec1", DisplayName: "exec1"},
+			"exec2": {Id: "exec2", DisplayName: "exec2"},
+		}
+		dt := &task.Task{Id: "dt_id", DisplayName: "dt", DisplayOnly: true, ExecutionTasks: []string{"exec1", "exec2"}}
+		ci := creationInfo
+		ci.TestSelectionParams.IncludeTasks = []*regexp.Regexp{regexp.MustCompile("exec1")}
+
+		require.NoError(t, setTestSelectionEnabledForTasks(execTasks, []*task.Task{dt}, displayTaskIDsToNames, ci))
+		assert.True(t, execTasks["exec1"].TestSelectionEnabled)
+		assert.False(t, execTasks["exec2"].TestSelectionEnabled)
+		assert.True(t, dt.TestSelectionEnabled, "display task should be enabled when any execution task is")
+	})
+
+	t.Run("DisplayTaskDisabledWhenAllExecutionTasksDisabled", func(t *testing.T) {
+		execTasks := map[string]*task.Task{
+			"exec1": {Id: "exec1", DisplayName: "exec1"},
+			"exec2": {Id: "exec2", DisplayName: "exec2"},
+		}
+		dt := &task.Task{Id: "dt_id", DisplayName: "dt", DisplayOnly: true, ExecutionTasks: []string{"exec1", "exec2"}}
+		ci := creationInfo
+		ci.TestSelectionParams.IncludeTasks = []*regexp.Regexp{regexp.MustCompile("no_match")}
+
+		require.NoError(t, setTestSelectionEnabledForTasks(execTasks, []*task.Task{dt}, displayTaskIDsToNames, ci))
+		assert.False(t, dt.TestSelectionEnabled)
+	})
+
+	t.Run("DisplayTaskIgnoresExecutionTasksNotInMap", func(t *testing.T) {
+		// A display task's ExecutionTasks may reference pre-existing exec tasks
+		// not present in execTasks; the helper should leave the display task
+		// disabled rather than treating missing entries as enabled.
+		execTasks := map[string]*task.Task{}
+		dt := &task.Task{Id: "dt_id", DisplayName: "dt", DisplayOnly: true, ExecutionTasks: []string{"missing_exec"}}
+
+		require.NoError(t, setTestSelectionEnabledForTasks(execTasks, []*task.Task{dt}, displayTaskIDsToNames, creationInfo))
+		assert.False(t, dt.TestSelectionEnabled)
+	})
 }

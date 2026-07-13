@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model/event"
@@ -164,7 +165,9 @@ func (s *APISubscriber) ToService() (event.Subscriber, error) {
 				}
 			}
 		}
-		target = apiModel.ToService()
+		ws := apiModel.ToService()
+		// Stored as a pointer so that populateWebhookSecrets can type-assert Target back to *WebhookSubscriber and mutate it in place.
+		target = &ws
 
 	case event.JIRAIssueSubscriberType:
 		apiModel := APIJIRAIssueSubscriber{}
@@ -302,7 +305,7 @@ func (s *APIWebhookSubscriber) ToService() event.WebhookSubscriber {
 
 func (s *APIWebhookHeader) BuildFromService(h event.WebhookHeader) {
 	s.Key = &h.Key
-	if h.Key == "Authorization" {
+	if strings.EqualFold(h.Key, event.WebhookAuthorizationHeader) {
 		s.Value = utility.ToStringPtr(evergreen.RedactedValue)
 	} else {
 		s.Value = &h.Value

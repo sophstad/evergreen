@@ -27,7 +27,7 @@ const (
 
 func init() {
 	if ExecutionEnvironmentType != "test" {
-		grip.Alert(message.Fields{
+		grip.Alert(context.Background(), message.Fields{
 			"op":      "called init() in testutil for production code.",
 			"test.v":  flag.Lookup("test.v"),
 			"v":       flag.Lookup("v"),
@@ -46,7 +46,7 @@ func Setup() {
 		path := filepath.Join(evergreen.FindEvergreenHome(), TestDir, TestSettings)
 		env, err := evergreen.NewEnvironment(ctx, path, "", "", nil, noop.NewTracerProvider())
 
-		grip.EmergencyPanic(message.WrapError(err, message.Fields{
+		grip.EmergencyPanic(ctx, message.WrapError(err, message.Fields{
 			"message": "could not initialize test environment",
 			"path":    filepath.Join(evergreen.FindEvergreenHome(), TestDir, TestSettings),
 		}))
@@ -59,7 +59,7 @@ func Setup() {
 			SSMClient:      fakeparameter.NewFakeSSMClient(),
 			DB:             env.DB(),
 		})
-		grip.EmergencyPanic(message.WrapError(err, message.Fields{
+		grip.EmergencyPanic(ctx, message.WrapError(err, message.Fields{
 			"message": "could not initialize test environment's parameter manager",
 		}))
 
@@ -152,6 +152,18 @@ func MockConfig() *evergreen.Settings {
 			URL:            "api",
 			CorpURL:        "corp",
 		},
+		RateLimit: evergreen.RateLimitConfig{
+			RESTUserPerHour:        100,
+			RESTUserBurst:          10,
+			RESTServicePerHour:     200,
+			RESTServiceBurst:       20,
+			GraphQLUserPerHour:     300,
+			GraphQLUserBurst:       30,
+			GraphQLServicePerHour:  400,
+			GraphQLServiceBurst:    40,
+			GraphQLComplexityLimit: 1000,
+			ElevatedUserIDs:        []string{"user1", "user2"},
+		},
 		AuthConfig: evergreen.AuthConfig{
 			Okta: &evergreen.OktaConfig{
 				ClientID:           "id",
@@ -186,6 +198,13 @@ func MockConfig() *evergreen.Settings {
 			},
 			BackgroundReauthMinutes: 60,
 		},
+		OktaServiceConfig: evergreen.OktaServiceConfig{
+			ClientID:     "service_id",
+			ClientSecret: "service_secret",
+			Scopes:       []string{"scope1", "scope2"},
+			Audience:     "audience",
+			Issuer:       "issuer",
+		},
 		AWSInstanceRole: "role",
 		Banner:          "banner",
 		BannerTheme:     "IMPORTANT",
@@ -194,13 +213,19 @@ func MockConfig() *evergreen.Settings {
 				Name: "logs",
 				Type: evergreen.BucketTypeS3,
 			},
+			RetryFailedLogMoveLookbackDays:  7,
+			RetryFailedLogMoveMaxJobsPerRun: 50,
 			TestResultsBucket: evergreen.BucketConfig{
-				Name: "test_results",
-				Type: evergreen.BucketTypeS3,
+				Name:              "test_results",
+				Type:              evergreen.BucketTypeS3,
+				DBName:            "test_results_db",
+				TestResultsPrefix: "tr/prefix/",
+				RoleARN:           "arn:aws:iam::123456789012:role/test-results",
 			},
 			Credentials: evergreen.S3Credentials{
 				Key:    "aws_key",
 				Secret: "aws_secret",
+				Bucket: "credentials_bucket",
 			},
 		},
 		ConfigDir: "cfg_dir",
@@ -218,6 +243,13 @@ func MockConfig() *evergreen.Settings {
 					Port:          9999,
 				},
 			},
+		},
+		DebugSpawnHosts: evergreen.DebugSpawnHostsConfig{
+			SetupScript: "echo 'test setup script'",
+		},
+		Diagnostics: evergreen.DiagnosticsConfig{
+			S3BucketName: "diagnostics-bucket",
+			S3Prefix:     "pprof",
 		},
 		DomainName: "example.com",
 		Expansions: map[string]string{"k2": "v2"},
@@ -272,17 +304,11 @@ func MockConfig() *evergreen.Settings {
 		ParameterStore: evergreen.ParameterStoreConfig{
 			Prefix: "/prefix",
 		},
-		Plugins: map[string]map[string]any{"k4": {"k5": "v5"}},
-		PodLifecycle: evergreen.PodLifecycleConfig{
-			MaxParallelPodRequests:      2000,
-			MaxPodDefinitionCleanupRate: 100,
-			MaxSecretCleanupRate:        200,
-		},
+		Plugins:   map[string]map[string]any{"k4": {"k5": "v5"}},
 		PprofPort: "port",
 		ProjectCreation: evergreen.ProjectCreationConfig{
 			TotalProjectLimit: 400,
 			RepoProjectLimit:  10,
-			JiraProject:       "EVG",
 			RepoExceptions: []evergreen.OwnerRepo{
 				{
 					Owner: "owner",
@@ -310,50 +336,6 @@ func MockConfig() *evergreen.Settings {
 				PersistentDNS: evergreen.PersistentDNSConfig{
 					HostedZoneID: "hosted_zone_id",
 					Domain:       "example.com",
-				},
-				Pod: evergreen.AWSPodConfig{
-					Role:   "role",
-					Region: "region",
-					ECS: evergreen.ECSConfig{
-						MaxCPU:               2048,
-						MaxMemoryMB:          4096,
-						TaskDefinitionPrefix: "ecs_prefix",
-						TaskRole:             "task_role",
-						ExecutionRole:        "execution_role",
-						LogRegion:            "log_region",
-						LogStreamPrefix:      "log_stream_prefix",
-						LogGroup:             "log_group",
-						AWSVPC: evergreen.AWSVPCConfig{
-							Subnets:        []string{"subnet-12345"},
-							SecurityGroups: []string{"sg-12345"},
-						},
-						Clusters: []evergreen.ECSClusterConfig{
-							{
-								Name: "linux_cluster_name",
-								OS:   evergreen.ECSOSLinux,
-							},
-							{
-								Name: "windows_cluster_name",
-								OS:   evergreen.ECSOSLinux,
-							},
-						},
-						CapacityProviders: []evergreen.ECSCapacityProvider{
-							{
-								Name: "linux_capacity_provider_name",
-								OS:   evergreen.ECSOSLinux,
-								Arch: evergreen.ECSArchAMD64,
-							},
-							{
-								Name:           "windows_capacity_provider_name",
-								OS:             evergreen.ECSOSWindows,
-								Arch:           evergreen.ECSArchAMD64,
-								WindowsVersion: evergreen.ECSWindowsServer2022,
-							},
-						},
-					},
-					SecretsManager: evergreen.SecretsManagerConfig{
-						SecretPrefix: "secret_prefix",
-					},
 				},
 				AccountRoles: []evergreen.AWSAccountRoleMapping{
 					{
@@ -385,7 +367,6 @@ func MockConfig() *evergreen.Settings {
 			TaskDispatchDisabled:            true,
 			LargeParserProjectsDisabled:     true,
 			HostInitDisabled:                true,
-			PodInitDisabled:                 true,
 			MonitorDisabled:                 true,
 			AlertsDisabled:                  true,
 			AgentStartDisabled:              true,
@@ -401,19 +382,14 @@ func MockConfig() *evergreen.Settings {
 			WebhookNotificationsDisabled:    true,
 			GithubStatusAPIDisabled:         true,
 			BackgroundReauthDisabled:        true,
-			PodAllocatorDisabled:            true,
-			UnrecognizedPodCleanupDisabled:  true,
 			CloudCleanupDisabled:            true,
 			SleepScheduleDisabled:           true,
-			StaticAPIKeysDisabled:           true,
-			JWTTokenForCLIDisabled:          true,
 			SystemFailedTaskRestartDisabled: true,
 			CPUDegradedModeDisabled:         true,
 			ElasticIPsDisabled:              true,
 			ReleaseModeDisabled:             true,
 			LegacyUIAdminPageDisabled:       true,
 			DebugSpawnHostDisabled:          true,
-			UseGitForGitHubFilesDisabled:    true,
 		},
 		SingleTaskDistro: evergreen.SingleTaskDistroConfig{
 			ProjectTasksPairs: []evergreen.ProjectTasksPair{
@@ -461,7 +437,6 @@ func MockConfig() *evergreen.Settings {
 		},
 		Ui: evergreen.UIConfig{
 			Url:                "url",
-			HelpUrl:            "helpurl",
 			HttpListenAddr:     "addr",
 			Secret:             "secret",
 			DefaultProject:     "mci",

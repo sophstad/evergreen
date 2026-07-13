@@ -7,6 +7,7 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
+	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/annotations"
 	"github.com/evergreen-ci/evergreen/model/distro"
@@ -215,6 +216,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 1",
 		Execution:               0,
 		Status:                  evergreen.TaskSucceeded,
+		DisplayStatusCache:      evergreen.TaskSucceeded,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 	t2 := task.Task{
@@ -225,6 +227,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 1",
 		Execution:               0,
 		Status:                  evergreen.TaskFailed,
+		DisplayStatusCache:      evergreen.TaskFailed,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 	t3 := task.Task{
@@ -235,6 +238,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 2",
 		Execution:               1,
 		Status:                  evergreen.TaskSucceeded,
+		DisplayStatusCache:      evergreen.TaskSucceeded,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 	t4 := task.Task{
@@ -245,6 +249,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 2",
 		Execution:               1,
 		Status:                  evergreen.TaskFailed,
+		DisplayStatusCache:      evergreen.TaskFailed,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 	t5 := task.Task{
@@ -255,6 +260,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 1",
 		Execution:               1,
 		Status:                  evergreen.TaskFailed,
+		DisplayStatusCache:      evergreen.TaskFailed,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 	t6 := task.Task{
@@ -265,6 +271,7 @@ func TestConcurrentlyBuildVersionsMatchingTasksMap(t *testing.T) {
 		BuildVariantDisplayName: "Build Variant 2",
 		Execution:               1,
 		Status:                  evergreen.TaskFailed,
+		DisplayStatusCache:      evergreen.TaskFailed,
 		DisplayTaskId:           utility.ToStringPtr(""),
 	}
 
@@ -526,6 +533,36 @@ func TestFlattenOtelVariables(t *testing.T) {
 	assert.Equal(t, "v7", val)
 }
 
+func TestGetAPIProjectRef(t *testing.T) {
+	assert.NoError(t, db.ClearCollections(model.ProjectRefCollection))
+
+	t.Run("ReturnsNilForDeletedProject", func(t *testing.T) {
+		ctx := loaders.Inject(t.Context())
+		projectId := "deleted_project"
+		result, err := getAPIProjectRef(ctx, &projectId)
+		assert.NoError(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("ReturnsProjectMetadataForExistingProject", func(t *testing.T) {
+		ctx := loaders.Inject(t.Context())
+		projectRef := model.ProjectRef{
+			Id:         "existing_project",
+			Identifier: "existing_project",
+			Owner:      "my_owner",
+			Repo:       "my_repo",
+			Branch:     "main",
+		}
+		assert.NoError(t, projectRef.Insert(ctx))
+		projectId := "existing_project"
+		result, err := getAPIProjectRef(ctx, &projectId)
+		assert.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "my_owner", utility.FromStringPtr(result.Owner))
+		assert.Equal(t, "my_repo", utility.FromStringPtr(result.Repo))
+	})
+}
+
 func TestGetHostRequestOptionsDebugValidation(t *testing.T) {
 	assert.NoError(t, db.ClearCollections(user.Collection, distro.Collection))
 
@@ -536,7 +573,7 @@ func TestGetHostRequestOptionsDebugValidation(t *testing.T) {
 
 	d := &distro.Distro{
 		Id:       "test-distro",
-		Provider: evergreen.ProviderNameEc2OnDemand,
+		Provider: evergreen.ProviderNameEc2Fleet,
 	}
 	assert.NoError(t, d.Insert(t.Context()))
 	t.Run("IsDebugTrueWithoutSpawnHostsStartedByTaskFails", func(t *testing.T) {

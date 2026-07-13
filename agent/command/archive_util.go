@@ -16,6 +16,13 @@ import (
 	"github.com/pkg/errors"
 )
 
+// pathEscapesRoot reports whether a path relative to the root (as returned by
+// filepath.Rel) climbs above the root. A name that merely contains ".." (for
+// example a file literally named "..data") does not escape and is allowed.
+func pathEscapesRoot(relpath string) bool {
+	return relpath == ".." || strings.HasPrefix(relpath, ".."+string(filepath.Separator))
+}
+
 // validateRelativePath checks if the filePath is relative to the rootpath.
 func validateRelativePath(filePath, rootPath string) error {
 	if filepath.IsAbs(filePath) {
@@ -33,21 +40,57 @@ func validateRelativePath(filePath, rootPath string) error {
 	if err != nil {
 		return errors.Wrap(err, "getting relative path")
 	}
-	if strings.Contains(relpath, "..") {
-		return errors.New("relative path starts with '..'")
+	if pathEscapesRoot(relpath) {
+		return errors.New("relative path resolves outside the root path")
 	}
 	return nil
 }
 
+// validateSymlinkTarget verifies that following a symlink located at linkPath
+// whose raw target is linkname cannot resolve outside rootPath. A relative
+// target is resolved against the symlink's own directory (its real semantics);
+// an absolute target is rejected because it is host-specific and would point
+// outside the extracted tree.
+func validateSymlinkTarget(linkname, linkPath, rootPath string) error {
+	if filepath.IsAbs(linkname) {
+		return errors.New("symlink target is absolute")
+	}
+	resolved := filepath.Join(filepath.Dir(linkPath), linkname)
+	relpath, err := filepath.Rel(rootPath, resolved)
+	if err != nil {
+		return errors.Wrap(err, "getting relative path of symlink target")
+	}
+	if pathEscapesRoot(relpath) {
+		return errors.New("symlink target resolves outside the root path")
+	}
+	return nil
+}
+
+// buildArchiveOptions configures how buildArchive writes files into the archive.
+type buildArchiveOptions struct {
+	tarWriter *tar.Writer
+	rootPath  string
+	paths     []archiveContentFile
+	excludes  []string
+	logger    grip.Journaler
+	verbose   bool
+	// preserveSymlinks archives symlinks as symlink entries (preserving their
+	// targets); otherwise they are dereferenced and the target's contents are
+	// stored at the symlink's path.
+	preserveSymlinks bool
+}
+
 // buildArchive reads the rootPath directory into the tar.Writer,
 // taking included and excluded strings into account.
-// Returns the number of files that were added to the archive
-func buildArchive(ctx context.Context, tarWriter *tar.Writer, rootPath string, pathsToAdd []archiveContentFile,
-	excludes []string, logger grip.Journaler) (int, error) {
+// Returns the number of files that were added to the archive.
+func buildArchive(ctx context.Context, opts buildArchiveOptions) (int, error) {
+	tarWriter, rootPath, logger := opts.tarWriter, opts.rootPath, opts.logger
+	pathsToAdd, excludes := opts.paths, opts.excludes
+	verbose, preserveSymlinks := opts.verbose, opts.preserveSymlinks
 
 	numFilesArchived := 0
 	processed := map[string]bool{}
-	logger.Infof("Beginning to build archive.")
+	logger.Infof(ctx, "Beginning to build archive.")
 FileLoop:
 	for _, file := range pathsToAdd {
 		if err := ctx.Err(); err != nil {
@@ -55,19 +98,20 @@ FileLoop:
 		}
 
 		var intarball string
-		// Tarring symlinks doesn't work reliably right now, so if the file is
-		// a symlink, leave intarball path intact but write from the file
-		// underlying the symlink.
-		if file.info.Mode()&os.ModeSymlink > 0 {
+		// When preserveSymlinks is false, tarring symlinks doesn't work reliably,
+		// so leave the intarball path intact but write from the file underlying
+		// the symlink. When preserveSymlinks is true, the symlink is left alone
+		// here and archived as a symlink entry below.
+		if file.info.Mode()&os.ModeSymlink > 0 && !preserveSymlinks {
 			symlinkPath, err := filepath.EvalSymlinks(file.path)
 			if err != nil {
-				logger.Warningf("Could not follow symlink '%s', ignoring.", file.path)
+				logger.Warningf(ctx, "Could not follow symlink '%s', ignoring.", file.path)
 				continue
 			} else {
-				logger.Infof("Following symlink '%s', got path '%s'.", file.path, symlinkPath)
+				logger.Infof(ctx, "Following symlink '%s', got path '%s'.", file.path, symlinkPath)
 				symlinkFileInfo, err := os.Stat(symlinkPath)
 				if err != nil {
-					logger.Warningf("Failed to get underlying file for symlink '%s', ignoring.", file.path)
+					logger.Warningf(ctx, "Failed to get underlying file for symlink '%s', ignoring.", file.path)
 					continue
 				}
 
@@ -91,7 +135,9 @@ FileLoop:
 			continue
 		}
 
-		logger.Infof("Adding file to tarball: '%s'.", intarball)
+		if verbose {
+			logger.Infof(ctx, "Adding file to tarball: '%s'.", intarball)
+		}
 		if _, hasKey := processed[intarball]; hasKey {
 			continue
 		} else {
@@ -119,7 +165,27 @@ FileLoop:
 			if err := tarWriter.WriteHeader(hdr); err != nil {
 				return numFilesArchived, errors.Wrapf(err, "writing tarball header for directory '%s'", intarball)
 			}
-			logger.Warning(errors.Wrap(tarWriter.Flush(), "flushing tar writer"))
+			logger.Warning(ctx, errors.Wrap(tarWriter.Flush(), "flushing tar writer"))
+			continue
+		}
+
+		if file.info.Mode()&os.ModeSymlink > 0 {
+			// Reachable only when preserveSymlinks is true; otherwise the block
+			// at the top of the loop rewrote file.info to the dereferenced target.
+			// os.Readlink preserves the raw (possibly relative or broken) target,
+			// which is what tools like NPM expect to find on restore.
+			target, err := os.Readlink(file.path)
+			if err != nil {
+				logger.Warningf(ctx, "Could not read symlink '%s', ignoring.", file.path)
+				continue
+			}
+			hdr.Typeflag = tar.TypeSymlink
+			hdr.Linkname = target
+			numFilesArchived++
+			if err := tarWriter.WriteHeader(hdr); err != nil {
+				return numFilesArchived, errors.Wrapf(err, "writing tarball header for symlink '%s'", intarball)
+			}
+			logger.Warning(ctx, errors.Wrap(tarWriter.Flush(), "flushing tar writer"))
 			continue
 		}
 
@@ -137,23 +203,23 @@ FileLoop:
 		}
 		amountWrote, err := io.Copy(tarWriter, in)
 		if err != nil {
-			logger.Debug(errors.Wrapf(in.Close(), "closing file '%s'", file.path))
+			logger.Debug(ctx, errors.Wrapf(in.Close(), "closing file '%s'", file.path))
 			return numFilesArchived, errors.Wrapf(err, "copying file '%s' into tarball", file.path)
 		}
 
 		if amountWrote != hdr.Size {
-			logger.Debug(errors.Wrapf(in.Close(), "closing file '%s'", file.path))
+			logger.Debug(ctx, errors.Wrapf(in.Close(), "closing file '%s'", file.path))
 			return numFilesArchived, errors.Errorf("tarball header size is %d but actually wrote %d", hdr.Size, amountWrote)
 		}
 
-		logger.Debug(errors.Wrapf(in.Close(), "closing file '%s'", file.path))
-		logger.Warning(errors.Wrap(tarWriter.Flush(), "flushing tar writer"))
+		logger.Debug(ctx, errors.Wrapf(in.Close(), "closing file '%s'", file.path))
+		logger.Warning(ctx, errors.Wrap(tarWriter.Flush(), "flushing tar writer"))
 	}
 
 	return numFilesArchived, nil
 }
 
-func extractTarball(ctx context.Context, reader io.Reader, rootPath string, excludes []string) error {
+func extractTarball(ctx context.Context, reader io.Reader, rootPath string, excludes []string, preserveSymlinks bool) error {
 	// wrap the reader in a gzip reader and a tar reader
 	gzipReader, err := pgzip.NewReader(reader)
 	if err != nil {
@@ -161,7 +227,7 @@ func extractTarball(ctx context.Context, reader io.Reader, rootPath string, excl
 	}
 
 	tarReader := tar.NewReader(gzipReader)
-	err = extractTarballArchive(ctx, tarReader, rootPath, excludes)
+	err = extractTarballArchive(ctx, tarReader, rootPath, excludes, preserveSymlinks)
 	if err != nil {
 		return errors.Wrapf(err, "extracting path '%s'", rootPath)
 	}
@@ -169,8 +235,11 @@ func extractTarball(ctx context.Context, reader io.Reader, rootPath string, excl
 	return nil
 }
 
-// extractTarballArchive unpacks the tar.Reader into rootPath.
-func extractTarballArchive(ctx context.Context, tarReader *tar.Reader, rootPath string, excludes []string) error {
+// extractTarballArchive unpacks the tar.Reader into rootPath. When
+// preserveSymlinks is true, symlink entries are recreated with their original
+// (possibly relative) targets, validated to stay within rootPath; otherwise
+// symlink targets are interpreted relative to rootPath.
+func extractTarballArchive(ctx context.Context, tarReader *tar.Reader, rootPath string, excludes []string, preserveSymlinks bool) error {
 	// Link files and symlink files are extracted after all other files are extracted.
 	linkFiles := []func() error{}
 tarReaderLoop:
@@ -199,14 +268,23 @@ tarReaderLoop:
 		if err := validateRelativePath(name, rootPath); err != nil {
 			return errors.Wrapf(err, "artifact path name '%s' should be relative to the root path", name)
 		}
-		if linkname != "" {
-			if err := validateRelativePath(linkname, rootPath); err != nil {
-				return errors.Wrapf(err, "artifact path link name '%s' should be relative to the root path", linkname)
-			}
-		}
 
 		namePath := filepath.Join(rootPath, name)
 		linkNamePath := filepath.Join(rootPath, linkname)
+
+		if linkname != "" {
+			// A preserved symlink keeps its raw (possibly relative) target, which
+			// resolves against the symlink's own directory. Every other link
+			// (hard links, and symlinks when preservation is off) is interpreted
+			// relative to the root path.
+			if hdr.Typeflag == tar.TypeSymlink && preserveSymlinks {
+				if err := validateSymlinkTarget(linkname, namePath, rootPath); err != nil {
+					return errors.Wrapf(err, "validating symlink target '%s' for '%s'", linkname, name)
+				}
+			} else if err := validateRelativePath(linkname, rootPath); err != nil {
+				return errors.Wrapf(err, "artifact path link name '%s' should be relative to the root path", linkname)
+			}
+		}
 
 		for _, ignore := range excludes {
 			if match, _ := filepath.Match(ignore, name); match {
@@ -227,9 +305,30 @@ tarReaderLoop:
 			})
 		case tar.TypeSymlink:
 			// Tar entry for a symbolic link.
-			linkFiles = append(linkFiles, func() error {
-				return os.Symlink(linkNamePath, namePath)
-			})
+			if preserveSymlinks {
+				// Recreate the symlink with its raw target so relative links
+				// (e.g. an NPM node_modules/.bin entry) are preserved verbatim.
+				rawLinkname := linkname
+				linkFiles = append(linkFiles, func() error {
+					if err := os.MkdirAll(filepath.Dir(namePath), 0755); err != nil {
+						return errors.Wrapf(err, "creating directory '%s'", filepath.Dir(namePath))
+					}
+					// Remove any existing entry so restoring into an
+					// already-populated tree (e.g. a second cache.restore in a
+					// task group) overwrites like regular-file extraction does,
+					// instead of failing with EEXIST. A non-recursive remove is
+					// deliberate: silently deleting a directory tree to make room
+					// for a symlink would be too destructive.
+					if err := os.Remove(namePath); err != nil && !os.IsNotExist(err) {
+						return errors.Wrapf(err, "removing existing entry '%s'", namePath)
+					}
+					return os.Symlink(rawLinkname, namePath)
+				})
+			} else {
+				linkFiles = append(linkFiles, func() error {
+					return os.Symlink(linkNamePath, namePath)
+				})
+			}
 		case tar.TypeReg, tar.TypeRegA:
 			// Tar entry for a regular file.
 			// First, ensure the file's parent directory exists.
@@ -237,7 +336,7 @@ tarReaderLoop:
 				return errors.WithStack(err)
 			}
 
-			err := writeFileWithContentsAndPermission(namePath, tarReader, os.FileMode(hdr.Mode))
+			err := writeFileWithContentsAndPermission(ctx, namePath, tarReader, os.FileMode(hdr.Mode))
 			if err != nil {
 				return err
 			}
@@ -247,13 +346,13 @@ tarReaderLoop:
 	}
 }
 
-func writeFileWithContentsAndPermission(path string, contents io.Reader, mode fs.FileMode) error {
+func writeFileWithContentsAndPermission(ctx context.Context, path string, contents io.Reader, mode fs.FileMode) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 	defer func() {
-		grip.Error(errors.Wrapf(f.Close(), "closing file '%s'", path))
+		grip.Error(ctx, errors.Wrapf(f.Close(), "closing file '%s'", path))
 	}()
 
 	if _, err = io.Copy(f, contents); err != nil {
@@ -313,6 +412,15 @@ func findContentsToArchive(ctx context.Context, rootPath string, includes, exclu
 	return out, totalSize, nil
 }
 
+func anyExcludesMatch(path string, excludes []string) bool {
+	for _, exclude := range excludes {
+		if match, _ := filepath.Match(exclude, path); match {
+			return true
+		}
+	}
+	return false
+}
+
 // findArchiveContents returns files to be archived starting at the rootPath. It
 // matches all files that match any of the include filters and are not excluded
 // by one of the exclude filters. At least one include filter must be given for
@@ -347,47 +455,39 @@ func findArchiveContents(ctx context.Context, rootPath string, includes, exclude
 			return nil, 0, errors.Wrapf(err, "canceled while streaming archive for include pattern '%s'", includePattern)
 		}
 
-		var walk fs.WalkDirFunc
+		switch {
+		case filematch == "":
+			// If the pattern ends in "/", it will never include anything
+		case !strings.ContainsAny(includePattern, "*?[]"):
+			// If there's no glob pattern, no need to walk any directories
+			fullPath := filepath.Join(rootPath, includePattern)
 
-		if filematch == "**" {
-			walk = func(path string, di fs.DirEntry, err error) error {
-				if err != nil {
-					return err
+			if !anyExcludesMatch(fullPath, excludes) {
+				fileInfo, err := os.Stat(fullPath)
+				if err == nil {
+					addUniqueFile(fullPath, fileInfo)
+				} else if os.IsNotExist(err) {
+					// It's ok if the file does not exist.
+					continue
 				}
-
-				for _, ignore := range excludes {
-					if match, _ := filepath.Match(ignore, path); match {
-						return nil
-					}
-				}
-
-				info, err := di.Info()
-				if err != nil {
-					return errors.WithStack(errors.Wrap(err, "getting file info while walking glob path"))
-				}
-
-				addUniqueFile(path, info)
-
-				return nil
+				catcher.Wrapf(err, "matching single file '%s' in path '%s'", includePattern, rootPath)
 			}
-			catcher.Wrapf(filepath.WalkDir(dir, walk), "matching files included in filter '%s' for path '%s'", filematch, dir)
-		} else if strings.Contains(filematch, "**") {
+		case strings.Contains(filematch, "**"):
+			// Note, this may be empty, in which case HasSuffix will always be true.
 			globSuffix := filematch[2:]
-			walk = func(path string, di fs.DirEntry, err error) error {
+			var walk fs.WalkDirFunc = func(path string, di fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
 
 				if strings.HasSuffix(filepath.Base(path), globSuffix) {
-					for _, ignore := range excludes {
-						if match, _ := filepath.Match(ignore, path); match {
-							return nil
-						}
+					if anyExcludesMatch(path, excludes) {
+						return nil
 					}
 
 					info, err := di.Info()
 					if err != nil {
-						return errors.WithStack(errors.Wrap(err, "getting file info while walking partial glob path"))
+						return errors.WithStack(errors.Wrapf(err, "getting file info while walking glob path for filter '%s' and path '%s'", filematch, path))
 					}
 
 					addUniqueFile(path, info)
@@ -395,36 +495,32 @@ func findArchiveContents(ctx context.Context, rootPath string, includes, exclude
 				return nil
 			}
 			catcher.Wrapf(filepath.WalkDir(dir, walk), "matching files included in filter '%s' for path '%s'", filematch, dir)
-		} else {
-			walk = func(path string, di fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-
-				a, b := filepath.Split(path)
-				if filepath.Clean(a) == filepath.Clean(dir) {
-					match, err := filepath.Match(filematch, b)
-					if err != nil {
-						archiveContents = append(archiveContents, archiveContentFile{err: err})
-					}
-					if match {
-						for _, ignore := range excludes {
-							if exmatch, _ := filepath.Match(ignore, path); exmatch {
-								return nil
-							}
-						}
-
-						info, err := di.Info()
-						if err != nil {
-							return errors.WithStack(errors.Wrap(err, "getting file info while walking strict path"))
-						}
-
-						addUniqueFile(path, info)
-					}
-				}
-				return nil
+		default:
+			// We know there are no '**' wildcards since they would have been caught in the above, so no need to recurse
+			files, err := os.ReadDir(dir)
+			if err != nil {
+				catcher.Wrapf(err, "reading directory '%s' with filter '%s'", dir, filematch)
+				break
 			}
-			catcher.Wrapf(filepath.WalkDir(rootPath, walk), "matching files included in filter '%s' for path '%s'", filematch, rootPath)
+
+			for _, file := range files {
+				match, err := filepath.Match(filematch, file.Name())
+				if err != nil {
+					archiveContents = append(archiveContents, archiveContentFile{err: err})
+				}
+				path := filepath.Join(dir, file.Name())
+				if match {
+					if anyExcludesMatch(path, excludes) {
+						continue
+					}
+					fileInfo, err := file.Info()
+					if err != nil {
+						catcher.Wrapf(err, "getting file info for '%s' while reading directory '%s' with filter '%s'", path, dir, filematch)
+					} else {
+						addUniqueFile(path, fileInfo)
+					}
+				}
+			}
 		}
 	}
 

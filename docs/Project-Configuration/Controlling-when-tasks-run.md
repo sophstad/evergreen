@@ -13,6 +13,8 @@ In short:
 
 **Batchtime:** sets an interval of time in minutes that Evergreen should wait before activating builds/tasks on mainline commits. It will only activate the build/tasks for latest commit. If used with activate true, batchtime will be ignored and the builds/tasks will run every time.
 
+**Disable**: if set to true, this prevents the task from being created at all. This cannot be overridden.
+
 **Periodic Builds:** creates a _new version_ with specified variants/tasks at a specified interval, regardless of commit activity. (This is not a yaml setting.)
 
 The yaml settings **only apply to mainline commits.** If more than one is set, more specific details on how these
@@ -82,9 +84,36 @@ buildvariants:
 
 For more on cron and batchtime, see [build variants](../Project-Configuration/Project-Configuration-Files/#build-variants).
 
+## Disable
+
+To cause a task to not be created at all, set `disable: true`.
+
+- This behaves similarly to commenting out the task but will not
+  trigger any validation errors.
+- Disabling a task prevents it from being warned on for not being used.
+- If a task is disabled and is depended on by another task, the
+  dependent task will simply exclude the disabled task from its
+  dependencies.
+- If a task is disabled, it will not be activated by cron or batchtime,
+  even if they are set up for the task.
+
 ## Periodic Builds
 
 Periodic builds will create a new version (viewable on the project's waterfall page) with the tasks/variants you specify at the interval you specify, regardless of whether there are new commits. For example, if set up to run daily, a new periodic build will be created each day. This is ideal if you want to run builds on a consistent schedule, regardless of commit activity.
 Periodic builds cannot be used with performance tooling, like performance monitoring charts.
 
 Periodic builds are set up on the project settings page under the periodic builds section. For more information on how to set up periodic builds, please see [periodic builds](../Project-Configuration/Project-and-Distro-Settings#periodic-builds).
+
+## Caveat: Batch Promotion Workflows
+
+Note that pushing commits in batches will not work as expected with these settings.
+Evergreen looks at the **latest commit only** and decides whether it needs
+to be activated based on cron/batchtime/activation settings. Therefore, if multiple commits are promoted at once,
+only the latest commit in that batch is evaluated, and the intermediate commits are skipped.
+
+_Example: Commits A, B, and C are added to another branch throughout the week,
+and these are batch-promoted on Friday. When Evergreen's activation job runs, it only looks at commit C (the latest). Commits A
+and B are skipped entirely and will never have their cron/batchtime considered._
+
+If you need every commit to run certain tasks or cron/batchtime to behave as expected,
+push commits individually rather than in batches, or enable [Run Every Mainline Commit](Project-and-Distro-Settings#interaction-with-batchtime-and-cron).

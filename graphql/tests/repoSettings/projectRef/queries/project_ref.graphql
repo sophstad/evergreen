@@ -36,11 +36,6 @@
       buildBaronSettings {
         ticketCreateProject
         ticketSearchProjects
-        bfSuggestionFeaturesURL
-        bfSuggestionPassword
-        bfSuggestionServer
-        bfSuggestionTimeoutSecs
-        bfSuggestionUsername
         ticketCreateIssueType
       }
 
@@ -49,12 +44,6 @@
           endpoint
           secret
         }
-      }
-
-      containerSizeDefinitions {
-        name
-        cpu
-        memoryMb
       }
     }
   }

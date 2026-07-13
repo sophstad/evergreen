@@ -15,6 +15,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model/build"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/event"
+	mfst "github.com/evergreen-ci/evergreen/model/manifest"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
 	modelutil "github.com/evergreen-ci/evergreen/model/testutil"
@@ -44,7 +45,7 @@ func TestFetchRevisions(t *testing.T) {
 		repoTracker := RepoTracker{
 			testConfig,
 			evgProjectRef,
-			NewGithubRepositoryPoller(evgProjectRef),
+			NewGithubRepositoryPoller(evgProjectRef, testConfig),
 		}
 
 		Convey("Fetching commits from the repository should not return any errors", func() {
@@ -85,7 +86,7 @@ func TestStoreRepositoryRevisions(t *testing.T) {
 	Convey("When storing revisions gotten from a repository...", t, func() {
 		err := modelutil.CreateTestLocalConfig(t.Context(), testConfig, "mci-test", "")
 		So(err, ShouldBeNil)
-		repoTracker := RepoTracker{testConfig, evgProjectRef, NewGithubRepositoryPoller(evgProjectRef)}
+		repoTracker := RepoTracker{testConfig, evgProjectRef, NewGithubRepositoryPoller(evgProjectRef, testConfig)}
 
 		d := distro.Distro{Id: "test-distro-one"}
 		So(d.Insert(ctx), ShouldBeNil)
@@ -1824,6 +1825,46 @@ func TestCreateManifest(t *testing.T) {
 	}
 	_, err = model.CreateManifest(t.Context(), &v, proj.Modules, projRef)
 	assert.Contains(err.Error(), "No commit found for SHA")
+
+	// patch with module ref that differs from base manifest should use YAML ref
+	baseRevision := "b27779f856b211ffaf97cbc124b7082a20ea8bc0"
+	yamlRef := "cf46076567e4949f9fc68e0634139d4ac495c89b"
+	baseManifest := mfst.Manifest{
+		Id:          "aaaaaaaaaaff001122334455",
+		Revision:    patchVersion.Revision,
+		ProjectName: patchVersion.Identifier,
+		Modules: map[string]*mfst.Module{
+			"module1": {
+				Branch:   "main",
+				Repo:     "sample",
+				Owner:    "evergreen-ci",
+				Revision: baseRevision,
+			},
+		},
+		IsBase: true,
+	}
+	_, err = baseManifest.TryInsert(t.Context())
+	require.NoError(t, err)
+
+	proj = model.Project{
+		Identifier: "proj",
+		Modules: []model.Module{
+			{
+				Name:   "module1",
+				Owner:  "evergreen-ci",
+				Repo:   "sample",
+				Branch: "main",
+				Ref:    yamlRef,
+			},
+		},
+	}
+	manifest, err = model.CreateManifest(t.Context(), &patchVersion, proj.Modules, projRef)
+	require.NotNil(t, manifest)
+	assert.Equal(patchVersion.Id, manifest.Id)
+	assert.Len(manifest.Modules, 1)
+	module, ok = manifest.Modules["module1"]
+	require.True(t, ok)
+	assert.Equal(yamlRef, module.Revision, "patch should use YAML ref when it differs from base manifest")
 }
 
 func TestShellVersionFromRevisionGitTags(t *testing.T) {
@@ -1895,6 +1936,140 @@ func TestShellVersionFromRevisionGitTags(t *testing.T) {
 	assert.Equal(t, usr.Id, v.AuthorID)
 	assert.Equal(t, usr.DisplayName(), v.Author)
 	assert.Equal(t, usr.Email(), v.AuthorEmail)
+}
+
+func TestResolveUserFromMetadata(t *testing.T) {
+	ctx := t.Context()
+
+	uidUser := &user.DBUser{
+		Id:           "uid-user",
+		DispName:     "UID User",
+		EmailAddress: "uid@example.com",
+		Settings:     user.UserSettings{GithubUser: user.GithubUser{UID: 1001}},
+	}
+	loginUser := &user.DBUser{
+		Id:           "login-user",
+		DispName:     "Login User",
+		EmailAddress: "login@example.com",
+		Settings:     user.UserSettings{GithubUser: user.GithubUser{LastKnownAs: "loginuser"}},
+	}
+	derivedUser := &user.DBUser{
+		Id:           "hello.world",
+		DispName:     "Hello World",
+		EmailAddress: "hello@example.com",
+	}
+	emailUser := &user.DBUser{
+		Id:           "jane.doe",
+		DispName:     "Jane Doe",
+		EmailAddress: "jane.doe@mongodb.com",
+	}
+
+	for _, tc := range []struct {
+		name         string
+		metadata     model.VersionMetadata
+		expectedUser *user.DBUser
+	}{
+		{
+			name: "GitTagPusher",
+			metadata: model.VersionMetadata{
+				GitTag: model.GitTag{Pusher: "loginuser"},
+			},
+			expectedUser: loginUser,
+		},
+		{
+			name: "AuthorGithubUID",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{AuthorGithubUID: 1001},
+			},
+			expectedUser: uidUser,
+		},
+		{
+			name: "DerivedIDFromFullName",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{Author: "Hello World"},
+			},
+			expectedUser: derivedUser,
+		},
+		{
+			name: "DerivedIDFromNameWithMiddleName",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{Author: "Hello My World"},
+			},
+			expectedUser: derivedUser,
+		},
+		{
+			name: "DerivedIDFromEmail",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{AuthorEmail: "jane.doe@mongodb.com"},
+			},
+			expectedUser: emailUser,
+		},
+		{
+			name: "DerivedIDFromEmailCaseInsensitive",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{AuthorEmail: "Jane.Doe@Mongodb.com"},
+			},
+			expectedUser: emailUser,
+		},
+		{
+			name: "DerivedIDFromNonMongoDBEmail",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{AuthorEmail: "jane.doe@example.com"},
+			},
+			expectedUser: emailUser,
+		},
+		{
+			name: "EmailMatchPrecedesNameMatch",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{
+					Author:      "Jane Doe",
+					AuthorEmail: "jane.doe@mongodb.com",
+				},
+			},
+			expectedUser: emailUser,
+		},
+		{
+			name: "SingleWordAuthorNameNoMatch",
+			metadata: model.VersionMetadata{
+				Revision: model.Revision{Author: "Hello"},
+			},
+			expectedUser: nil,
+		},
+		{
+			name:         "NoMetadata",
+			metadata:     model.VersionMetadata{},
+			expectedUser: nil,
+		},
+		{
+			name: "PresetUserSkipsResolution",
+			metadata: model.VersionMetadata{
+				User: uidUser,
+				Revision: model.Revision{
+					// These would resolve to loginUser and emailUser respectively,
+					// but resolution should be skipped entirely.
+					AuthorGithubUID: 1001,
+					AuthorEmail:     "jane.doe@mongodb.com",
+				},
+			},
+			expectedUser: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, db.ClearCollections(user.Collection))
+			require.NoError(t, uidUser.Insert(ctx))
+			require.NoError(t, loginUser.Insert(ctx))
+			require.NoError(t, derivedUser.Insert(ctx))
+			require.NoError(t, emailUser.Insert(ctx))
+
+			usr := resolveUserFromMetadata(ctx, "version_id", tc.metadata)
+			if tc.expectedUser == nil {
+				assert.Nil(t, usr)
+			} else {
+				require.NotNil(t, usr)
+				assert.Equal(t, tc.expectedUser.Id, usr.Id)
+			}
+		})
+	}
 }
 
 func TestCreateVersionItemsPathFiltering(t *testing.T) {
@@ -1973,6 +2148,8 @@ buildvariants:
   - "shared/**"
   tasks:
   - name: frontend_test
+  - name: special_task
+    activate: true
 - name: backend
   display_name: Backend
   run_on: d
@@ -1983,6 +2160,14 @@ buildvariants:
   - "go.mod"
   tasks:
   - name: backend_test
+- name: frontend-special-cron
+  # this variant is never ignored on mainline due to cron, despite path filtering.
+  cron: 0 0 * * *
+  paths:
+  - "frontend/**"
+  - "shared/**"
+  tasks:
+  - name: frontend_test
 - name: non_docs
   display_name: Non-Documentation
   run_on: d
@@ -2001,6 +2186,7 @@ tasks:
 - name: backend_test
 - name: non_docs_test
 - name: integration_test
+- name: special_task
 `
 
 			projectRef := &model.ProjectRef{
@@ -2039,8 +2225,12 @@ tasks:
 
 			ignoredVariants := []string{}
 			for _, bv := range v.BuildVariants {
-				if bv.Ignored {
+				if utility.IsZeroTime(bv.ActivateAt) { // This should be set if the variant is ignored due to path filtering.
 					ignoredVariants = append(ignoredVariants, bv.BuildVariant)
+					if bv.BuildVariant == "frontend" { // Ensure that the task that overrides activation is given an activation time.
+						require.Len(t, bv.BatchTimeTasks, 1)
+						assert.Equal(t, bv.BatchTimeTasks[0].TaskName, "special_task")
+					}
 				}
 			}
 

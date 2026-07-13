@@ -43,7 +43,7 @@ func (d *mockRepoPoller) GetChangedFiles(_ context.Context, commitRevision strin
 	return nil, nil
 }
 
-func (d *mockRepoPoller) GetRemoteConfig(_ context.Context, revision string) (model.ProjectInfo, error) {
+func (d *mockRepoPoller) GetRemoteConfig(ctx context.Context, revision string) (model.ProjectInfo, error) {
 	d.ConfigGets++
 	if d.nextError != nil {
 		return model.ProjectInfo{}, d.clearError()
@@ -54,7 +54,7 @@ func (d *mockRepoPoller) GetRemoteConfig(_ context.Context, revision string) (mo
 		d.badDistro = ""
 	}
 
-	p, err := model.TranslateProject(d.parserProject)
+	p, err := model.TranslateProject(ctx, d.parserProject)
 	if err != nil {
 		return model.ProjectInfo{}, errors.Wrapf(err, model.TranslateProjectError)
 	}
@@ -65,14 +65,14 @@ func (d *mockRepoPoller) GetRemoteConfig(_ context.Context, revision string) (mo
 	}, nil
 }
 
-func (d *mockRepoPoller) GetRevisionsSince(ctx context.Context, revision string, maxRevisionsToSearch int) ([]model.Revision, error) {
+func (d *mockRepoPoller) GetRevisionsSince(_ context.Context, revision string, maxRevisionsToSearch int) ([]model.Revision, error) {
 	if d.nextError != nil {
 		return nil, d.clearError()
 	}
 	return d.revisions, nil
 }
 
-func (d *mockRepoPoller) GetRecentRevisions(maxRevisionsToSearch int) ([]model.Revision, error) {
+func (d *mockRepoPoller) GetRecentRevisions(_ context.Context, _maxRevisionsToSearch int) ([]model.Revision, error) {
 	if d.nextError != nil {
 		return nil, d.clearError()
 	}

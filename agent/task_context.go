@@ -16,6 +16,7 @@ import (
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/patch"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/pail"
 	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/grip"
@@ -49,12 +50,17 @@ type taskContext struct {
 	task                 client.TaskData
 	// ranSetupGroup is true during task setup if the task is a new standalone
 	// task or if it's the first task in a task group.
-	ranSetupGroup bool
-	taskConfig    *internal.TaskConfig
-	timeout       timeoutInfo
-	oomTracker    jasper.OOMTracker
-	traceID       string
-	diskDevices   []string
+	ranSetupGroup   bool
+	taskConfig      *internal.TaskConfig
+	timeout         timeoutInfo
+	oomTracker      jasper.OOMTracker
+	traceID         string
+	diskDevices     []string
+	resourceMonitor *resourceMonitor
+	// s3Usage tracks S3 API usage accumulated during task execution
+	s3Usage s3usage.S3Usage
+	// backgroundFailures is the bidirectional end of the channel whose send-only end is exposed to commands via TaskConfig.
+	backgroundFailures chan error
 	// taskCleanups and taskGroupCleanups store the cleanup commands for the
 	// task and setup group, respectively.
 	taskCleanups       []internal.CommandCleanup
@@ -108,7 +114,7 @@ func (tc *taskContext) runTaskCommandCleanups(ctx context.Context, logger client
 	defer span.End()
 
 	if err := errors.Wrap(runCommandCleanups(ctx, tc.taskCleanups, trace), "running setup group command cleanups"); err != nil {
-		logger.Execution().Error(err)
+		logger.Execution().Error(ctx, err)
 	}
 }
 
@@ -122,7 +128,7 @@ func (tc *taskContext) runSetupGroupCommandCleanups(ctx context.Context, logger 
 	defer span.End()
 
 	if err := errors.Wrap(runCommandCleanups(ctx, tc.setupGroupCleanups, trace), "running setup group command cleanups"); err != nil {
-		logger.Execution().Error(err)
+		logger.Execution().Error(ctx, err)
 	}
 }
 
@@ -182,7 +188,7 @@ func (tc *taskContext) setCurrentCommand(command command.Command) {
 	defer tc.Unlock()
 	tc.currentCommand = command
 	if tc.logger != nil {
-		tc.logger.Execution().Infof("Current command set to %s (%s).", tc.currentCommand.FullDisplayName(), tc.currentCommand.Type())
+		tc.logger.Execution().Infof(context.Background(), "Current command set to %s (%s).", tc.currentCommand.FullDisplayName(), tc.currentCommand.Type())
 	}
 }
 
@@ -195,7 +201,7 @@ func (tc *taskContext) getCurrentCommand() command.Command {
 // setCurrentIdleTimeout sets the idle timeout for the current running command.
 // This timeout only applies to commands running in specific blocks where idle
 // timeout is allowed.
-func (tc *taskContext) setCurrentIdleTimeout(cmd command.Command) {
+func (tc *taskContext) setCurrentIdleTimeout(ctx context.Context, cmd command.Command) {
 	tc.Lock()
 	defer tc.Unlock()
 
@@ -212,7 +218,7 @@ func (tc *taskContext) setCurrentIdleTimeout(cmd command.Command) {
 
 	tc.setIdleTimeout(timeout)
 
-	tc.logger.Execution().Debugf("Set idle timeout for %s (%s) to %s.",
+	tc.logger.Execution().Debugf(ctx, "Set idle timeout for %s (%s) to %s.",
 		cmd.FullDisplayName(), cmd.Type(), tc.getIdleTimeout())
 }
 
@@ -315,23 +321,79 @@ func (tc *taskContext) getTimeoutType() globals.TimeoutType {
 func (tc *taskContext) getExecTimeout() time.Duration {
 	tc.RLock()
 	defer tc.RUnlock()
+
 	if dynamicTimeout := tc.taskConfig.GetExecTimeout(); dynamicTimeout > 0 {
 		if tc.taskConfig.MaxExecTimeoutSecs != 0 && dynamicTimeout > tc.taskConfig.MaxExecTimeoutSecs {
 			return time.Duration(tc.taskConfig.MaxExecTimeoutSecs) * time.Second
 		}
 		return time.Duration(dynamicTimeout) * time.Second
 	}
-	if pt := tc.taskConfig.Project.FindProjectTask(tc.taskConfig.Task.DisplayName); pt != nil && pt.ExecTimeoutSecs > 0 {
-		return time.Duration(pt.ExecTimeoutSecs) * time.Second
+
+	bvTask := tc.taskConfig.Project.FindTaskForVariant(
+		tc.taskConfig.Task.DisplayName,
+		tc.taskConfig.Task.BuildVariant,
+	)
+	if bvTask != nil && bvTask.ExecTimeoutSecs > 0 {
+		return time.Duration(bvTask.ExecTimeoutSecs) * time.Second
 	}
+
 	if tc.taskConfig.Project.ExecTimeoutSecs > 0 {
 		return time.Duration(tc.taskConfig.Project.ExecTimeoutSecs) * time.Second
 	}
 	return globals.DefaultExecTimeout
 }
 
+// getPSCommand retrieves the ps command from the task configuration following the priority order:
+// 1. Build variant task-level PS
+// 2. Project task-level PS
+// 3. Project-level PS
+// 4. Expansion fallback (only when PSLoggingDisabled=false for backward compatibility)
+// The value is expanded to support users specifying expansions in YAML (e.g., ps: "${my_ps}").
+func (tc *taskContext) getPSCommand() string {
+	tc.RLock()
+	defer tc.RUnlock()
+
+	// Check build variant task-level PS (highest priority).
+	bvTask := tc.taskConfig.Project.FindTaskForVariant(
+		tc.taskConfig.Task.DisplayName,
+		tc.taskConfig.Task.BuildVariant,
+	)
+	if bvTask != nil && bvTask.PS != nil {
+		ps, _ := tc.taskConfig.Expansions.ExpandString(*bvTask.PS)
+		return ps
+	}
+
+	// Check project task-level PS (second priority).
+	projectTask := tc.taskConfig.Project.FindProjectTask(tc.taskConfig.Task.DisplayName)
+	if projectTask != nil && projectTask.PS != nil {
+		ps, _ := tc.taskConfig.Expansions.ExpandString(*projectTask.PS)
+		return ps
+	}
+
+	// Check project-level PS (third priority).
+	if tc.taskConfig.Project.PS != "" {
+		ps, _ := tc.taskConfig.Expansions.ExpandString(tc.taskConfig.Project.PS)
+		return ps
+	}
+
+	// For backward compatibility: when PSLoggingDisabled=false, fall back to ps expansion.
+	// This allows distro/build variant expansions to work for existing projects.
+	if !tc.taskConfig.PSLoggingDisabled {
+		if psExpansion := tc.taskConfig.Expansions.Get("ps"); psExpansion != "" {
+			return psExpansion
+		}
+		// Default to "ps" when PSLoggingDisabled is false and no expansion is set.
+		return "ps"
+	}
+
+	return ""
+}
+
 // makeTaskConfig fetches task configuration data required to run the task from the API server.
 func (a *Agent) makeTaskConfig(ctx context.Context, tc *taskContext) (*internal.TaskConfig, error) {
+	ctx, span := a.tracer.Start(ctx, "make-task-config")
+	defer span.End()
+
 	if tc.taskConfig != nil {
 		// This is only relevant in tests. For convenience, tests can
 		// pre-initialize a task config to use instead of fetching the task
@@ -339,29 +401,35 @@ func (a *Agent) makeTaskConfig(ctx context.Context, tc *taskContext) (*internal.
 		return tc.taskConfig, nil
 	}
 
-	grip.Info("Fetching task info.")
+	grip.Info(ctx, "Fetching task info.")
 	taskInfo, err := a.fetchTaskInfo(ctx, tc)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetching task info")
 	}
 
-	grip.Info("Fetching distro configuration.")
+	grip.Info(ctx, "Fetching distro configuration.")
 	confDistro := &apimodels.DistroView{}
 	confHost := &apimodels.HostView{}
 	if a.opts.Mode == globals.HostMode {
 		var err error
+		ctx, getDistroSpan := a.tracer.Start(ctx, "get-distro-view")
 		confDistro, err = a.comm.GetDistroView(ctx, tc.task)
+		getDistroSpan.End()
 		if err != nil {
 			return nil, errors.Wrap(err, "fetching distro view")
 		}
+		ctx, getHostSpan := a.tracer.Start(ctx, "get-host-view")
 		confHost, err = a.comm.GetHostView(ctx, tc.task)
+		getHostSpan.End()
 		if err != nil {
 			return nil, errors.Wrap(err, "fetching host view")
 		}
 	}
 
-	grip.Info("Fetching project ref.")
+	grip.Info(ctx, "Fetching project ref.")
+	ctx, getProjectRefSpan := a.tracer.Start(ctx, "get-project-ref")
 	confRef, err := a.comm.GetProjectRef(ctx, tc.task)
+	getProjectRefSpan.End()
 	if err != nil {
 		return nil, errors.Wrap(err, "getting project ref")
 	}
@@ -371,8 +439,10 @@ func (a *Agent) makeTaskConfig(ctx context.Context, tc *taskContext) (*internal.
 
 	var confPatch *patch.Patch
 	if evergreen.IsGitHubPatchRequester(taskInfo.task.Requester) {
-		grip.Info("Fetching patch document for GitHub PR request.")
+		grip.Info(ctx, "Fetching patch document for GitHub PR request.")
+		ctx, getTaskPatchSpan := a.tracer.Start(ctx, "get-task-patch")
 		confPatch, err = a.comm.GetTaskPatch(ctx, tc.task)
+		getTaskPatchSpan.End()
 		if err != nil {
 			return nil, errors.Wrap(err, "fetching patch for GitHub PR request")
 		}
@@ -380,15 +450,17 @@ func (a *Agent) makeTaskConfig(ctx context.Context, tc *taskContext) (*internal.
 
 	var versionDoc *model.Version
 	if confPatch == nil {
-		grip.Info("Fetching version document for description.")
+		grip.Info(ctx, "Fetching version document for description.")
+		ctx, getTaskVersionSpan := a.tracer.Start(ctx, "get-task-version")
 		versionDoc, err = a.comm.GetTaskVersion(ctx, tc.task)
+		getTaskVersionSpan.End()
 		if err != nil {
 			// Don't return an error since it's not essential to have the version.
-			grip.Error("Error fetching version document for description.")
+			grip.Error(ctx, "Error fetching version document for description.")
 		}
 	}
 
-	grip.Info("Constructing task config.")
+	grip.Info(ctx, "Constructing task config.")
 	tcOpts := internal.TaskConfigOptions{
 		WorkDir:           a.opts.WorkingDirectory,
 		Distro:            confDistro,
@@ -407,6 +479,8 @@ func (a *Agent) makeTaskConfig(ctx context.Context, tc *taskContext) (*internal.
 	}
 	taskConfig.TaskOutput = a.opts.SetupData.TaskOutput
 	taskConfig.MaxExecTimeoutSecs = a.opts.SetupData.MaxExecTimeoutSecs
+	taskConfig.PSLoggingDisabled = a.opts.SetupData.PSLoggingDisabled
+	taskConfig.BackgroundCommandFailureEnabled = a.opts.SetupData.BackgroundCommandFailureEnabled
 
 	// Set AWS credentials for task output buckets.
 	awsCreds := pail.CreateAWSStaticCredentials(taskConfig.TaskOutput.Key, taskConfig.TaskOutput.Secret, "")

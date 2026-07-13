@@ -47,8 +47,9 @@ func GitApplyNumstat(patch string) (*bytes.Buffer, error) {
 		return nil, errors.Wrapf(err, "creating local patch file")
 	}
 	defer func() {
-		grip.Error(handle.Close())
-		grip.Error(os.Remove(handle.Name()))
+		bg := context.Background()
+		grip.Error(bg, handle.Close())
+		grip.Error(bg, os.Remove(handle.Name()))
 	}()
 	// convert the patch to bytes
 	buf := []byte(patch)
@@ -102,7 +103,7 @@ func ParseGitSummary(gitOutput fmt.Stringer) (summaries []Summary, err error) {
 		// we expect to get the number of additions,
 		// the number of deletions, and the filename
 		if len(details) != 3 {
-			grip.Debug(message.Fields{
+			grip.Debug(context.Background(), message.Fields{
 				"message": "file stat details has unexpected length",
 				"details": details,
 				"length":  len(details),
@@ -113,22 +114,22 @@ func ParseGitSummary(gitOutput fmt.Stringer) (summaries []Summary, err error) {
 		additions, err = strconv.Atoi(details[0])
 		if err != nil {
 			if details[0] == "-" {
-				grip.Warningf("Line addition count for %v is '%v' assuming "+
+				grip.Warningf(context.Background(), "Line addition count for %v is '%v' assuming "+
 					"binary data diff, using 0", details[2], details[0])
 				additions = 0
 			} else {
-				return nil, errors.Wrap(err, "Error getting patch additions summary")
+				return nil, errors.Wrap(err, "getting patch additions summary")
 			}
 		}
 
 		deletions, err = strconv.Atoi(details[1])
 		if err != nil {
 			if details[1] == "-" {
-				grip.Warningf("Line deletion count for %v is '%v' assuming "+
+				grip.Warningf(context.Background(), "Line deletion count for %v is '%v' assuming "+
 					"binary data diff, using 0", details[2], details[1])
 				deletions = 0
 			} else {
-				return nil, errors.Wrap(err, "Error getting patch deletions summary")
+				return nil, errors.Wrap(err, "getting patch deletions summary")
 			}
 		}
 
@@ -237,37 +238,41 @@ func ParseGitVersion(version string) (string, error) {
 }
 
 // GetGitHubFileFromGit retrieves a single file's contents from GitHub using
-// git. Ref must be a commit hash or branch.
-func GetGitHubFileFromGit(ctx context.Context, owner, repo, ref, file string) ([]byte, error) {
+// git. If a worktree is specified, it will retrieve the file using that
+// preloaded git worktree. Ref must be a commit hash or branch.
+func GetGitHubFileFromGit(ctx context.Context, owner, repo, ref, file, worktree string) ([]byte, error) {
 	ctx, span := tracer.Start(ctx, "GetGitHubFileFromGit")
 	defer span.End()
 
-	dir, err := gitCloneMinimal(ctx, owner, repo, ref)
-	if err != nil {
-		return nil, errors.Wrap(err, "git cloning repository")
+	var dir string
+	if worktree == "" {
+		var err error
+		dir, err = GitCloneMinimal(ctx, owner, repo, ref)
+		if err != nil {
+			return nil, errors.Wrap(err, "git cloning repository")
+		}
+		defer func() {
+			grip.Warning(ctx, message.WrapError(os.RemoveAll(dir), message.Fields{
+				"message": "could not clean up git clone directory",
+				"owner":   owner,
+				"repo":    repo,
+				"ref":     ref,
+				"file":    file,
+			}))
+		}()
+	} else {
+		dir = worktree
 	}
-	defer func() {
-		grip.Warning(message.WrapError(os.RemoveAll(dir), message.Fields{
-			"message": "could not clean up git clone directory",
-			"owner":   owner,
-			"repo":    repo,
-			"ref":     ref,
-			"file":    file,
-			"ticket":  "DEVPROD-26143",
-		}))
-	}()
 
-	fileContent, err := gitRestoreFile(ctx, owner, repo, ref, dir, file)
+	fileContent, err := GitRestoreFile(ctx, owner, repo, ref, dir, file)
 	return fileContent, errors.Wrap(err, "restoring git file")
 }
 
-const gitOperationTimeout = 15 * time.Second
-
-// gitCloneMinimal performs a minimal git clone of a repository using the GitHub
+// GitCloneMinimal performs a minimal git clone of a repository using the GitHub
 // app. The minimal clone contains only git metadata for the one revision and
 // has no file content. Callers are expected to clean up the returned git
 // directory when it is no longer needed.
-func gitCloneMinimal(ctx context.Context, owner, repo, revision string) (string, error) {
+func GitCloneMinimal(ctx context.Context, owner, repo, revision string) (string, error) {
 	ctx, span := tracer.Start(ctx, "gitCloneMinimal", trace.WithAttributes(
 		attribute.String(githubOwnerAttribute, owner),
 		attribute.String(githubRepoAttribute, repo),
@@ -275,24 +280,20 @@ func gitCloneMinimal(ctx context.Context, owner, repo, revision string) (string,
 	))
 	defer span.End()
 
+	ctx, cancel := context.WithTimeout(ctx, GitOperationTimeout)
+	defer cancel()
+
 	token, err := getInstallationToken(ctx, owner, repo, nil)
 	if err != nil {
 		return "", errors.Wrap(err, "creating GitHub app installation token")
 	}
 
-	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("git-clone-%s-%s-", owner, repo))
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("git-clone-%s-%s-%s-", owner, repo, revision))
 	if err != nil {
 		return "", errors.Wrap(err, "creating temp dir for git clone")
 	}
 
 	repoURL := FormGitURLForApp(owner, repo, token)
-
-	// Limit how long this can clone to prevent this from running too long. This
-	// is an experimental feature and should not meaningfully impact performance
-	// while it's being tested out. Realistically, if it took more than this
-	// long to do a minimal clone, it would be too slow to be usable.
-	ctx, cancel := context.WithTimeout(ctx, gitOperationTimeout)
-	defer cancel()
 
 	// Clone the repository with the bare minimum metadata for just the one
 	// commit. Don't fetch any actual file blobs yet.
@@ -311,24 +312,22 @@ func gitCloneMinimal(ctx context.Context, owner, repo, revision string) (string,
 		repoURL,
 		tmpDir,
 	)
-	var (
-		stdout strings.Builder
-		stderr strings.Builder
-	)
+	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
-			"message":  "minimal git clone failed",
-			"ticket":   "DEVPROD-26143",
-			"owner":    owner,
-			"repo":     repo,
-			"revision": revision,
-			"stdout":   stdout.String(),
-			"stderr":   stderr.String(),
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message":          "minimal git clone failed",
+			"owner":            owner,
+			"repo":             repo,
+			"revision":         revision,
+			"stdout":           stdout.String(),
+			"stderr":           stderr.String(),
+			"is_context_error": ctx.Err() != nil,
 		}))
 		catcher := grip.NewBasicCatcher()
+		catcher.Add(ctx.Err())
 		catcher.Wrapf(err, "git cloning repo '%s/%s'", owner, repo)
 		catcher.Wrap(os.RemoveAll(tmpDir), "cleaning up temp dir after failed git clone")
 		return "", catcher.Resolve()
@@ -337,13 +336,55 @@ func gitCloneMinimal(ctx context.Context, owner, repo, revision string) (string,
 	return tmpDir, nil
 }
 
+const GitOperationTimeout = 15 * time.Second
+
+// GitCreateWorktree creates a new git worktree in worktreeDir based on gitDir.
+// It does not perform a checkout. Callers are assumed to have already cloned
+// the repo into gitDir and HEAD is assumed to be already pointing to the
+// desired revision.
+func GitCreateWorktree(ctx context.Context, gitDir, worktreeDir string) error {
+	ctx, span := tracer.Start(ctx, "GitCreateWorktree")
+	defer span.End()
+
+	ctx, cancel := context.WithTimeout(ctx, GitOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add",
+		"--no-checkout",
+		"--detach",
+		worktreeDir)
+	cmd.Dir = gitDir
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return errors.Wrapf(ctx.Err(), "creating git worktree '%s'", worktreeDir)
+		}
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message":          "git worktree add failed",
+			"worktree_dir":     worktreeDir,
+			"stdout":           stdout.String(),
+			"stderr":           stderr.String(),
+			"is_context_error": ctx.Err() != nil,
+		}))
+		catcher := grip.NewBasicCatcher()
+		catcher.Add(ctx.Err())
+		catcher.Wrapf(err, "git creating worktree '%s'", worktreeDir)
+		return catcher.Resolve()
+	}
+
+	return nil
+}
+
 const gitErrorFileNotFound = "did not match any file(s) known to git"
 
-// gitRestoreFile restores a git file within the given git directory and returns
+// GitRestoreFile restores a git file within the given git directory and returns
 // its contents. Callers are assumed to have already cloned the repo into dir
 // and HEAD is assumed to be already pointing to the desired revision.
-func gitRestoreFile(ctx context.Context, owner, repo, revision, dir string, fileName string) ([]byte, error) {
-	ctx, span := tracer.Start(ctx, "gitRestoreFile", trace.WithAttributes(
+func GitRestoreFile(ctx context.Context, owner, repo, revision, gitDir string, fileName string) ([]byte, error) {
+	ctx, span := tracer.Start(ctx, "GitRestoreFile", trace.WithAttributes(
 		attribute.String(githubOwnerAttribute, owner),
 		attribute.String(githubRepoAttribute, repo),
 		attribute.String(githubRefAttribute, revision),
@@ -351,27 +392,19 @@ func gitRestoreFile(ctx context.Context, owner, repo, revision, dir string, file
 	))
 	defer span.End()
 
+	ctx, cancel := context.WithTimeout(ctx, GitOperationTimeout)
+	defer cancel()
+
 	// Validate that the file is within the git directory to prevent attempts to
 	// access files outside the git repo. The requested file could be
 	// user-provided (e.g. an include file), which is not trusted.
-	if err := validateFileIsWithinDirectory(dir, fileName); err != nil {
+	if err := validateFileIsWithinDirectory(gitDir, fileName); err != nil {
 		return nil, errors.Wrapf(err, "validating file path '%s' is within git repo directory", fileName)
 	}
 
-	// Limit how long this can spend restoring the file to prevent this from
-	// running too long. This is an experimental feature and should not
-	// meaningfully impact performance while it's being tested out.
-	// Realistically, if it took more than this long to restore a single file,
-	// it would be too slow to be usable.
-	ctx, cancel := context.WithTimeout(ctx, gitOperationTimeout)
-	defer cancel()
-
 	cmd := exec.CommandContext(ctx, "git", "restore", "--source=HEAD", fileName)
-	cmd.Dir = dir
-	var (
-		stdout strings.Builder
-		stderr strings.Builder
-	)
+	cmd.Dir = gitDir
+	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -381,27 +414,30 @@ func gitRestoreFile(ctx context.Context, owner, repo, revision, dir string, file
 			// the file doesn't exist in the repo at the given revision.
 			return nil, FileNotFoundError{filepath: fileName}
 		}
-		grip.Error(message.WrapError(err, message.Fields{
-			"message":   "git restore failed",
-			"ticket":    "DEVPROD-26143",
-			"owner":     owner,
-			"repo":      repo,
-			"revision":  revision,
-			"stdout":    stdout.String(),
-			"stderr":    stderr.String(),
-			"file_name": fileName,
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message":          "git restore failed",
+			"owner":            owner,
+			"repo":             repo,
+			"revision":         revision,
+			"stdout":           stdout.String(),
+			"stderr":           stderr.String(),
+			"file_name":        fileName,
+			"is_context_error": ctx.Err() != nil,
 		}))
-		return nil, errors.Wrapf(err, "restoring file '%s'", fileName)
+		catcher := grip.NewBasicCatcher()
+		catcher.Add(ctx.Err())
+		catcher.Wrapf(err, "git restoring file '%s'", fileName)
+		return nil, catcher.Resolve()
 	}
 
 	// Validate that the restored file is not a symlink to prevent attempts to
 	// access a different file in the file system (e.g. a file in the git repo
 	// that symlinks to `~/.ssh/id_rsa`).
-	if err := validateFileIsNotSymlink(dir, fileName); err != nil {
+	if err := validateFileIsNotSymlink(gitDir, fileName); err != nil {
 		return nil, errors.Wrapf(err, "validating file '%s' is not a symlink", fileName)
 	}
 
-	contents, err := os.ReadFile(filepath.Join(dir, fileName))
+	contents, err := os.ReadFile(filepath.Join(gitDir, fileName))
 	if err != nil {
 		return nil, errors.Wrapf(err, "reading restored file '%s'", fileName)
 	}

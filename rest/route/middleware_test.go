@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,11 +12,8 @@ import (
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/db/mgo/bson"
 	"github.com/evergreen-ci/evergreen/model"
-	"github.com/evergreen-ci/evergreen/model/distro"
-	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/model/patch"
-	"github.com/evergreen-ci/evergreen/model/pod"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/testutil"
@@ -23,6 +21,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	mongobson "go.mongodb.org/mongo-driver/bson"
 )
 
 // PrefetchProjectContext gets the information related to the project that the request contains
@@ -180,6 +179,130 @@ func TestNewCanCreateMiddleware(t *testing.T) {
 	assert.Equal(http.StatusOK, rw.Code)
 }
 
+func TestNotificationSendMiddleware(t *testing.T) {
+	assert.NoError(t, db.ClearCollections(evergreen.RoleCollection, evergreen.ScopeCollection))
+
+	adminRole := gimlet.Role{
+		ID:          "notification_send",
+		Scope:       "superuser_scope",
+		Permissions: map[string]int{evergreen.PermissionNotificationsSend: evergreen.NotificationsSend.Value},
+	}
+	superUserScope := gimlet.Scope{
+		ID:        "superuser_scope",
+		Name:      "superuser scope",
+		Type:      evergreen.SuperUserResourceType,
+		Resources: []string{evergreen.SuperUserPermissionsID},
+	}
+	require.NoError(t, evergreen.GetEnvironment().RoleManager().UpdateRole(t.Context(), adminRole))
+	require.NoError(t, evergreen.GetEnvironment().RoleManager().AddScope(t.Context(), superUserScope))
+
+	// Create a middleware that requires the notifications send permission.
+	permission := RequiresSuperUserPermission(evergreen.PermissionNotificationsSend, evergreen.NotificationsSend)
+	checkPermission := func(rw http.ResponseWriter, r *http.Request) {
+		permission.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {
+			rw.WriteHeader(http.StatusOK)
+		})
+	}
+	opCtx := model.Context{}
+	um, err := gimlet.NewBasicUserManager([]gimlet.BasicUser{}, evergreen.GetEnvironment().RoleManager())
+	assert.NoError(t, err)
+	authenticator := gimlet.NewBasicAuthenticator(nil, nil)
+	authHandler := gimlet.NewAuthenticationHandler(authenticator, um)
+
+	// Check that a regular user can't use the route.
+	r, err := http.NewRequest(http.MethodPut, "/notifications/email", nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, r)
+	ctx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "regular.user"})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw := httptest.NewRecorder()
+	authHandler.ServeHTTP(rw, r, checkPermission)
+	assert.Equal(t, http.StatusUnauthorized, rw.Code)
+
+	// Check that an authenticated user can use the route.
+	ctx = gimlet.AttachUser(t.Context(), &user.DBUser{Id: "notification.user", SystemRoles: []string{"notification_send"}})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw = httptest.NewRecorder()
+	authHandler.ServeHTTP(rw, r, checkPermission)
+	assert.Equal(t, http.StatusOK, rw.Code)
+}
+
+func TestSendNotificationMiddleware(t *testing.T) {
+	require.NoError(t, db.ClearCollections(evergreen.RoleCollection, evergreen.ScopeCollection))
+
+	adminRole := gimlet.Role{
+		ID:          "notification_send",
+		Scope:       "superuser_scope",
+		Permissions: map[string]int{evergreen.PermissionNotificationsSend: evergreen.NotificationsSend.Value},
+	}
+	superUserScope := gimlet.Scope{
+		ID:        "superuser_scope",
+		Name:      "superuser scope",
+		Type:      evergreen.SuperUserResourceType,
+		Resources: []string{evergreen.SuperUserPermissionsID},
+	}
+	require.NoError(t, evergreen.GetEnvironment().RoleManager().UpdateRole(t.Context(), adminRole))
+	require.NoError(t, evergreen.GetEnvironment().RoleManager().AddScope(t.Context(), superUserScope))
+
+	mw := NewSendNotificationMiddleware()
+	opCtx := model.Context{}
+
+	makeRequest := func(target string) *http.Request {
+		body := strings.NewReader(`{"target":"` + target + `"}`)
+		r, err := http.NewRequest(http.MethodPost, "/notifications/slack", body)
+		require.NoError(t, err)
+		return r
+	}
+
+	serveMiddleware := func(rw http.ResponseWriter, r *http.Request) {
+		mw.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {
+			rw.WriteHeader(http.StatusOK)
+		})
+	}
+
+	// Superuser with notification_send role can send to any target.
+	r := makeRequest("@other.user")
+	ctx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "superuser", SystemRoles: []string{"notification_send"}})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw := httptest.NewRecorder()
+	serveMiddleware(rw, r)
+	assert.Equal(t, http.StatusOK, rw.Code)
+
+	// Regular user sending to themselves (target matches their Slack username).
+	r = makeRequest("@myslack")
+	ctx = gimlet.AttachUser(t.Context(), &user.DBUser{Id: "self.user", Settings: user.UserSettings{SlackUsername: "myslack"}})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw = httptest.NewRecorder()
+	serveMiddleware(rw, r)
+	assert.Equal(t, http.StatusOK, rw.Code)
+
+	// Regular user sending to a different Slack username gets 401.
+	r = makeRequest("@someone.else")
+	ctx = gimlet.AttachUser(t.Context(), &user.DBUser{Id: "other.user", Settings: user.UserSettings{SlackUsername: "myslack"}})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw = httptest.NewRecorder()
+	serveMiddleware(rw, r)
+	assert.Equal(t, http.StatusUnauthorized, rw.Code)
+
+	// Regular user with no Slack username set gets 401 (check enabled).
+	r = makeRequest("@myslack")
+	ctx = gimlet.AttachUser(t.Context(), &user.DBUser{Id: "no.slack.user"})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw = httptest.NewRecorder()
+	serveMiddleware(rw, r)
+	assert.Equal(t, http.StatusUnauthorized, rw.Code)
+
+	// A correctly-formatted email body on the email route returns 401 for a regular user.
+	body := strings.NewReader(`{"recipients":["someone@example.com"],"subject":"hi"}`)
+	r, err := http.NewRequest(http.MethodPost, "/notifications/email", body)
+	require.NoError(t, err)
+	ctx = gimlet.AttachUser(t.Context(), &user.DBUser{Id: "self.user", Settings: user.UserSettings{SlackUsername: "myslack"}})
+	r = r.WithContext(context.WithValue(ctx, RequestContext, &opCtx))
+	rw = httptest.NewRecorder()
+	serveMiddleware(rw, r)
+	assert.Equal(t, http.StatusUnauthorized, rw.Code)
+}
+
 func TestTaskAuthMiddleware(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -197,8 +320,9 @@ func TestTaskAuthMiddleware(t *testing.T) {
 		Status: evergreen.TaskSucceeded,
 	}
 	host1 := &host.Host{
-		Id:     "host1",
-		Secret: "abcdef",
+		Id:          "host1",
+		Secret:      "abcdef",
+		RunningTask: "task1",
 	}
 	assert.NoError(task1.Insert(t.Context()))
 	assert.NoError(completedTask.Insert(t.Context()))
@@ -223,7 +347,15 @@ func TestTaskAuthMiddleware(t *testing.T) {
 
 	r.Header.Set(evergreen.TaskSecretHeader, "abcdef")
 	rw = httptest.NewRecorder()
-	m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
+	m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {
+		// Verify that the task and host are stored in the request context.
+		foundTask := GetTask(r.Context())
+		assert.NotNil(foundTask)
+		assert.Equal("task1", foundTask.Id)
+		foundHost := GetHost(r.Context())
+		assert.NotNil(foundHost)
+		assert.Equal("host1", foundHost.Id)
+	})
 	assert.Equal(http.StatusOK, rw.Code)
 
 	r.Header.Set(evergreen.TaskHeader, "completedTask")
@@ -232,6 +364,7 @@ func TestTaskAuthMiddleware(t *testing.T) {
 	assert.NotEqual(http.StatusOK, rw.Code)
 
 	assert.NoError(task.UpdateOne(ctx, bson.M{task.IdKey: "completedTask"}, bson.M{"$set": bson.M{task.FinishTimeKey: time.Now().Add(-30 * time.Minute)}}))
+	assert.NoError(host.UpdateOne(ctx, mongobson.M{host.IdKey: "host1"}, mongobson.M{"$set": mongobson.M{host.RunningTaskKey: "completedTask"}}))
 	r.Header.Set(evergreen.TaskHeader, "completedTask")
 	rw = httptest.NewRecorder()
 	m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
@@ -258,7 +391,12 @@ func TestHostAuthMiddleware(t *testing.T) {
 					evergreen.HostSecretHeader: []string{h.Secret},
 				},
 			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
+			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {
+				// Verify that the host is stored in the request context.
+				foundHost := GetHost(r.Context())
+				assert.NotNil(t, foundHost)
+				assert.Equal(t, h.Id, foundHost.Id)
+			})
 			assert.Equal(t, http.StatusOK, rw.Code)
 		},
 		"FailsWithInvalidSecret": func(t *testing.T, h *host.Host, rw *httptest.ResponseRecorder) {
@@ -314,245 +452,6 @@ func TestHostAuthMiddleware(t *testing.T) {
 			require.NoError(t, h.Insert(ctx))
 
 			testCase(t, h, httptest.NewRecorder())
-		})
-	}
-}
-
-func TestPodAuthMiddleware(t *testing.T) {
-	m := NewPodAuthMiddleware()
-	for testName, testCase := range map[string]func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder){
-		"Succeeds": func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{p.ID},
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.Equal(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutSecret": func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader: []string{p.ID},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidSecret": func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{p.ID},
-					evergreen.PodSecretHeader: []string{"foo"},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutPodID": func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidPodID": func(t *testing.T, p *pod.Pod, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{"foo"},
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-	} {
-		t.Run(testName, func(t *testing.T) {
-			require.NoError(t, db.Clear(pod.Collection))
-			defer func() {
-				assert.NoError(t, db.Clear(pod.Collection))
-			}()
-			p := &pod.Pod{
-				ID: "id",
-				TaskContainerCreationOpts: pod.TaskContainerCreationOptions{
-					EnvSecrets: map[string]pod.Secret{
-						pod.PodSecretEnvVar: {
-							ExternalID: "external_id",
-							Value:      "value",
-						},
-					},
-				},
-			}
-			require.NoError(t, p.Insert(t.Context()))
-
-			testCase(t, p, httptest.NewRecorder())
-		})
-	}
-}
-
-func TestPodOrHostAuthMiddleware(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	m := NewPodOrHostAuthMiddleWare()
-	for testName, testCase := range map[string]func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder){
-		"SucceedsWithPod": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{p.ID},
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.Equal(t, http.StatusOK, rw.Code)
-		},
-		"SucceedsWithHost": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.HostHeader:       []string{h.Id},
-					evergreen.HostSecretHeader: []string{h.Secret},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.Equal(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithPodAndHostHeaders": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:        []string{p.ID},
-					evergreen.PodSecretHeader:  []string{s.Value},
-					evergreen.HostHeader:       []string{h.Id},
-					evergreen.HostSecretHeader: []string{h.Secret},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithNoHeaders": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutPodSecret": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader: []string{p.ID},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutHostSecret": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.HostHeader: []string{h.Id},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidPodSecret": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{p.ID},
-					evergreen.PodSecretHeader: []string{"foo"},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidHostSecret": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.HostHeader:       []string{h.Id},
-					evergreen.HostSecretHeader: []string{"foo"},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutPodID": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithoutHostID": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.HostSecretHeader: []string{h.Secret},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidPodID": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			s, err := p.GetSecret()
-			require.NoError(t, err)
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.PodHeader:       []string{"foo"},
-					evergreen.PodSecretHeader: []string{s.Value},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-		"FailsWithInvalidHostID": func(t *testing.T, p *pod.Pod, h *host.Host, rw *httptest.ResponseRecorder) {
-			r := &http.Request{
-				Header: http.Header{
-					evergreen.HostHeader:       []string{"foo"},
-					evergreen.HostSecretHeader: []string{h.Secret},
-				},
-			}
-			m.ServeHTTP(rw, r, func(rw http.ResponseWriter, r *http.Request) {})
-			assert.NotEqual(t, http.StatusOK, rw.Code)
-		},
-	} {
-		t.Run(testName, func(t *testing.T) {
-			require.NoError(t, db.ClearCollections(pod.Collection, host.Collection))
-			defer func() {
-				assert.NoError(t, db.ClearCollections(pod.Collection, host.Collection))
-			}()
-			p := &pod.Pod{
-				ID: "id",
-				TaskContainerCreationOpts: pod.TaskContainerCreationOptions{
-					EnvSecrets: map[string]pod.Secret{
-						pod.PodSecretEnvVar: {
-							ExternalID: "external_id",
-							Value:      "value",
-						},
-					},
-				},
-			}
-			h := &host.Host{
-				Id:     "id",
-				Secret: "secret",
-			}
-			require.NoError(t, h.Insert(ctx))
-			require.NoError(t, p.Insert(t.Context()))
-
-			testCase(t, p, h, httptest.NewRecorder())
 		})
 	}
 }
@@ -661,104 +560,4 @@ func TestProjectViewPermission(t *testing.T) {
 	authHandler.ServeHTTP(rw, req, checkPermission)
 	assert.Equal(http.StatusOK, rw.Code)
 	assert.Equal(1, counter)
-}
-
-func TestEventLogPermission(t *testing.T) {
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	env := testutil.NewEnvironment(ctx, t)
-	require := require.New(t)
-	counter := 0
-	counterFunc := func(rw http.ResponseWriter, r *http.Request) {
-		counter++
-		rw.WriteHeader(http.StatusOK)
-	}
-	assert.NoError(db.ClearCollections(evergreen.RoleCollection, evergreen.ScopeCollection, model.ProjectRefCollection, distro.Collection))
-	require.NoError(db.CreateCollections(evergreen.ScopeCollection))
-	projRole := gimlet.Role{
-		ID:          "proj",
-		Scope:       "proj1",
-		Permissions: map[string]int{evergreen.PermissionProjectSettings: evergreen.ProjectSettingsView.Value},
-	}
-	assert.NoError(env.RoleManager().UpdateRole(t.Context(), projRole))
-	distroRole := gimlet.Role{
-		ID:          "distro",
-		Scope:       "distro1",
-		Permissions: map[string]int{evergreen.PermissionHosts: evergreen.HostsView.Value},
-	}
-	assert.NoError(env.RoleManager().UpdateRole(t.Context(), distroRole))
-	superuserRole := gimlet.Role{
-		ID:          "superuser",
-		Scope:       "superuser",
-		Permissions: map[string]int{evergreen.PermissionAdminSettings: evergreen.AdminSettingsEdit.Value},
-	}
-	assert.NoError(env.RoleManager().UpdateRole(t.Context(), superuserRole))
-	scope1 := gimlet.Scope{
-		ID:        "proj1",
-		Resources: []string{"proj1"},
-		Type:      evergreen.ProjectResourceType,
-	}
-	assert.NoError(env.RoleManager().AddScope(t.Context(), scope1))
-	scope2 := gimlet.Scope{
-		ID:        "distro1",
-		Resources: []string{"distro1"},
-		Type:      evergreen.DistroResourceType,
-	}
-	assert.NoError(env.RoleManager().AddScope(t.Context(), scope2))
-	scope3 := gimlet.Scope{
-		ID:        "superuser",
-		Resources: []string{evergreen.SuperUserPermissionsID},
-		Type:      evergreen.SuperUserResourceType,
-	}
-	assert.NoError(env.RoleManager().AddScope(t.Context(), scope3))
-	proj1 := model.ProjectRef{
-		Id: "proj1",
-	}
-	assert.NoError(proj1.Insert(t.Context()))
-	distro1 := distro.Distro{
-		Id: "distro1",
-	}
-	assert.NoError(distro1.Insert(ctx))
-	permissionMiddleware := EventLogPermissionsMiddleware{}
-	checkPermission := func(rw http.ResponseWriter, r *http.Request) {
-		permissionMiddleware.ServeHTTP(rw, r, counterFunc)
-	}
-	authenticator := gimlet.NewBasicAuthenticator(nil, nil)
-	opts, err := gimlet.NewBasicUserOptions("user")
-	require.NoError(err)
-	user := gimlet.NewBasicUser(opts.Name("name").Email("email").Password("password").Key("key").Roles(projRole.ID, distroRole.ID, superuserRole.ID).RoleManager(env.RoleManager()))
-	um, err := gimlet.NewBasicUserManager([]gimlet.BasicUser{*user}, env.RoleManager())
-	assert.NoError(err)
-	authHandler := gimlet.NewAuthenticationHandler(authenticator, um)
-	req := httptest.NewRequest(http.MethodGet, "http://foo.com/bar", nil)
-
-	// no user should 401
-	rw := httptest.NewRecorder()
-	req = gimlet.SetURLVars(req, map[string]string{"resource_type": event.EventResourceTypeProject, "resource_id": proj1.Id})
-	authHandler.ServeHTTP(rw, req, checkPermission)
-	assert.Equal(http.StatusUnauthorized, rw.Code)
-	assert.Equal(0, counter)
-
-	// have user, project event
-	req = req.WithContext(gimlet.AttachUser(req.Context(), user))
-	req = gimlet.SetURLVars(req, map[string]string{"resource_type": event.EventResourceTypeProject, "resource_id": proj1.Id})
-	rw = httptest.NewRecorder()
-	authHandler.ServeHTTP(rw, req, checkPermission)
-	assert.Equal(http.StatusOK, rw.Code)
-	assert.Equal(1, counter)
-
-	// distro event
-	req = gimlet.SetURLVars(req, map[string]string{"resource_type": event.ResourceTypeDistro, "resource_id": distro1.Id})
-	rw = httptest.NewRecorder()
-	authHandler.ServeHTTP(rw, req, checkPermission)
-	assert.Equal(http.StatusOK, rw.Code)
-	assert.Equal(2, counter)
-
-	// superuser event
-	req = gimlet.SetURLVars(req, map[string]string{"resource_type": event.ResourceTypeAdmin, "resource_id": evergreen.SuperUserPermissionsID})
-	rw = httptest.NewRecorder()
-	authHandler.ServeHTTP(rw, req, checkPermission)
-	assert.Equal(http.StatusOK, rw.Code)
-	assert.Equal(3, counter)
 }

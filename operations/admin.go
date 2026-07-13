@@ -30,6 +30,7 @@ func Admin() cli.Command {
 			listEvents(),
 			revert(),
 			fetchAllProjectConfigs(),
+			adminFeatureTracker(),
 			amboyCmd(),
 			fromMdbForLocal(),
 			toMdbForLocal(),
@@ -148,7 +149,7 @@ func doViewSettings() cli.ActionFunc {
 			return errors.Wrap(err, "marshalling Evergreen settings")
 		}
 
-		grip.Info(settingsYaml)
+		grip.Info(ctx, settingsYaml)
 
 		return nil
 	}
@@ -200,7 +201,7 @@ func updateSettings() cli.Command {
 				return errors.Wrap(err, "marshalling Evergreen settings")
 			}
 
-			grip.Info(settingsYaml)
+			grip.Info(ctx, settingsYaml)
 
 			return nil
 		},
@@ -249,7 +250,7 @@ func listEvents() cli.Command {
 			if err != nil {
 				return errors.Wrap(err, "marshalling events")
 			}
-			grip.Info(eventsPretty)
+			grip.Info(ctx, eventsPretty)
 
 			return nil
 		},
@@ -284,7 +285,7 @@ func revert() cli.Command {
 			if err != nil {
 				return err
 			}
-			grip.Infof("Successfully reverted GUID '%s'", guid)
+			grip.Infof(ctx, "Successfully reverted GUID '%s'", guid)
 
 			return nil
 		},
@@ -438,7 +439,7 @@ func getServiceUsers() cli.Command {
 				return err
 			}
 			for _, u := range users {
-				grip.Info(u)
+				grip.Info(ctx, u)
 			}
 			return nil
 		},

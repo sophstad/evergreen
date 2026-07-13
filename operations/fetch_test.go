@@ -2,13 +2,17 @@ package operations
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/evergreen-ci/evergreen"
-	"github.com/evergreen-ci/evergreen/service"
+	restModel "github.com/evergreen-ci/evergreen/rest/model"
+	"github.com/evergreen-ci/utility"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,10 +71,10 @@ func TestClone(t *testing.T) {
 func runCloneTest(t *testing.T, opts cloneOptions, pass bool) {
 	opts.rootDir = t.TempDir()
 	if !pass {
-		assert.Error(t, clone(opts))
+		assert.Error(t, clone(t.Context(), opts))
 		return
 	}
-	assert.NoError(t, clone(opts))
+	assert.NoError(t, clone(t.Context(), opts))
 }
 
 func TestTruncateName(t *testing.T) {
@@ -137,7 +141,7 @@ func TestResetGitRemoteToSSH(t *testing.T) {
 		isAppToken: true,
 	}
 
-	require.NoError(t, clone(opts))
+	require.NoError(t, clone(t.Context(), opts))
 
 	// check that the remote is reset to SSH
 	cmd := exec.Command("git", "-C", opts.rootDir, "remote", "-v")
@@ -149,42 +153,42 @@ func TestResetGitRemoteToSSH(t *testing.T) {
 
 func TestGetArtifactFolderName(t *testing.T) {
 	testCases := map[string]struct {
-		task     service.RestTask
+		task     restModel.APITask
 		expected string
 	}{
 		"ShortBuildVariant": {
-			task: service.RestTask{
-				BuildVariant: "variant",
-				Requester:    evergreen.PatchVersionRequester,
-				PatchNumber:  123,
-				DisplayName:  "display",
+			task: restModel.APITask{
+				BuildVariant: utility.ToStringPtr("variant"),
+				Requester:    utility.ToStringPtr(evergreen.PatchVersionRequester),
+				Order:        123,
+				DisplayName:  utility.ToStringPtr("display"),
 			},
 			expected: "artifacts-patch-123_variant_display",
 		},
 		"LongBuildVariant": {
-			task: service.RestTask{
-				BuildVariant: strings.Repeat("a", 200),
-				Requester:    evergreen.PatchVersionRequester,
-				PatchNumber:  123,
-				DisplayName:  "display",
+			task: restModel.APITask{
+				BuildVariant: utility.ToStringPtr(strings.Repeat("a", 200)),
+				Requester:    utility.ToStringPtr(evergreen.PatchVersionRequester),
+				Order:        123,
+				DisplayName:  utility.ToStringPtr("display"),
 			},
 			expected: fmt.Sprintf("artifacts-patch-123_%s_display", strings.Repeat("a", 100)),
 		},
 		"ShortRevision": {
-			task: service.RestTask{
-				BuildVariant: "variant",
-				Requester:    evergreen.RepotrackerVersionRequester,
-				Revision:     "abcde",
-				DisplayName:  "display",
+			task: restModel.APITask{
+				BuildVariant: utility.ToStringPtr("variant"),
+				Requester:    utility.ToStringPtr(evergreen.RepotrackerVersionRequester),
+				Revision:     utility.ToStringPtr("abcde"),
+				DisplayName:  utility.ToStringPtr("display"),
 			},
 			expected: "artifacts-variant_display",
 		},
 		"LongRevision": {
-			task: service.RestTask{
-				BuildVariant: "variant",
-				Requester:    evergreen.RepotrackerVersionRequester,
-				Revision:     "abcde1234567",
-				DisplayName:  "display",
+			task: restModel.APITask{
+				BuildVariant: utility.ToStringPtr("variant"),
+				Requester:    utility.ToStringPtr(evergreen.RepotrackerVersionRequester),
+				Revision:     utility.ToStringPtr("abcde1234567"),
+				DisplayName:  utility.ToStringPtr("display"),
 			},
 			expected: "artifacts-abcde1-variant_display",
 		},
@@ -196,4 +200,33 @@ func TestGetArtifactFolderName(t *testing.T) {
 			assert.Equal(t, tc.expected, result)
 		})
 	}
+}
+
+func TestDownloadUrls(t *testing.T) {
+	t.Run("LongDirName", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("artifact content"))
+		}))
+		t.Cleanup(server.Close)
+
+		longDir := strings.Repeat("d", 200)
+		testDir := filepath.Join(t.TempDir(), longDir)
+		require.NoError(t, os.MkdirAll(testDir, 0777))
+
+		artifactSubfolder := "artifacts-patch-123_variant_mytask"
+		urls := make(chan artifactDownload, 1)
+		urls <- artifactDownload{
+			url:  server.URL + "/my-artifact.tar.gz",
+			path: artifactSubfolder,
+		}
+		close(urls)
+
+		require.NoError(t, downloadUrls(testDir, urls, 1))
+
+		expectedDir := filepath.Join(testDir, artifactSubfolder)
+		entries, err := os.ReadDir(expectedDir)
+		require.NoError(t, err, "artifact subfolder should exist under root")
+		require.Len(t, entries, 1)
+		assert.Equal(t, "my-artifact.tar.gz", entries[0].Name())
+	})
 }

@@ -6,8 +6,10 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/evergreen-ci/utility"
@@ -27,7 +29,7 @@ const (
 
 // TrackProcess is a noop by default if we don't need to do any special
 // bookkeeping up-front.
-func TrackProcess(key string, pid int, logger grip.Journaler) {}
+func TrackProcess(ctx context.Context, key string, pid int, logger grip.Journaler) {}
 
 // KillSpawnedProcs kills processes that descend from the agent and waits
 // for them to terminate.
@@ -47,18 +49,18 @@ func KillSpawnedProcs(ctx context.Context, key, workingDir, execUser string, log
 		p := os.Process{Pid: pid}
 		err := p.Kill()
 		if err != nil {
-			logger.Errorf("Cleanup got error killing process with PID %d: %s.", pid, err)
+			logger.Errorf(ctx, "Cleanup got error killing process with PID %d: %s.", pid, err)
 		} else {
-			logger.Infof("Cleanup killed process with PID %d.", pid)
+			logger.Infof(ctx, "Cleanup killed process with PID %d.", pid)
 		}
 	}
 
 	pidsStillRunning, err := waitForExit(ctx, pidsToKill)
 	if err != nil {
-		logger.Infof("Problem waiting for processes to exit: %s.", err)
+		logger.Infof(ctx, "Problem waiting for processes to exit: %s.", err)
 	}
 	for _, pid := range pidsStillRunning {
-		logger.Infof("Failed to clean up process with PID %d.", pid)
+		logger.Infof(ctx, "Failed to clean up process with PID %d.", pid)
 	}
 
 	return nil
@@ -238,4 +240,48 @@ func parsePs(psOutput string) []process {
 	}
 
 	return processes
+}
+
+// GetNice returns the nice value for the process given by PID. Passing 0
+// refers to the current process.
+func GetNice(pid int) (int, error) {
+	if runtime.GOOS != "linux" {
+		return DefaultNice, nil
+	}
+	nice, err := syscall.Getpriority(syscall.PRIO_PROCESS, pid)
+	if err != nil {
+		return 0, errors.Wrap(err, "getting nice value")
+	}
+	// Go's syscall.Getpriority calls the raw Linux syscall which returns
+	// (20 - nice) rather than the nice value itself so we have to invert it here to
+	// get the real nice.
+	return 20 - nice, nil
+}
+
+// SetNice sets the nice for the process given by PID. This determines its
+// relative scheduling priority for host CPU.
+// This is only available if the current process has sufficient permissions to
+// set the nice.
+func SetNice(pid, nice int) error {
+	if runtime.GOOS != "linux" {
+		// No-op for MacOS.
+		return nil
+	}
+	if nice < minNice || nice > maxNice {
+		return errors.Errorf("nice must be between %d and %d", minNice, maxNice)
+	}
+	// 0 refers to the current process.
+	return syscall.Setpriority(syscall.PRIO_PROCESS, pid, nice)
+}
+
+// SetOOMScoreAdj writes adj to /proc/self/oom_score_adj, which is added to
+// the kernel's OOM badness score when selecting a kill target.
+func SetOOMScoreAdj(adj int) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	if adj < -1000 || adj > 1000 {
+		return errors.Errorf("OOM score adjustment %d is out of range [-1000, 1000]", adj)
+	}
+	return os.WriteFile("/proc/self/oom_score_adj", []byte(strconv.Itoa(adj)), 0)
 }

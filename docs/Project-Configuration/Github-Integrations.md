@@ -96,6 +96,8 @@ Evergreen offers integration with the GitHub checks API. Users have the option t
 
 ### Configuration
 
+A GitHub App must be configured in the project or repo settings to have more than 10 check runs defined in a project. The app must have `checks:write` permission.
+
 To add a check run to a task, specify it in the list of tasks in the build variant definition.
 Check runs cannot be defined in the task level and will be ignored if done so.
 
@@ -130,6 +132,8 @@ buildvariants:
     expansions:
       checkRun_key: apple
 ```
+
+The `path_to_outputs` value is a path relative to the task's working directory (`${workdir}`), **not** the cloned repository. If `git.get_project` clones into a subdirectory (e.g. `directory: src`), the path must include that prefix — for example, `src/output.json` as shown above. A common mistake is writing the file from a script running inside `src/` and configuring `path_to_outputs` without the subdirectory prefix; Evergreen will look for the file at `${workdir}/output.json` and not find it.
 
 The output json file can specify the following fields. Required fields are only required if an output file is specified. Please see [the github docs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28#create-a-check-run) for the most up to date information on supported fields.
 
@@ -194,9 +198,9 @@ Evergreen offers the [github.generate_token](Project-Commands#github_generate_to
 
 > Note: Adding a GitHub app to your project setting won't automatically impact your tasks. The `git.get_project` command will not default to it. It will simply enable you to use the `github.generate_token` command if and when you choose to.
 
-If you run into any issues, please see our [FAQ](../FAQ.md#dynamic-github-access-tokens).
+If you run into any issues, please see our [FAQ](../FAQ/Dynamic-Github-Tokens-FAQ#dynamic-github-access-tokens).
 
-If you don't already have a github app, please request one [here](https://jira.mongodb.org/plugins/servlet/desk/portal/81/create/1328). .
+If you don't already have a github app, please request one [here](https://jira.mongodb.org/plugins/servlet/desk/portal/95/create/1502?).
 
 ### Saving An App Id and Key
 

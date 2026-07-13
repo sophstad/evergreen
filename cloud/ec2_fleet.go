@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -88,6 +89,8 @@ type ec2FleetManager struct {
 	*EC2FleetManagerOptions
 	settings *evergreen.Settings
 	env      evergreen.Environment
+	// ec2Mgr handles host management operations (ModifyHost, Stop/Start/Reboot, volumes).
+	ec2Mgr *ec2Manager
 }
 
 func (m *ec2FleetManager) Configure(ctx context.Context, settings *evergreen.Settings) error {
@@ -103,6 +106,17 @@ func (m *ec2FleetManager) Configure(ctx context.Context, settings *evergreen.Set
 	}
 	m.role = role
 
+	m.ec2Mgr = &ec2Manager{
+		EC2ManagerOptions: &EC2ManagerOptions{
+			client:  m.client,
+			region:  m.region,
+			account: m.account,
+			role:    m.role,
+		},
+		settings: settings,
+		env:      m.env,
+	}
+
 	return nil
 }
 
@@ -111,7 +125,7 @@ func (m *ec2FleetManager) setupClient(ctx context.Context) error {
 }
 
 func (m *ec2FleetManager) SpawnHost(ctx context.Context, h *host.Host) (*host.Host, error) {
-	if h.Distro.Provider != evergreen.ProviderNameEc2Fleet {
+	if !evergreen.IsEc2Provider(h.Distro.Provider) {
 		return nil, errors.Errorf("can't spawn instance for distro '%s': distro provider is '%s'", h.Distro.Id, h.Distro.Provider)
 	}
 
@@ -124,7 +138,7 @@ func (m *ec2FleetManager) SpawnHost(ctx context.Context, h *host.Host) (*host.Ho
 		return nil, errors.Wrap(err, "getting EC2 settings")
 	}
 	if err := ec2Settings.Validate(); err != nil {
-		return nil, errors.Wrapf(err, "invalid EC2 settings in distro '%s': %+v", h.Distro.Id, ec2Settings)
+		return nil, errors.Wrapf(err, "invalid EC2 settings in distro '%s'", h.Distro.Id)
 	}
 
 	var err error
@@ -135,7 +149,7 @@ func (m *ec2FleetManager) SpawnHost(ctx context.Context, h *host.Host) (*host.Ho
 
 	if err := m.spawnFleetHost(ctx, h, ec2Settings); err != nil {
 		msg := "error spawning host with Fleet"
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":       msg,
 			"host_id":       h.Id,
 			"host_provider": h.Distro.Provider,
@@ -143,7 +157,7 @@ func (m *ec2FleetManager) SpawnHost(ctx context.Context, h *host.Host) (*host.Ho
 		}))
 		return nil, errors.Wrap(err, msg)
 	}
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"message":       "spawned host with Fleet",
 		"host_id":       h.Id,
 		"host_provider": h.Distro.Provider,
@@ -153,8 +167,15 @@ func (m *ec2FleetManager) SpawnHost(ctx context.Context, h *host.Host) (*host.Ho
 	return h, nil
 }
 
-func (m *ec2FleetManager) ModifyHost(context.Context, *host.Host, host.HostModifyOptions) error {
-	return errors.New("can't modify instances for EC2 fleet provider")
+// ModifyHost modifies an existing host's properties (tags, instance type, sleep schedule, expiration).
+func (m *ec2FleetManager) ModifyHost(ctx context.Context, h *host.Host, opts host.HostModifyOptions) error {
+	if opts.ExtendExpireOnByDay {
+		if err := m.setupClient(ctx); err != nil {
+			return errors.Wrap(err, "creating client")
+		}
+		return errors.Wrap(extendExpireOnByDay(ctx, m.client, h), "extending expire-on tag by one day")
+	}
+	return m.ec2Mgr.ModifyHost(ctx, h, opts)
 }
 
 func (m *ec2FleetManager) GetInstanceStatuses(ctx context.Context, hosts []host.Host) (map[string]CloudStatus, error) {
@@ -205,7 +226,7 @@ func (m *ec2FleetManager) GetInstanceStatuses(ctx context.Context, hosts []host.
 	}
 
 	// Cache instance information so we can make fewer calls to AWS's API.
-	grip.Error(message.WrapError(cacheAllHostData(ctx, m.env, m.client, hostsToCache...), message.Fields{
+	grip.Error(ctx, message.WrapError(cacheAllHostData(ctx, m.env, m.client, hostsToCache...), message.Fields{
 		"message":   "error bulk updating cached host data",
 		"num_hosts": len(hostIDsToCache),
 		"host_ids":  hostIDsToCache,
@@ -232,7 +253,7 @@ func (m *ec2FleetManager) GetInstanceState(ctx context.Context, h *host.Host) (C
 			info.Status = StatusNonExistent
 			return info, nil
 		}
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":       "error getting instance info",
 			"host_id":       h.Id,
 			"host_provider": h.Distro.Provider,
@@ -244,7 +265,7 @@ func (m *ec2FleetManager) GetInstanceState(ctx context.Context, h *host.Host) (C
 	if info.Status = ec2StateToEvergreenStatus(instance.State); info.Status == StatusRunning {
 		// Cache instance information so we can make fewer calls to AWS's API.
 		pair := hostInstancePair{host: h, instance: instance}
-		grip.Error(message.WrapError(cacheAllHostData(ctx, m.env, m.client, pair), message.Fields{
+		grip.Error(ctx, message.WrapError(cacheAllHostData(ctx, m.env, m.client, pair), message.Fields{
 			"message": "can't update host cached data",
 			"type":    "ec2 fleet",
 			"host_id": h.Id,
@@ -258,17 +279,13 @@ func (m *ec2FleetManager) GetInstanceState(ctx context.Context, h *host.Host) (C
 	return info, nil
 }
 
-func (m *ec2FleetManager) SetPortMappings(context.Context, *host.Host, *host.Host) error {
-	return errors.New("can't set port mappings with EC2 fleet provider")
-}
-
 func (m *ec2FleetManager) CheckInstanceType(ctx context.Context, instanceType string) error {
 	if err := m.setupClient(ctx); err != nil {
 		return errors.Wrap(err, "creating client")
 	}
 	output, err := m.client.DescribeInstanceTypeOfferings(ctx, &ec2.DescribeInstanceTypeOfferingsInput{})
 	if err != nil {
-		return errors.Wrapf(err, "describing instance types offered for region '%s", m.region)
+		return errors.Wrapf(err, "describing instance types offered for region '%s'", m.region)
 	}
 	validTypes := []string{}
 	for _, availableType := range output.InstanceTypeOfferings {
@@ -288,11 +305,23 @@ func (m *ec2FleetManager) TerminateInstance(ctx context.Context, h *host.Host, u
 		return errors.Wrap(err, "creating client")
 	}
 
+	instanceID := h.Id
+	if !IsEC2InstanceID(instanceID) {
+		instance, err := m.client.GetInstanceInfo(ctx, h.Id)
+		if err != nil {
+			if isEC2InstanceNotFound(err) {
+				return errors.Wrap(h.Terminate(ctx, user, fmt.Sprintf("no cloud instance found for host '%s'", h.Id)), "terminating instance in DB")
+			}
+			return errors.Wrapf(err, "finding cloud instance for host '%s'", h.Id)
+		}
+		instanceID = aws.ToString(instance.InstanceId)
+	}
+
 	resp, err := m.client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-		InstanceIds: []string{h.Id},
+		InstanceIds: []string{instanceID},
 	})
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":       "error terminating instance",
 			"user":          user,
 			"host_id":       h.Id,
@@ -303,7 +332,7 @@ func (m *ec2FleetManager) TerminateInstance(ctx context.Context, h *host.Host, u
 	}
 
 	for _, stateChange := range resp.TerminatingInstances {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":       "terminated instance",
 			"user":          user,
 			"host_provider": h.Distro.Provider,
@@ -313,7 +342,7 @@ func (m *ec2FleetManager) TerminateInstance(ctx context.Context, h *host.Host, u
 		})
 	}
 
-	grip.Error(message.WrapError(releaseIPAddressForHost(ctx, h), message.Fields{
+	grip.Error(ctx, message.WrapError(releaseIPAddressForHost(ctx, h), message.Fields{
 		"message":        "could not release elastic IP address from host",
 		"provider":       h.Distro.Provider,
 		"host_id":        h.Id,
@@ -324,19 +353,19 @@ func (m *ec2FleetManager) TerminateInstance(ctx context.Context, h *host.Host, u
 	return errors.Wrap(h.Terminate(ctx, user, reason), "terminating instance in DB")
 }
 
-// StopInstance should do nothing for EC2 Fleet.
-func (m *ec2FleetManager) StopInstance(context.Context, *host.Host, bool, string) error {
-	return errors.New("can't stop instances for EC2 fleet provider")
+// StopInstance stops a running host instance.
+func (m *ec2FleetManager) StopInstance(ctx context.Context, h *host.Host, shouldKeepOff bool, user string) error {
+	return m.ec2Mgr.StopInstance(ctx, h, shouldKeepOff, user)
 }
 
-// StartInstance should do nothing for EC2 Fleet.
-func (m *ec2FleetManager) StartInstance(context.Context, *host.Host, string) error {
-	return errors.New("can't start instances for EC2 fleet provider")
+// StartInstance starts a stopped host instance.
+func (m *ec2FleetManager) StartInstance(ctx context.Context, h *host.Host, user string) error {
+	return m.ec2Mgr.StartInstance(ctx, h, user)
 }
 
-// RebootInstance should do nothing for EC2 Fleet.
+// RebootInstance reboots a running host instance.
 func (m *ec2FleetManager) RebootInstance(ctx context.Context, h *host.Host, user string) error {
-	return errors.New("can't reboot instances for EC2 fleet provider")
+	return m.ec2Mgr.RebootInstance(ctx, h, user)
 }
 
 // AssociateIP associates the host with its allocated IP address.
@@ -391,7 +420,7 @@ func (m *ec2FleetManager) cleanupStaleLaunchTemplates(ctx context.Context) error
 		}
 	}
 
-	grip.InfoWhen(deletedCount > 0, message.Fields{
+	grip.InfoWhen(ctx, deletedCount > 0, message.Fields{
 		"message":       "removed launch templates",
 		"deleted_count": deletedCount,
 		"provider":      evergreen.ProviderNameEc2Fleet,
@@ -417,7 +446,7 @@ func (m *ec2FleetManager) cleanupStaleIPAddresses(ctx context.Context) error {
 		return errors.Wrapf(err, "unsetting host tags for %d IP addresses", len(ipAddrIDs))
 	}
 
-	grip.InfoWhen(len(staleIPAddrs) > 0, message.Fields{
+	grip.InfoWhen(ctx, len(staleIPAddrs) > 0, message.Fields{
 		"message":        "cleaned up stale IP addresses",
 		"num_cleaned_up": len(staleIPAddrs),
 		"provider":       evergreen.ProviderNameEc2Fleet,
@@ -426,28 +455,34 @@ func (m *ec2FleetManager) cleanupStaleIPAddresses(ctx context.Context) error {
 	return nil
 }
 
-func (m *ec2FleetManager) AttachVolume(context.Context, *host.Host, *host.VolumeAttachment) error {
-	return errors.New("can't attach volume with EC2 fleet provider")
+// AttachVolume attaches an EBS volume to a host.
+func (m *ec2FleetManager) AttachVolume(ctx context.Context, h *host.Host, attachment *host.VolumeAttachment) error {
+	return m.ec2Mgr.AttachVolume(ctx, h, attachment)
 }
 
-func (m *ec2FleetManager) DetachVolume(context.Context, *host.Host, string) error {
-	return errors.New("can't detach volume with EC2 fleet provider")
+// DetachVolume detaches an EBS volume from a host.
+func (m *ec2FleetManager) DetachVolume(ctx context.Context, h *host.Host, volumeID string) error {
+	return m.ec2Mgr.DetachVolume(ctx, h, volumeID)
 }
 
-func (m *ec2FleetManager) CreateVolume(context.Context, *host.Volume) (*host.Volume, error) {
-	return nil, errors.New("can't create volume with EC2 fleet provider")
+// CreateVolume creates a new EBS volume for attaching to a host.
+func (m *ec2FleetManager) CreateVolume(ctx context.Context, volume *host.Volume) (*host.Volume, error) {
+	return m.ec2Mgr.CreateVolume(ctx, volume)
 }
 
-func (m *ec2FleetManager) DeleteVolume(context.Context, *host.Volume) error {
-	return errors.New("can't delete volume with EC2 fleet provider")
+// DeleteVolume deletes an EBS volume.
+func (m *ec2FleetManager) DeleteVolume(ctx context.Context, volume *host.Volume) error {
+	return m.ec2Mgr.DeleteVolume(ctx, volume)
 }
 
-func (m *ec2FleetManager) ModifyVolume(context.Context, *host.Volume, *model.VolumeModifyOptions) error {
-	return errors.New("can't modify volume with EC2 fleet provider")
+// ModifyVolume modifies an existing EBS volume's properties.
+func (m *ec2FleetManager) ModifyVolume(ctx context.Context, volume *host.Volume, opts *model.VolumeModifyOptions) error {
+	return m.ec2Mgr.ModifyVolume(ctx, volume, opts)
 }
 
-func (m *ec2FleetManager) GetVolumeAttachment(context.Context, string) (*VolumeAttachment, error) {
-	return nil, errors.New("can't get volume attachment with EC2 fleet provider")
+// GetVolumeAttachment returns the attachment information for a volume.
+func (m *ec2FleetManager) GetVolumeAttachment(ctx context.Context, volumeID string) (*VolumeAttachment, error) {
+	return m.ec2Mgr.GetVolumeAttachment(ctx, volumeID)
 }
 
 func (m *ec2FleetManager) GetDNSName(ctx context.Context, h *host.Host) (string, error) {
@@ -466,7 +501,7 @@ func (m *ec2FleetManager) spawnFleetHost(ctx context.Context, h *host.Host, ec2S
 	defer func() {
 		// Cleanup
 		_, err := m.client.DeleteLaunchTemplate(ctx, &ec2.DeleteLaunchTemplateInput{LaunchTemplateName: aws.String(cleanLaunchTemplateName(h.Tag))})
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":  "can't delete launch template",
 			"host_id":  h.Id,
 			"host_tag": h.Tag,
@@ -475,6 +510,10 @@ func (m *ec2FleetManager) spawnFleetHost(ctx context.Context, h *host.Host, ec2S
 
 	ctx, span := tracer.Start(ctx, "spawnFleetHost")
 	defer span.End()
+
+	if err := terminatePreexistingInstance(ctx, m.client, h.Id); err != nil {
+		return errors.Wrap(err, "terminating pre-existing instance from prior attempt")
+	}
 
 	settings, err := evergreen.GetConfig(ctx)
 	if err != nil {
@@ -491,14 +530,14 @@ func (m *ec2FleetManager) spawnFleetHost(ctx context.Context, h *host.Host, ec2S
 		// guaranteed to succeed. For example, if the IPAM pool has no addresses
 		// available currently, Evergreen still needs a usable host, so the
 		// launch template has to fall back to using an AWS-managed IP address.
-		grip.Notice(message.WrapError(allocateIPAddressForHost(ctx, h), message.Fields{
+		grip.Notice(ctx, message.WrapError(allocateIPAddressForHost(ctx, h), message.Fields{
 			"message": "could not allocate elastic IP address for host, falling back to using AWS-managed IP",
 			"host_id": h.Id,
 		}))
 	}
 
 	if err := m.uploadLaunchTemplate(ctx, h, ec2Settings); err != nil {
-		return errors.Wrapf(err, "unable to upload launch template for host '%s'", h.Id)
+		return errors.Wrapf(err, "uploading launch template for host '%s'", h.Id)
 	}
 
 	instanceID, err := m.requestFleet(ctx, h, ec2Settings)
@@ -582,7 +621,7 @@ func (m *ec2FleetManager) uploadLaunchTemplate(ctx context.Context, h *host.Host
 	})
 	if err != nil {
 		if errors.Cause(err) == ec2TemplateNameExistsError {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":  "template already exists for host",
 				"host_id":  h.Id,
 				"host_tag": h.Tag,

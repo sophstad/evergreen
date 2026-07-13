@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -28,6 +27,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
 )
 
 func TestCurlCommand(t *testing.T) {
@@ -104,10 +105,6 @@ func TestCurlCommandWithRetry(t *testing.T) {
 }
 
 func TestGetSSHOptions(t *testing.T) {
-	keyFile, err := os.CreateTemp(t.TempDir(), "")
-	require.NoError(t, err)
-	defaultKeyPath := keyFile.Name()
-
 	checkContainsOptionsAndValues := func(t *testing.T, expected []string, actual []string) {
 		exists := map[string]bool{}
 		require.Equal(t, len(expected)%2, 0, `expected options must be in pairs (e.g. ("-o", "LogLevel=DEBUG"))`)
@@ -119,39 +116,33 @@ func TestGetSSHOptions(t *testing.T) {
 			assert.True(t, exists[expected[i]+expected[i+1]], "missing (\"%s\",\"%s\")", expected[i], expected[i+1])
 		}
 	}
-	for testName, testCase := range map[string]func(t *testing.T, h *Host, settings *evergreen.Settings){
-		"ReturnsExpectedArguments": func(t *testing.T, h *Host, settings *evergreen.Settings) {
-			expected := []string{"-i", defaultKeyPath, "-o", "UserKnownHostsFile=/dev/null", "-o", "RequestTTY=no"}
-			opts, err := h.GetSSHOptions(settings)
+	for testName, testCase := range map[string]func(t *testing.T, h *Host){
+		"ReturnsExpectedArguments": func(t *testing.T, h *Host) {
+			expected := []string{"-o", "UserKnownHostsFile=/dev/null", "-o", "RequestTTY=no"}
+			opts, err := h.GetSSHOptions()
 			require.NoError(t, err)
 			checkContainsOptionsAndValues(t, expected, opts)
 		},
-		"SetsDistroPortIfHostSpecificPortIsUnspecified": func(t *testing.T, h *Host, settings *evergreen.Settings) {
+		"SetsDistroPortIfHostSpecificPortIsUnspecified": func(t *testing.T, h *Host) {
 			h.Distro.SSHOptions = append(h.Distro.SSHOptions, "Port=123")
-			expected := []string{"-i", defaultKeyPath, "-o", "UserKnownHostsFile=/dev/null", "-o", "Port=123", "-o", "RequestTTY=no"}
-			opts, err := h.GetSSHOptions(settings)
+			expected := []string{"-o", "UserKnownHostsFile=/dev/null", "-o", "Port=123", "-o", "RequestTTY=no"}
+			opts, err := h.GetSSHOptions()
 			require.NoError(t, err)
 			checkContainsOptionsAndValues(t, expected, opts)
 		},
-		"PrioritizesHostSpecificPortOverDistroPort": func(t *testing.T, h *Host, settings *evergreen.Settings) {
+		"PrioritizesHostSpecificPortOverDistroPort": func(t *testing.T, h *Host) {
 			h.Distro.SSHOptions = append(h.Distro.SSHOptions, "Port=456")
 			h.SSHPort = 123
-			expected := []string{"-i", defaultKeyPath, "-o", "UserKnownHostsFile=/dev/null", "-o", "Port=123", "-o", "RequestTTY=no"}
-			opts, err := h.GetSSHOptions(settings)
+			expected := []string{"-o", "UserKnownHostsFile=/dev/null", "-o", "Port=123", "-o", "RequestTTY=no"}
+			opts, err := h.GetSSHOptions()
 			require.NoError(t, err)
 			checkContainsOptionsAndValues(t, expected, opts)
 		},
-		"FailsWithoutIdentityFile": func(t *testing.T, h *Host, settings *evergreen.Settings) {
-			settings.KanopySSHKeyPath = "does_not_exist"
-
-			_, err := h.GetSSHOptions(settings)
-			assert.Error(t, err)
-		},
-		"IncludesAdditionalArguments": func(t *testing.T, h *Host, settings *evergreen.Settings) {
+		"IncludesAdditionalArguments": func(t *testing.T, h *Host) {
 			h.Distro.SSHOptions = []string{"UserKnownHostsFile=/path/to/file"}
 
-			expected := []string{"-i", defaultKeyPath, "-o", h.Distro.SSHOptions[0]}
-			opts, err := h.GetSSHOptions(settings)
+			expected := []string{"-o", h.Distro.SSHOptions[0]}
+			opts, err := h.GetSSHOptions()
 			require.NoError(t, err)
 			checkContainsOptionsAndValues(t, expected, opts)
 		},
@@ -159,8 +150,6 @@ func TestGetSSHOptions(t *testing.T) {
 		t.Run(testName, func(t *testing.T) {
 			testCase(t, &Host{
 				Id: "id",
-			}, &evergreen.Settings{
-				KanopySSHKeyPath: defaultKeyPath,
 			})
 		})
 	}
@@ -270,61 +259,6 @@ func TestJasperCommands(t *testing.T) {
 
 			script, err := h.GenerateUserDataProvisioningScript(ctx, settings, creds, "", []string{})
 			require.NoError(t, err)
-
-			assertStringContainsOrderedSubstrings(t, script, expectedCmds)
-		},
-		"GenerateUserDataProvisioningScriptForSpawnHostUsingOAuth": func(t *testing.T, h *Host, settings *evergreen.Settings) {
-			require.NoError(t, db.Clear(user.Collection))
-			defer func() {
-				assert.NoError(t, db.Clear(user.Collection))
-			}()
-			settings.AuthConfig.OAuth = &evergreen.OAuthConfig{
-				Issuer:      "issuer_url_with'_some'_quotes",
-				ClientID:    "client_id",
-				ConnectorID: "connector_id",
-			}
-			h.StartedBy = "started_by_user"
-			h.UserHost = true
-			userID := "user"
-			user := &user.DBUser{Id: userID}
-			require.NoError(t, user.Insert(t.Context()))
-
-			h.ProvisionOptions = &ProvisionOptions{
-				OwnerId:  userID,
-				TaskId:   "task_id",
-				UseOAuth: true,
-			}
-			require.NoError(t, h.Insert(ctx))
-
-			checkRerun := h.CheckUserDataProvisioningStartedCommand()
-
-			setupScript, err := h.setupScriptCommands(settings)
-			require.NoError(t, err)
-
-			setupSpawnHost, err := h.SpawnHostSetupCommands(t.Context(), settings)
-			require.NoError(t, err)
-
-			markDone := h.MarkUserDataProvisioningDoneCommand()
-
-			expectedCmds := []string{
-				checkRerun,
-				setupScript,
-				h.MakeJasperDirsCommand(),
-				h.FetchJasperCommand(settings.HostJasper),
-
-				h.ForceReinstallJasperCommand(settings),
-				h.ChangeJasperDirsOwnerCommand(),
-				setupSpawnHost,
-				markDone,
-			}
-
-			creds, err := newMockCredentials()
-			require.NoError(t, err)
-
-			script, err := h.GenerateUserDataProvisioningScript(ctx, settings, creds, "", []string{})
-			require.NoError(t, err)
-			assert.Contains(t, script, "issuer: issuer_url_with'_some'_quotes")
-			assert.Contains(t, script, "do_not_use_browser: true")
 
 			assertStringContainsOrderedSubstrings(t, script, expectedCmds)
 		},
@@ -711,10 +645,6 @@ func TestJasperClient(t *testing.T) {
 			require.NoError(t, env.Configure(tctx))
 			env.Settings().HostJasper.BinaryName = "binary"
 
-			keyFile, err := os.CreateTemp(t.TempDir(), "")
-			require.NoError(t, err)
-			env.Settings().KanopySSHKeyPath = keyFile.Name()
-
 			doTest := func() {
 				client, err := testCase.h.JasperClient(tctx, env)
 				defer func() {
@@ -984,8 +914,8 @@ func TestSpawnHostSetupCommands(t *testing.T) {
 		assert.NoError(t, db.ClearCollections(Collection, user.Collection))
 	}()
 
-	user := user.DBUser{Id: "user", APIKey: "key"}
-	require.NoError(t, user.Insert(t.Context()))
+	dbUser := user.DBUser{Id: "user", APIKey: "key"}
+	require.NoError(t, dbUser.Insert(t.Context()))
 
 	h := &Host{Id: "host",
 		Distro: distro.Distro{
@@ -996,31 +926,14 @@ func TestSpawnHostSetupCommands(t *testing.T) {
 				Communication:         distro.CommunicationMethodRPC,
 				JasperCredentialsPath: "/jasper_credentials_path",
 			},
-			User: user.Id,
+			User: dbUser.Id,
 		},
 		ProvisionOptions: &ProvisionOptions{
-			OwnerId: user.Id,
+			OwnerId: dbUser.Id,
 		},
-		User: user.Id,
+		User: dbUser.Id,
 	}
 	require.NoError(t, h.Insert(t.Context()))
-
-	getExpected := func(oauth bool) string {
-		expected := "mkdir -m 777 -p /home/user/cli_bin" +
-			" && (sudo chown -R user /home/user/.evergreen.yml || true)"
-		if oauth {
-			expected += " && echo \"user: user\napi_key: key\napi_server_host: www.corporation.example0.com/api\nui_server_host: www.example1.com\n" +
-				"oauth:\n    issuer: https://www.example.com\n    client_id: client_id\n    connector_id: connector_id\n    do_not_use_browser: true\n"
-		} else {
-			expected += " && echo \"user: user\napi_key: key\napi_server_host: www.example0.com/api\nui_server_host: www.example1.com\n"
-		}
-		expected += "\" > /home/user/.evergreen.yml" +
-			" && chmod +x /home/user/evergreen" +
-			" && cp /home/user/evergreen /home/user/cli_bin" +
-			" && (echo '\nexport PATH=\"${PATH}:/home/user/cli_bin\"\n' >> /home/user/.profile || true; echo '\nexport PATH=\"${PATH}:/home/user/cli_bin\"\n' >> /home/user/.bash_profile || true)" +
-			" && (sudo chown -R user /home/user/.profile /home/user/.bash_profile || true)"
-		return expected
-	}
 
 	getSettings := func() *evergreen.Settings {
 		return &evergreen.Settings{
@@ -1035,19 +948,24 @@ func TestSpawnHostSetupCommands(t *testing.T) {
 				BinaryName: "jasper_cli",
 				Port:       12345,
 			},
-			ServiceFlags: evergreen.ServiceFlags{
-				JWTTokenForCLIDisabled: true,
+			OktaServiceConfig: evergreen.OktaServiceConfig{
+				ClientID:     "client_id",
+				ClientSecret: "client_secret",
+				Audience:     "audience",
+				Issuer:       "https://www.example.com",
+				Scopes:       []string{"scope1", "scope2"},
 			},
 		}
 	}
 
-	t.Run("WithoutOAuth", func(t *testing.T) {
-		cmd, err := h.SpawnHostSetupCommands(t.Context(), getSettings())
+	t.Run("WithoutAccessToken", func(t *testing.T) {
+		settings := getSettings()
+		cmd, err := h.SpawnHostSetupCommands(t.Context(), settings)
 		require.NoError(t, err)
-		assert.Equal(t, getExpected(false), cmd)
+		assert.NotContains(t, cmd, "api_key")
 	})
 
-	t.Run("WithOAuth", func(t *testing.T) {
+	t.Run("WithAccessToken", func(t *testing.T) {
 		settings := getSettings()
 		settings.AuthConfig = evergreen.AuthConfig{
 			OAuth: &evergreen.OAuthConfig{
@@ -1056,12 +974,85 @@ func TestSpawnHostSetupCommands(t *testing.T) {
 				ConnectorID: "connector_id",
 			},
 		}
-		settings.ServiceFlags.JWTTokenForCLIDisabled = false
+
+		token := &oauth2.Token{AccessToken: "test_access_token", TokenType: "Bearer"}
+		require.NoError(t, dbUser.UpdateTokenExchangeToken(t.Context(), token))
 
 		cmd, err := h.SpawnHostSetupCommands(t.Context(), settings)
 		require.NoError(t, err)
-		assert.Equal(t, getExpected(true), cmd)
+		assert.Contains(t, cmd, "spawn_host_access_token")
+		assert.Contains(t, cmd, "test_access_token")
+		assert.NotContains(t, cmd, "api_key")
 	})
+}
+
+func TestSpawnHostConfig(t *testing.T) {
+	require.NoError(t, db.Clear(user.Collection))
+	defer func() {
+		assert.NoError(t, db.Clear(user.Collection))
+	}()
+
+	dbUser := user.DBUser{Id: "user", APIKey: "key"}
+	require.NoError(t, dbUser.Insert(t.Context()))
+
+	h := &Host{
+		Id: "host_id",
+		ProvisionOptions: &ProvisionOptions{
+			OwnerId: dbUser.Id,
+		},
+		UserHost: true,
+	}
+	settings := &evergreen.Settings{
+		Api: evergreen.APIConfig{
+			URL:     "https://evergreen.example.com",
+			CorpURL: "https://evergreen.corp.example.com",
+		},
+		Ui: evergreen.UIConfig{
+			UIv2Url: "https://spruce.example.com",
+		},
+	}
+
+	configBytes, err := h.spawnHostConfig(t.Context(), settings)
+	require.NoError(t, err)
+
+	var config struct {
+		User              string `yaml:"user"`
+		APIKey            string `yaml:"api_key"`
+		APIServerHost     string `yaml:"api_server_host"`
+		CorpAPIServerHost string `yaml:"corp_api_server_host"`
+		UIServerHost      string `yaml:"ui_server_host"`
+		SpawnHostID       string `yaml:"spawn_host_id"`
+	}
+	require.NoError(t, yaml.Unmarshal(configBytes, &config))
+	assert.Equal(t, dbUser.Id, config.User)
+	assert.Empty(t, config.APIKey)
+	assert.Equal(t, "https://evergreen.example.com/api", config.APIServerHost)
+	assert.Equal(t, "https://evergreen.corp.example.com/api", config.CorpAPIServerHost)
+	assert.Equal(t, "https://spruce.example.com", config.UIServerHost)
+	assert.Equal(t, h.Id, config.SpawnHostID)
+
+	serviceUser := user.DBUser{Id: "service_user", APIKey: "service_key", OnlyAPI: true}
+	require.NoError(t, serviceUser.Insert(t.Context()))
+	serviceHost := &Host{
+		Id: "service_host_id",
+		ProvisionOptions: &ProvisionOptions{
+			OwnerId: serviceUser.Id,
+		},
+		UserHost: true,
+	}
+	configBytes, err = serviceHost.spawnHostConfig(t.Context(), settings)
+	require.NoError(t, err)
+	config = struct {
+		User              string `yaml:"user"`
+		APIKey            string `yaml:"api_key"`
+		APIServerHost     string `yaml:"api_server_host"`
+		CorpAPIServerHost string `yaml:"corp_api_server_host"`
+		UIServerHost      string `yaml:"ui_server_host"`
+		SpawnHostID       string `yaml:"spawn_host_id"`
+	}{}
+	require.NoError(t, yaml.Unmarshal(configBytes, &config))
+	assert.Equal(t, serviceUser.Id, config.User)
+	assert.Equal(t, serviceUser.APIKey, config.APIKey)
 }
 
 func TestAddPublicKeyScript(t *testing.T) {
@@ -1447,7 +1438,7 @@ func teardownJasperService(ctx context.Context, closeService jutil.CloseFunc) er
 func withJasperServiceSetupAndTeardown(ctx context.Context, env *mock.Environment, manager *jmock.Manager, h *Host, fn func()) error {
 	closeService, err := setupJasperService(ctx, env, manager, h)
 	if err != nil {
-		grip.Error(errors.Wrap(teardownJasperService(ctx, closeService), "problem tearing down test"))
+		grip.Error(ctx, errors.Wrap(teardownJasperService(ctx, closeService), "problem tearing down test"))
 		return err
 	}
 

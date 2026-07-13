@@ -8,6 +8,7 @@ input RepoRefInput {
   deactivatePrevious: Boolean
   disabledStatsCache: Boolean
   dispatchingDisabled: Boolean
+  waterfallDisabled: Boolean
   displayName: String
   enabled: Boolean
   externalLinks: [ExternalLinkInput!]
@@ -33,17 +34,16 @@ input RepoRefInput {
   repo: String
   repotrackerDisabled: Boolean
   restricted: Boolean
+  runEveryMainlineCommit: Boolean
   spawnHostScriptPath: String
   debugSpawnHostsDisabled: Boolean
   stepbackDisabled: Boolean
   stepbackBisect: Boolean
   taskAnnotationSettings: TaskAnnotationSettingsInput
   testSelection: TestSelectionSettingsInput
-  tracksPushEvents: Boolean
   triggers: [TriggerAliasInput!]
   versionControlEnabled: Boolean
   workstationConfig: WorkstationConfigInput
-  containerSizeDefinitions: [ContainerResourcesInput!]
 }
 
 ###### TYPES ######
@@ -58,10 +58,10 @@ type RepoRef {
   batchTime: Int!
   buildBaronSettings: BuildBaronSettings!
   commitQueue: RepoCommitQueueParams!
-  containerSizeDefinitions: [ContainerResources!]
   deactivatePrevious: Boolean!
   disabledStatsCache: Boolean!
   dispatchingDisabled: Boolean!
+  waterfallDisabled: Boolean!
   displayName: String!
   enabled: Boolean!
   githubChecksEnabled: Boolean!
@@ -86,13 +86,13 @@ type RepoRef {
   repo: String!
   repotrackerDisabled: Boolean!
   restricted: Boolean!
+  runEveryMainlineCommit: Boolean!
   spawnHostScriptPath: String!
   debugSpawnHostsDisabled: Boolean!
   stepbackDisabled: Boolean!
   stepbackBisect: Boolean
   taskAnnotationSettings: TaskAnnotationSettings!
   testSelection: RepoTestSelectionSettings
-  tracksPushEvents: Boolean!
   triggers: [TriggerAlias!]!
   versionControlEnabled: Boolean!
   workstationConfig: RepoWorkstationConfig!

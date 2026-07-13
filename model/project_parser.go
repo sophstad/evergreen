@@ -1,9 +1,12 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,6 +27,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	yaml2 "gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 const LoadProjectError = "load project error(s)"
@@ -81,34 +86,39 @@ type ParserProject struct {
 	Include []parserInclude `yaml:"include,omitempty" bson:"include,omitempty"`
 
 	// Beginning of ParserProject mergeable fields (this comment is used by the linter).
-	Stepback           *bool                      `yaml:"stepback,omitempty" bson:"stepback,omitempty"`
-	PreTimeoutSecs     *int                       `yaml:"pre_timeout_secs,omitempty" bson:"pre_timeout_secs,omitempty"`
-	PostTimeoutSecs    *int                       `yaml:"post_timeout_secs,omitempty" bson:"post_timeout_secs,omitempty"`
-	PreErrorFailsTask  *bool                      `yaml:"pre_error_fails_task,omitempty" bson:"pre_error_fails_task,omitempty"`
-	PostErrorFailsTask *bool                      `yaml:"post_error_fails_task,omitempty" bson:"post_error_fails_task,omitempty"`
-	OomTracker         *bool                      `yaml:"oom_tracker,omitempty" bson:"oom_tracker,omitempty"`
-	Owner              *string                    `yaml:"owner,omitempty" bson:"owner,omitempty"`
-	Repo               *string                    `yaml:"repo,omitempty" bson:"repo,omitempty"`
-	RemotePath         *string                    `yaml:"remote_path,omitempty" bson:"remote_path,omitempty"`
-	Branch             *string                    `yaml:"branch,omitempty" bson:"branch,omitempty"`
-	Identifier         *string                    `yaml:"identifier,omitempty" bson:"identifier,omitempty"`
-	DisplayName        *string                    `yaml:"display_name,omitempty" bson:"display_name,omitempty"`
-	CommandType        *string                    `yaml:"command_type,omitempty" bson:"command_type,omitempty"`
-	Ignore             parserStringSlice          `yaml:"ignore,omitempty" bson:"ignore,omitempty"`
-	Parameters         []ParameterInfo            `yaml:"parameters,omitempty" bson:"parameters,omitempty"`
-	Pre                *YAMLCommandSet            `yaml:"pre,omitempty" bson:"pre,omitempty"`
-	Post               *YAMLCommandSet            `yaml:"post,omitempty" bson:"post,omitempty"`
-	Timeout            *YAMLCommandSet            `yaml:"timeout,omitempty" bson:"timeout,omitempty"`
-	CallbackTimeout    *int                       `yaml:"callback_timeout_secs,omitempty" bson:"callback_timeout_secs,omitempty"`
-	Modules            []Module                   `yaml:"modules,omitempty" bson:"modules,omitempty"`
-	Containers         []Container                `yaml:"containers,omitempty" bson:"containers,omitempty"`
-	BuildVariants      []parserBV                 `yaml:"buildvariants,omitempty" bson:"buildvariants,omitempty"`
-	Functions          map[string]*YAMLCommandSet `yaml:"functions,omitempty" bson:"functions,omitempty"`
-	TaskGroups         []parserTaskGroup          `yaml:"task_groups,omitempty" bson:"task_groups,omitempty"`
-	Tasks              []parserTask               `yaml:"tasks,omitempty" bson:"tasks,omitempty"`
-	ExecTimeoutSecs    *int                       `yaml:"exec_timeout_secs,omitempty" bson:"exec_timeout_secs,omitempty"`
-	TimeoutSecs        *int                       `yaml:"timeout_secs,omitempty" bson:"timeout_secs,omitempty"`
-	CreateTime         time.Time                  `yaml:"create_time,omitempty" bson:"create_time,omitempty"`
+	Stepback           *bool   `yaml:"stepback,omitempty" bson:"stepback,omitempty"`
+	PreTimeoutSecs     *int    `yaml:"pre_timeout_secs,omitempty" bson:"pre_timeout_secs,omitempty"`
+	PostTimeoutSecs    *int    `yaml:"post_timeout_secs,omitempty" bson:"post_timeout_secs,omitempty"`
+	PreErrorFailsTask  *bool   `yaml:"pre_error_fails_task,omitempty" bson:"pre_error_fails_task,omitempty"`
+	PostErrorFailsTask *bool   `yaml:"post_error_fails_task,omitempty" bson:"post_error_fails_task,omitempty"`
+	OomTracker         *bool   `yaml:"oom_tracker,omitempty" bson:"oom_tracker,omitempty"`
+	Ps                 *string `yaml:"ps,omitempty" bson:"ps,omitempty"`
+	Owner              *string `yaml:"owner,omitempty" bson:"owner,omitempty"`
+	Repo               *string `yaml:"repo,omitempty" bson:"repo,omitempty"`
+	RemotePath         *string `yaml:"remote_path,omitempty" bson:"remote_path,omitempty"`
+	Branch             *string `yaml:"branch,omitempty" bson:"branch,omitempty"`
+	// Identifier is the project ID (despite the name, it's not the project
+	// identifier).
+	Identifier      *string                    `yaml:"identifier,omitempty" bson:"identifier,omitempty"`
+	DisplayName     *string                    `yaml:"display_name,omitempty" bson:"display_name,omitempty"`
+	CommandType     *string                    `yaml:"command_type,omitempty" bson:"command_type,omitempty"`
+	Ignore          parserStringSlice          `yaml:"ignore,omitempty" bson:"ignore,omitempty"`
+	Parameters      []ParameterInfo            `yaml:"parameters,omitempty" bson:"parameters,omitempty"`
+	Pre             *YAMLCommandSet            `yaml:"pre,omitempty" bson:"pre,omitempty"`
+	Post            *YAMLCommandSet            `yaml:"post,omitempty" bson:"post,omitempty"`
+	Timeout         *YAMLCommandSet            `yaml:"timeout,omitempty" bson:"timeout,omitempty"`
+	CallbackTimeout *int                       `yaml:"callback_timeout_secs,omitempty" bson:"callback_timeout_secs,omitempty"`
+	Modules         []Module                   `yaml:"modules,omitempty" bson:"modules,omitempty"`
+	BuildVariants   []parserBV                 `yaml:"buildvariants,omitempty" bson:"buildvariants,omitempty"`
+	Functions       map[string]*YAMLCommandSet `yaml:"functions,omitempty" bson:"functions,omitempty"`
+	TaskGroups      []parserTaskGroup          `yaml:"task_groups,omitempty" bson:"task_groups,omitempty"`
+	Tasks           []parserTask               `yaml:"tasks,omitempty" bson:"tasks,omitempty"`
+	ExecTimeoutSecs *int                       `yaml:"exec_timeout_secs,omitempty" bson:"exec_timeout_secs,omitempty"`
+	TimeoutSecs     *int                       `yaml:"timeout_secs,omitempty" bson:"timeout_secs,omitempty"`
+	CreateTime      time.Time                  `yaml:"create_time,omitempty" bson:"create_time,omitempty"`
+
+	// DisableMergeQueuePathFiltering, if true, skips path filtering for merge queue versions.
+	DisableMergeQueuePathFiltering *bool `yaml:"disable_merge_queue_path_filtering,omitempty" bson:"disable_merge_queue_path_filtering,omitempty"`
 
 	// Matrix code
 	Axes []matrixAxis `yaml:"axes,omitempty" bson:"axes,omitempty"`
@@ -153,8 +163,11 @@ type parserTask struct {
 	AllowForGitTag    *bool                     `yaml:"allow_for_git_tag,omitempty" bson:"allow_for_git_tag,omitempty"`
 	GitTagOnly        *bool                     `yaml:"git_tag_only,omitempty" bson:"git_tag_only,omitempty"`
 	AllowedRequesters []evergreen.UserRequester `yaml:"allowed_requesters,omitempty" bson:"allowed_requesters,omitempty"`
+	AllowedBranches   parserStringSlice         `yaml:"allowed_branches,omitempty" bson:"allowed_branches,omitempty"`
+	IgnoredBranches   parserStringSlice         `yaml:"ignored_branches,omitempty" bson:"ignored_branches,omitempty"`
 	Stepback          *bool                     `yaml:"stepback,omitempty" bson:"stepback,omitempty"`
 	MustHaveResults   *bool                     `yaml:"must_have_test_results,omitempty" bson:"must_have_test_results,omitempty"`
+	Ps                *string                   `yaml:"ps,omitempty" bson:"ps,omitempty"`
 }
 
 func (pp *ParserProject) Insert(ctx context.Context) error {
@@ -343,7 +356,10 @@ type parserBV struct {
 	AllowForGitTag    *bool                     `yaml:"allow_for_git_tag,omitempty" bson:"allow_for_git_tag,omitempty"`
 	GitTagOnly        *bool                     `yaml:"git_tag_only,omitempty" bson:"git_tag_only,omitempty"`
 	AllowedRequesters []evergreen.UserRequester `yaml:"allowed_requesters,omitempty" bson:"allowed_requesters,omitempty"`
+	AllowedBranches   parserStringSlice         `yaml:"allowed_branches,omitempty" bson:"allowed_branches,omitempty"`
+	IgnoredBranches   parserStringSlice         `yaml:"ignored_branches,omitempty" bson:"ignored_branches,omitempty"`
 	Paths             parserStringSlice         `yaml:"paths,omitempty" bson:"paths,omitempty"`
+	ExecTimeoutSecs   int                       `yaml:"exec_timeout_secs,omitempty" bson:"exec_timeout_secs,omitempty"`
 
 	// internal matrix stuff
 	MatrixId  string      `yaml:"matrix_id,omitempty" bson:"matrix_id,omitempty"`
@@ -413,7 +429,10 @@ func (pbv *parserBV) canMerge() bool {
 		pbv.AllowForGitTag == nil &&
 		pbv.GitTagOnly == nil &&
 		len(pbv.AllowedRequesters) == 0 &&
+		len(pbv.AllowedBranches) == 0 &&
+		len(pbv.IgnoredBranches) == 0 &&
 		len(pbv.Paths) == 0 &&
+		pbv.ExecTimeoutSecs == 0 &&
 		pbv.MatrixId == "" &&
 		pbv.MatrixVal == nil &&
 		pbv.Matrix == nil &&
@@ -429,9 +448,11 @@ type parserBVTaskUnit struct {
 	AllowForGitTag    *bool                     `yaml:"allow_for_git_tag,omitempty" bson:"allow_for_git_tag,omitempty"`
 	GitTagOnly        *bool                     `yaml:"git_tag_only,omitempty" bson:"git_tag_only,omitempty"`
 	AllowedRequesters []evergreen.UserRequester `yaml:"allowed_requesters,omitempty" bson:"allowed_requesters,omitempty"`
+	AllowedBranches   parserStringSlice         `yaml:"allowed_branches,omitempty" bson:"allowed_branches,omitempty"`
+	IgnoredBranches   parserStringSlice         `yaml:"ignored_branches,omitempty" bson:"ignored_branches,omitempty"`
+	ExecTimeoutSecs   int                       `yaml:"exec_timeout_secs,omitempty" bson:"exec_timeout_secs,omitempty"`
 	Priority          int64                     `yaml:"priority,omitempty" bson:"priority,omitempty"`
 	DependsOn         parserDependencies        `yaml:"depends_on,omitempty" bson:"depends_on,omitempty"`
-	ExecTimeoutSecs   int                       `yaml:"exec_timeout_secs,omitempty" bson:"exec_timeout_secs,omitempty"`
 	Stepback          *bool                     `yaml:"stepback,omitempty" bson:"stepback,omitempty"`
 	Distros           parserStringSlice         `yaml:"distros,omitempty" bson:"distros,omitempty"`
 	RunOn             parserStringSlice         `yaml:"run_on,omitempty" bson:"run_on,omitempty"` // Alias for "Distros" TODO: deprecate Distros
@@ -444,6 +465,8 @@ type parserBVTaskUnit struct {
 	CronBatchTime string `yaml:"cron,omitempty" bson:"cron,omitempty"`
 	// If Activate is set to false, then we don't initially activate the task.
 	Activate *bool `yaml:"activate,omitempty" bson:"activate,omitempty"`
+	// PS is the command to run for process diagnostics.
+	PS *string `yaml:"ps,omitempty" bson:"ps,omitempty"`
 	// CreateCheckRun will create a check run on GitHub if set.
 	CreateCheckRun *CheckRun `yaml:"create_check_run,omitempty" bson:"create_check_run,omitempty"`
 }
@@ -546,7 +569,7 @@ func FindAndTranslateProjectForPatch(ctx context.Context, settings *evergreen.Se
 		if pp == nil {
 			return nil, nil, errors.Errorf("parser project '%s' not found in storage using method '%s'", p.Id.Hex(), p.ProjectStorageMethod)
 		}
-		project, err := TranslateProject(pp)
+		project, err := TranslateProject(ctx, pp)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "translating project '%s'", pp.Id)
 		}
@@ -554,49 +577,222 @@ func FindAndTranslateProjectForPatch(ctx context.Context, settings *evergreen.Se
 	}
 
 	// This fallback handles the case where the patch is already finalized.
-	v, err := VersionFindOneId(ctx, p.Version)
+	project, pp, err := FindAndTranslateProjectForVersionID(ctx, settings, p.Version, false)
 	if err != nil {
-		return nil, nil, errors.Wrapf(err, "finding version '%s' for patch '%s'", p.Version, p.Id.Hex())
+		return nil, nil, errors.Wrapf(err, "finding project for patch '%s'", p.Id.Hex())
+	}
+	return project, pp, nil
+}
+
+const (
+	// ppPreGenerationOtelAttribute records whether a translation used the
+	// pre-generation parser project copy.
+	ppPreGenerationOtelAttribute = "evergreen.parser_project.pre_generation"
+	// ppTranslationCacheHitOtelAttribute records whether this call reused a translation already
+	// stored in the LRU, so it never had to recompute one at all.
+	ppTranslationCacheHitOtelAttribute = "evergreen.parser_project.translation_cache_hit"
+	// ppTranslationDedupedOtelAttribute records whether this call arrived while another request
+	// for the same version was already translating it, and shared that in-flight result instead
+	// of starting a redundant translation of its own.
+	ppTranslationDedupedOtelAttribute = "evergreen.parser_project.translation_deduped"
+	// ppReadDedupedOtelAttribute records whether this call was a follower that shared another
+	// in-flight request's parser-project read + translate for the same version instead of doing its
+	// own read. It counts followers only (reads saved), not the leader, so it reflects raw
+	// same-version request concurrency independent of the LRU state.
+	ppReadDedupedOtelAttribute = "evergreen.parser_project.read_deduped"
+	// ppTranslationCacheSizeOtelAttribute records how many translations the LRU is holding right now.
+	ppTranslationCacheSizeOtelAttribute = "evergreen.parser_project.translation_cache_size"
+	// ppTranslationCacheBytesOtelAttribute records the estimated byte total of the translations the
+	// LRU is holding right now, which the byte budget bounds.
+	ppTranslationCacheBytesOtelAttribute = "evergreen.parser_project.translation_cache_bytes"
+	// ppTranslationCacheEvictionsOtelAttribute records the cumulative count of translations the LRU
+	// has dropped to make room for new ones (or because their TTL expired), before anything reused them.
+	ppTranslationCacheEvictionsOtelAttribute = "evergreen.parser_project.translation_cache_evictions"
+	// ppTranslationCacheHottestKeyOtelAttribute records the cache key with the most hits right now, so
+	// the hottest cached configs are identifiable in Honeycomb for tuning.
+	ppTranslationCacheHottestKeyOtelAttribute = "evergreen.parser_project.translation_cache_hottest_key"
+	// ppTranslationCacheHottestKeyHitsOtelAttribute records how many hits the hottest key has served.
+	ppTranslationCacheHottestKeyHitsOtelAttribute = "evergreen.parser_project.translation_cache_hottest_key_hits"
+)
+
+// projectTranslationCacheEnabled reports whether the project translation cache ServiceFlag is on.
+// Callers thread settings from the entry point rather than reading the global environment.
+func projectTranslationCacheEnabled(settings *evergreen.Settings) bool {
+	return settings != nil && settings.ServiceFlags.ProjectTranslationCacheEnabled
+}
+
+// setTranslationCacheSpanAttributes records the cache hit/dedup outcome on span, plus the LRU's
+// size, evictions, and hottest key when the cache is enabled.
+func setTranslationCacheSpanAttributes(span trace.Span, cacheHit, deduped, cacheEnabled bool) {
+	span.SetAttributes(
+		attribute.Bool(ppTranslationCacheHitOtelAttribute, cacheHit),
+		attribute.Bool(ppTranslationDedupedOtelAttribute, deduped),
+	)
+	if !cacheEnabled {
+		return
+	}
+	size, evictions, bytes := translationCacheStats()
+	hottestKey, hottestHits := hottestTranslationKey()
+	span.SetAttributes(
+		attribute.Int(ppTranslationCacheSizeOtelAttribute, size),
+		attribute.Int64(ppTranslationCacheBytesOtelAttribute, bytes),
+		attribute.Int64(ppTranslationCacheEvictionsOtelAttribute, evictions),
+		attribute.String(ppTranslationCacheHottestKeyOtelAttribute, hottestKey),
+		attribute.Int64(ppTranslationCacheHottestKeyHitsOtelAttribute, hottestHits),
+	)
+}
+
+// FindAndTranslateProjectForVersionID translates a parser project for a version into a Project.
+func FindAndTranslateProjectForVersionID(ctx context.Context, settings *evergreen.Settings, versionID string, preGeneration bool) (*Project, *ParserProject, error) {
+	v, err := VersionFindOne(ctx, VersionById(versionID).WithFields(
+		VersionIdKey,
+		VersionIdentifierKey,
+		VersionProjectStorageMethodKey,
+		VersionPreGenerationProjectStorageMethodKey,
+	))
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "finding version '%s'", versionID)
 	}
 	if v == nil {
-		return nil, nil, errors.Errorf("version '%s' not found for patch '%s'", p.Version, p.Id.Hex())
+		return nil, nil, errors.Errorf("version '%s' not found", versionID)
 	}
-	return FindAndTranslateProjectForVersion(ctx, settings, v, false)
+
+	return FindAndTranslateProjectForVersion(ctx, settings, v, preGeneration)
 }
+
+// parserProjectReadTimeout bounds a single coalesced read + translate, so a hung S3 read can't pin
+// the read singleflight slot indefinitely for the whole burst waiting behind it.
+const parserProjectReadTimeout = 90 * time.Second
 
 // FindAndTranslateProjectForVersion translates a parser project for a version into a Project.
 // Also sets the project ID. If the preGeneration flag is true, this function will attempt to
-// fetch and translate the parser project from before it was modified by generate.tasks
+// fetch and translate the parser project from before it was modified by generate.tasks.
+//
+// The returned *Project is the caller's own value: its top-level slices and maps (BuildVariants,
+// Tasks, Modules, etc.) are safe to reorder, append to, or replace. Structures nested below that
+// level are shared with the cache and must not be mutated.
+//
+// The returned *ParserProject is shared and read-only: concurrent same-version callers may receive
+// the same pointer via read coalescing, so it must not be mutated. Callers that transform the parser
+// project must clone it first or use FindAndTranslateProjectForVersionWithOpts to opt out of the
+// coalesced read.
 func FindAndTranslateProjectForVersion(ctx context.Context, settings *evergreen.Settings, v *Version, preGeneration bool) (*Project, *ParserProject, error) {
+	return findAndTranslateProjectForVersion(ctx, settings, v.Id, v.Identifier, v.ProjectStorageMethod, v.PreGenerationProjectStorageMethod, preGeneration, true)
+}
+
+// FindAndTranslateProjectForVersionWithOpts is like FindAndTranslateProjectForVersion but exposes two flags:
+//   - preGeneration: true for the parser project from before generate.tasks modified it; false (typical) for the current one.
+//   - coalesceRead: true (typical) to share one read across concurrent same-version callers, yielding a shared read-only
+//     *ParserProject. Pass false only if you must mutate the returned *ParserProject, which guarantees an unshared copy.
+func FindAndTranslateProjectForVersionWithOpts(ctx context.Context, settings *evergreen.Settings, v *Version, preGeneration, coalesceRead bool) (*Project, *ParserProject, error) {
+	return findAndTranslateProjectForVersion(ctx, settings, v.Id, v.Identifier, v.ProjectStorageMethod, v.PreGenerationProjectStorageMethod, preGeneration, coalesceRead)
+}
+
+// readTranslationResult packages the shared read + translate result so read-coalesced followers get
+// the same partial result (including any error) as the leader, mirroring the inner translationResult
+// pattern.
+type readTranslationResult struct {
+	project *Project
+	pp      *ParserProject
+	err     error
+}
+
+func findAndTranslateProjectForVersion(ctx context.Context, settings *evergreen.Settings, versionID, versionIdentifier string, projectStorageMethod, preGenerationProjectStorageMethod evergreen.ParserProjectStorageMethod, preGeneration, coalesceRead bool) (*Project, *ParserProject, error) {
+	ctx, span := tracer.Start(ctx, "FindAndTranslateProjectForVersion", trace.WithAttributes(
+		attribute.String(evergreen.VersionIDOtelAttribute, versionID),
+		attribute.Bool(ppPreGenerationOtelAttribute, preGeneration),
+	))
+	defer span.End()
+
+	res, readDeduped := readAndTranslateProjectForVersionCoalesced(ctx, span, settings, versionID, versionIdentifier, projectStorageMethod, preGenerationProjectStorageMethod, preGeneration, coalesceRead)
+	span.SetAttributes(attribute.Bool(ppReadDedupedOtelAttribute, readDeduped))
+	return res.project, res.pp, res.err
+}
+
+// readAndTranslateProjectForVersionCoalesced runs the read + translate, optionally coalescing
+// concurrent same-version requests through the read singleflight. readDeduped reports whether this
+// call was a follower that shared another in-flight request's result (leaders and non-coalesced
+// calls report false), so it counts reads saved.
+func readAndTranslateProjectForVersionCoalesced(ctx context.Context, span trace.Span, settings *evergreen.Settings, versionID, versionIdentifier string, projectStorageMethod, preGenerationProjectStorageMethod evergreen.ParserProjectStorageMethod, preGeneration, coalesceRead bool) (readTranslationResult, bool) {
+	if !coalesceRead {
+		return readAndTranslateProjectForVersion(ctx, span, settings, versionID, versionIdentifier, projectStorageMethod, preGenerationProjectStorageMethod, preGeneration), false
+	}
+
+	storageMethod := projectStorageMethod
+	if preGeneration {
+		storageMethod = preGenerationProjectStorageMethod
+	}
+	key := versionReadKey(versionID, preGeneration, storageMethod)
+
+	// leader is set only inside the executed closure, so followers can be counted separately from the
+	// single leader for an accurate "reads saved" metric.
+	leader := false
+	v, sfErr, shared := getReadTranslationGroup().Do(key, func() (any, error) {
+		leader = true
+		// Detach from the leader's cancellation but keep an explicit deadline, so a follower with a
+		// live context isn't failed by the leader cancelling, while a hung read can't pin the slot
+		// forever. Failures are not cached: singleflight forgets the key when the closure returns.
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), parserProjectReadTimeout)
+		defer cancel()
+		return readAndTranslateProjectForVersion(readCtx, span, settings, versionID, versionIdentifier, projectStorageMethod, preGenerationProjectStorageMethod, preGeneration), nil
+	})
+	if sfErr != nil {
+		return readTranslationResult{err: sfErr}, false
+	}
+	return v.(readTranslationResult), shared && !leader
+}
+
+// readAndTranslateProjectForVersion performs the parser-project read (with a bounded retry) and
+// translate for a version. It is the shared body run under the read singleflight.
+func readAndTranslateProjectForVersion(ctx context.Context, span trace.Span, settings *evergreen.Settings, versionID, versionIdentifier string, projectStorageMethod, preGenerationProjectStorageMethod evergreen.ParserProjectStorageMethod, preGeneration bool) readTranslationResult {
 	var pp *ParserProject
 	var err error
 	if preGeneration {
-		preGeneratedId := preGeneratedParserProjectId(v.Id)
-		pp, err = ParserProjectFindOneByID(ctx, settings, v.PreGenerationProjectStorageMethod, preGeneratedId)
+		preGeneratedId := preGeneratedParserProjectId(versionID)
+		pp, err = findParserProjectWithRetry(ctx, settings, preGenerationProjectStorageMethod, preGeneratedId)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "finding parser project '%s'", preGeneratedId)
+			return readTranslationResult{err: errors.Wrapf(err, "finding parser project '%s'", preGeneratedId)}
 		}
 		// Fall back to the parser project post-generation if the pre-generation parser project was not found
 	}
 	if pp == nil {
-		pp, err = ParserProjectFindOneByID(ctx, settings, v.ProjectStorageMethod, v.Id)
+		pp, err = findParserProjectWithRetry(ctx, settings, projectStorageMethod, versionID)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "finding parser project '%s'", v.Id)
+			return readTranslationResult{err: errors.Wrapf(err, "finding parser project '%s'", versionID)}
 		}
 		if pp == nil {
-			return nil, nil, errors.Errorf("parser project not found for version '%s'", v.Id)
+			return readTranslationResult{err: errors.Errorf("parser project not found for version '%s'", versionID)}
 		}
 	}
-	// Setting the translated project's identifier is necessary here because the
-	// version always has an identifier, but some old parser projects used to
-	// not be stored with the identifier.
-	pp.Identifier = utility.ToStringPtr(v.Identifier)
-	var p *Project
-	p, err = TranslateProject(pp)
-	if err != nil {
-		return nil, nil, errors.Wrapf(err, "translating parser project '%s'", v.Id)
+	// Setting the translated project's ID is necessary here because some old
+	// parser projects used to not be stored with the ID.
+	if versionIdentifier != "" {
+		pp.Identifier = utility.ToStringPtr(versionIdentifier)
 	}
-	return p, pp, err
+
+	cacheEnabled := projectTranslationCacheEnabled(settings)
+	p, err := translateAndCache(ctx, span, pp, versionIdentifier, versionTranslationKey(versionID, preGeneration), cacheEnabled)
+	if err != nil {
+		return readTranslationResult{err: errors.Wrapf(err, "translating parser project '%s'", versionID)}
+	}
+	return readTranslationResult{project: p, pp: pp}
+}
+
+// parserProjectFindOneByID is the parser-project read seam, overridable in tests to count reads and
+// inject failures.
+var parserProjectFindOneByID = ParserProjectFindOneByID
+
+// findParserProjectWithRetry reads a parser project with a bounded retry. Because read coalescing
+// correlates one transient failure across the whole burst and several callers don't retry, one
+// retry absorbs a transient blip for the entire burst without multiplying load.
+func findParserProjectWithRetry(ctx context.Context, settings *evergreen.Settings, method evergreen.ParserProjectStorageMethod, id string) (*ParserProject, error) {
+	var pp *ParserProject
+	err := utility.Retry(ctx, func() (bool, error) {
+		var err error
+		pp, err = parserProjectFindOneByID(ctx, settings, method, id)
+		return true, err
+	}, utility.RetryOptions{MaxAttempts: 2, MinDelay: 100 * time.Millisecond, MaxDelay: time.Second})
+	return pp, err
 }
 
 // LoadProjectInfoForVersion returns the project info for a version from its parser project.
@@ -628,45 +824,51 @@ func LoadProjectInfoForVersion(ctx context.Context, settings *evergreen.Settings
 	}, nil
 }
 
+// GetProjectFromBSON is used by the CLI and agent, neither of which have a request-scoped
+// context available at this leaf call, so it translates with context.Background().
 func GetProjectFromBSON(data []byte) (*Project, error) {
 	pp := &ParserProject{}
 	if err := bson.Unmarshal(data, pp); err != nil {
 		return nil, errors.Wrap(err, "unmarshalling BSON into parser project")
 	}
-	return TranslateProject(pp)
+	return TranslateProject(context.Background(), pp)
 }
 
-func processIntermediateProjectIncludes(ctx context.Context, identifier string, intermediateProject *ParserProject,
-	include parserInclude, outputYAMLs chan<- yamlTuple, projectOpts *GetProjectOpts) {
+func processIntermediateProjectIncludes(ctx context.Context, intermediateProject *ParserProject,
+	include parserInclude, outputYAMLs chan<- yamlTuple, projectOpts *GetProjectOpts, dirs *gitIncludeDirs, workerIdx int) {
 	// Make a copy of opts because otherwise parts of opts would be
 	// modified concurrently.  Note, however, that Ref and PatchOpts are
 	// themselves pointers, so should not be modified.
 	localOpts := &GetProjectOpts{
-		Ref:                 projectOpts.Ref,
-		PatchOpts:           projectOpts.PatchOpts,
-		LocalModules:        projectOpts.LocalModules,
-		RemotePath:          include.FileName,
-		Revision:            projectOpts.Revision,
-		ReadFileFrom:        projectOpts.ReadFileFrom,
-		Identifier:          identifier,
-		UnmarshalStrict:     projectOpts.UnmarshalStrict,
-		LocalModuleIncludes: projectOpts.LocalModuleIncludes,
-		ReferencePatchID:    projectOpts.ReferencePatchID,
-		ReferenceManifestID: projectOpts.ReferenceManifestID,
-		IsIncludedFile:      true,
+		Ref:                       projectOpts.Ref,
+		PatchOpts:                 projectOpts.PatchOpts,
+		LocalModules:              projectOpts.LocalModules,
+		RemotePath:                include.FileName,
+		Revision:                  projectOpts.Revision,
+		ReadFileFrom:              projectOpts.ReadFileFrom,
+		UnmarshalStrict:           projectOpts.UnmarshalStrict,
+		LocalModuleIncludes:       projectOpts.LocalModuleIncludes,
+		ReferencePatchID:          projectOpts.ReferencePatchID,
+		ReferenceManifestID:       projectOpts.ReferenceManifestID,
+		AutoUpdateModuleRevisions: projectOpts.AutoUpdateModuleRevisions,
+		IsIncludedFile:            true,
+		LocalIncludeDir:           projectOpts.LocalIncludeDir,
+	}
+	if projectOpts.Ref != nil {
+		localOpts.Worktree = dirs.getWorktreeForOwnerRepoWorker(projectOpts.Ref.Owner, projectOpts.Ref.Repo, workerIdx)
 	}
 	localOpts.UpdateReadFileFrom(include.FileName)
 
 	var yaml []byte
 	var err error
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"message":     "retrieving included YAML file",
 		"remote_path": localOpts.RemotePath,
 		"read_from":   localOpts.ReadFileFrom,
 		"module":      include.Module,
 	})
 	if include.Module != "" {
-		yaml, err = retrieveFileForModule(ctx, *localOpts, intermediateProject.Modules, include)
+		yaml, err = retrieveFileForModule(ctx, *localOpts, intermediateProject.Modules, include, dirs, workerIdx)
 		err = errors.Wrapf(err, "%s: retrieving file for module '%s'", LoadProjectError, include.Module)
 	} else {
 		yaml, err = retrieveFile(ctx, *localOpts)
@@ -704,10 +906,14 @@ func LoadProjectInto(ctx context.Context, data []byte, opts *GetProjectOpts, pro
 	defer span.End()
 
 	unmarshalStrict := false
+	var anchorRegistry *anchorEntries
 	if opts != nil {
 		unmarshalStrict = opts.UnmarshalStrict
+		if opts.EnableYAMLAnchors {
+			anchorRegistry = &anchorEntries{}
+		}
 	}
-	intermediateProject, err := createIntermediateProject(data, unmarshalStrict)
+	intermediateProject, err := createIntermediateProject(data, unmarshalStrict, anchorRegistry)
 	if err != nil {
 		return nil, errors.Wrapf(err, LoadProjectError)
 	}
@@ -717,13 +923,18 @@ func LoadProjectInto(ctx context.Context, data []byte, opts *GetProjectOpts, pro
 	}
 
 	if len(intermediateProject.Include) > 0 {
-		if err := mergeIncludes(ctx, projectID, intermediateProject, opts); err != nil {
+		if err := mergeIncludes(ctx, projectID, intermediateProject, anchorRegistry, opts); err != nil {
 			return nil, errors.Wrap(err, "merging included files")
 		}
 	}
 
 	// Return project even with errors.
-	p, err := TranslateProject(intermediateProject)
+	cacheEnabled := opts != nil && opts.cacheEnabled
+	var revision string
+	if opts != nil {
+		revision = opts.Revision
+	}
+	p, err := loadTranslateProject(ctx, span, intermediateProject, projectID, revision, cacheEnabled)
 	if p != nil {
 		*project = *p
 	}
@@ -737,8 +948,14 @@ func LoadProjectInto(ctx context.Context, data []byte, opts *GetProjectOpts, pro
 	return intermediateProject, errors.Wrapf(err, LoadProjectError)
 }
 
-// mergeIncludes merges all included files into the intermediateProject.
-func mergeIncludes(ctx context.Context, projectID string, intermediateProject *ParserProject, opts *GetProjectOpts) error {
+// loadTranslateProject translates the post-merge intermediate project, optionally serving the
+// result from the content-hash translation cache keyed on its content and projectID.
+func loadTranslateProject(ctx context.Context, span trace.Span, intermediateProject *ParserProject, projectID, revision string, cacheEnabled bool) (*Project, error) {
+	return translateAndCache(ctx, span, intermediateProject, projectID, fileTranslationKey(projectID, revision), cacheEnabled)
+}
+
+// mergeIncludes merges all included files into intermediateProject.
+func mergeIncludes(ctx context.Context, projectID string, intermediateProject *ParserProject, anchorRegistry *anchorEntries, opts *GetProjectOpts) error {
 	ctx, span := tracer.Start(ctx, "mergeIncludes")
 	defer span.End()
 
@@ -746,6 +963,45 @@ func mergeIncludes(ctx context.Context, projectID string, intermediateProject *P
 		err := errors.New("trying to open include files with empty options")
 		return errors.Wrapf(err, LoadProjectError)
 	}
+
+	// Be polite. Don't make more than 10 concurrent requests to GitHub.
+	const maxWorkers = 10
+	workers := util.Min(maxWorkers, len(intermediateProject.Include))
+
+	dirs, err := setupParallelGitIncludeDirs(ctx, intermediateProject.Modules, intermediateProject.Include, workers, opts)
+	if err != nil {
+		msg := message.Fields{
+			"message":    "could not set up git include directories for includes, will fall back to using GitHub API to retrieve include files",
+			"project_id": projectID,
+			"revision":   opts.Revision,
+		}
+		if opts.Ref != nil {
+			msg["project_identifier"] = opts.Ref.Identifier
+			msg["owner"] = opts.Ref.Owner
+			msg["repo"] = opts.Ref.Repo
+		}
+		grip.Warning(ctx, message.WrapError(err, msg))
+	}
+	defer func() {
+		// This is a best-effort attempt to clean up the temporary git
+		// directories after includes are processed. However, if it errors, it's
+		// not really an issue because the git directories don't use much disk
+		// space and app servers are not long-lived enough for a few leftover
+		// files to cause issues.
+		if err := dirs.cleanup(); err != nil {
+			msg := message.Fields{
+				"message":    "could not clean up git directories after including files, may leave behind temporary git files in the file system",
+				"project_id": projectID,
+				"revision":   opts.Revision,
+			}
+			if opts.Ref != nil {
+				msg["project_identifier"] = opts.Ref.Identifier
+				msg["owner"] = opts.Ref.Owner
+				msg["repo"] = opts.Ref.Repo
+			}
+			grip.Warning(ctx, message.WrapError(err, msg))
+		}
+	}()
 
 	wg := sync.WaitGroup{}
 	outputYAMLs := make(chan yamlTuple, len(intermediateProject.Include))
@@ -756,17 +1012,14 @@ func mergeIncludes(ctx context.Context, projectID string, intermediateProject *P
 	}
 	close(includesToProcess)
 
-	// Be polite. Don't make more than 10 concurrent requests to GitHub.
-	const maxWorkers = 10
-	workers := util.Min(maxWorkers, len(intermediateProject.Include))
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(workerIdx int) {
 			defer wg.Done()
 			for include := range includesToProcess {
-				processIntermediateProjectIncludes(ctx, projectID, intermediateProject, include, outputYAMLs, opts)
+				processIntermediateProjectIncludes(ctx, intermediateProject, include, outputYAMLs, opts, dirs, workerIdx)
 			}
-		}()
+		}(i)
 	}
 
 	// This order is deliberate:
@@ -796,11 +1049,13 @@ func mergeIncludes(ctx context.Context, projectID string, intermediateProject *P
 		if _, ok := yamlMap[path.FileName]; !ok {
 			return errors.WithStack(errors.Errorf("yaml was nil in map for %s, but it never should be", path.FileName))
 		}
-		add, err := createIntermediateProject(yamlMap[path.FileName], opts.UnmarshalStrict)
+
+		add, err := createIntermediateProject(yamlMap[path.FileName], opts.UnmarshalStrict, anchorRegistry)
 		if err != nil {
 			// Return intermediateProject even if we run into issues to show merge progress.
 			return errors.Wrapf(err, "%s: loading file '%s'", LoadProjectError, path.FileName)
 		}
+
 		if err = intermediateProject.mergeMultipleParserProjects(add); err != nil {
 			// Return intermediateProject even if we run into issues to show merge progress.
 			return errors.Wrapf(err, "%s: merging file '%s'", LoadProjectError, path.FileName)
@@ -810,6 +1065,234 @@ func mergeIncludes(ctx context.Context, projectID string, intermediateProject *P
 	return nil
 }
 
+// gitIncludeDirs contains information about git clone and worktree directories
+// that can be used when including YAML files.
+type gitIncludeDirs struct {
+	// clonesForOwnerRepo maps a git owner/repo to the directory where its
+	// git clone is located.
+	clonesForOwnerRepo map[gitOwnerRepo]string
+	// worktreesForOwnerRepo maps a git owner/repo to the list of available
+	// worktree directories.
+	worktreesForOwnerRepo map[gitOwnerRepo][]string
+}
+
+type gitOwnerRepo struct {
+	owner string
+	repo  string
+}
+
+func newGitOwnerRepo(owner, repo string) gitOwnerRepo {
+	return gitOwnerRepo{
+		owner: owner,
+		repo:  repo,
+	}
+}
+
+func (d *gitIncludeDirs) getWorktreeForOwnerRepoWorker(owner, repo string, workerNum int) string {
+	if d == nil {
+		return ""
+	}
+	if d.worktreesForOwnerRepo == nil {
+		return ""
+	}
+
+	ownerRepo := newGitOwnerRepo(owner, repo)
+	worktrees := d.worktreesForOwnerRepo[ownerRepo]
+	if workerNum >= len(worktrees) {
+		return ""
+	}
+	return worktrees[workerNum]
+}
+
+func (d *gitIncludeDirs) cleanup() error {
+	if d == nil {
+		return nil
+	}
+	catcher := grip.NewBasicCatcher()
+	for ownerRepo, dir := range d.clonesForOwnerRepo {
+		catcher.Wrapf(os.RemoveAll(dir), "cleaning up git clone directory '%s' for '%s/%s'", dir, ownerRepo.owner, ownerRepo.repo)
+	}
+	return catcher.Resolve()
+}
+
+// setupParallelGitIncludeDirs sets up git clones and worktrees in preparation
+// for retrieving included YAML files using git. numWorkers determines how
+// many worktrees are created for each included repo.
+// This is primarily a performance optimization. If using git to retrieve
+// included files from GitHub, repeating the same git setup for every single
+// included file is expensive and slow.
+func setupParallelGitIncludeDirs(ctx context.Context, modules ModuleList, includes []parserInclude, numWorkers int, opts *GetProjectOpts) (dirs *gitIncludeDirs, err error) {
+	if !readFromRemoteSource(opts.ReadFileFrom) {
+		return nil, nil
+	}
+	if opts.Ref == nil {
+		// Ref could be nil when the CLI is loading the project for validation.
+		return nil, nil
+	}
+
+	ctx, span := tracer.Start(ctx, "setupParallelGitIncludeDirs", trace.WithAttributes(
+		attribute.String(evergreen.ProjectIDOtelAttribute, opts.Ref.Id),
+		attribute.String(evergreen.ProjectIdentifierOtelAttribute, opts.Ref.Identifier),
+		attribute.String(evergreen.ProjectOrgOtelAttribute, opts.Ref.Owner),
+		attribute.String(evergreen.ProjectRepoOtelAttribute, opts.Ref.Repo),
+	))
+	defer span.End()
+
+	dirs = &gitIncludeDirs{
+		clonesForOwnerRepo:    make(map[gitOwnerRepo]string),
+		worktreesForOwnerRepo: make(map[gitOwnerRepo][]string),
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		// If this function errored, clean up any intermediate git clone
+		// directories and worktrees that were created.
+		grip.Warning(ctx, message.WrapError(dirs.cleanup(), message.Fields{
+			"message":            "could not clean up git clone directory after failing to set up git directories",
+			"project_id":         opts.Ref.Id,
+			"project_identifier": opts.Ref.Identifier,
+		}))
+		// Once dirs has been cleaned up, it's no longer valid to use it, so do
+		// not return it in the result.
+		dirs = nil
+	}()
+
+	includedModuleNames := map[string]struct{}{}
+	var includesProjectFiles bool
+	for _, include := range includes {
+		if include.Module != "" {
+			includedModuleNames[include.Module] = struct{}{}
+		} else {
+			includesProjectFiles = true
+		}
+	}
+
+	type gitInput struct {
+		ownerRepo gitOwnerRepo
+		revision  string
+	}
+	type gitOutput struct {
+		ownerRepo    gitOwnerRepo
+		cloneDir     string
+		worktreeDirs []string
+		err          error
+	}
+
+	// Creating git clones is slow, so for better performance, parallelize the
+	// git clones.
+	reposToProcess := make(chan gitInput, len(includedModuleNames)+1)
+	output := make(chan gitOutput, len(includedModuleNames)+1)
+
+	if includesProjectFiles {
+		ownerRepo := newGitOwnerRepo(opts.Ref.Owner, opts.Ref.Repo)
+		reposToProcess <- gitInput{
+			ownerRepo: ownerRepo,
+			revision:  opts.Revision,
+		}
+	}
+
+	for modName := range includedModuleNames {
+		mod, err := GetModuleByName(modules, modName)
+		if err != nil {
+			return dirs, errors.Wrapf(err, "getting module for module name '%s'", modName)
+		}
+		repoOwner, repoName, err := mod.GetOwnerAndRepo()
+		if err != nil {
+			return dirs, errors.Wrapf(err, "getting owner and repo for module '%s'", mod.Name)
+		}
+		revision, err := getRevisionForRemoteModule(ctx, *mod, modName, *opts)
+		if err != nil {
+			return dirs, errors.Wrapf(err, "getting revision for module '%s'", mod.Name)
+		}
+
+		ownerRepo := newGitOwnerRepo(repoOwner, repoName)
+		if _, ok := dirs.clonesForOwnerRepo[ownerRepo]; ok {
+			// When including files, there should not be any duplicate repos
+			// defined in the modules, and the modules should not use the exact
+			// same repo/branch as the project itself.
+			grip.Warning(ctx, message.Fields{
+				"message":            "trying to make multiple git clones of the same repo, skipping duplicate repo",
+				"project_id":         opts.Ref.Id,
+				"project_identifier": opts.Ref.Identifier,
+				"owner":              repoOwner,
+				"repo":               repoName,
+				"revision":           revision,
+				"module":             modName,
+			})
+			continue
+		}
+
+		reposToProcess <- gitInput{
+			ownerRepo: ownerRepo,
+			revision:  revision,
+		}
+	}
+
+	close(reposToProcess)
+
+	wg := sync.WaitGroup{}
+
+	numGitWorkers := util.Min(numWorkers, len(reposToProcess))
+	for range numGitWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for repoData := range reposToProcess {
+				cloneDir, worktreeDirs, err := gitCloneAndCreateWorktrees(ctx, repoData.ownerRepo, repoData.revision, numWorkers)
+				output <- gitOutput{
+					ownerRepo:    repoData.ownerRepo,
+					cloneDir:     cloneDir,
+					worktreeDirs: worktreeDirs,
+					err:          err,
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(output)
+
+	catcher := grip.NewBasicCatcher()
+	for out := range output {
+		if out.cloneDir != "" {
+			dirs.clonesForOwnerRepo[out.ownerRepo] = out.cloneDir
+		}
+		if out.worktreeDirs != nil {
+			dirs.worktreesForOwnerRepo[out.ownerRepo] = out.worktreeDirs
+		}
+		if out.err != nil {
+			catcher.Wrapf(out.err, "setting up git clone and worktrees for repo '%s/%s'", out.ownerRepo.owner, out.ownerRepo.repo)
+		}
+	}
+
+	return dirs, catcher.Resolve()
+}
+
+// gitCloneAndCreateWorktrees performs a minimal git clone of the specified repo
+// for the specific revision. Once the git clone is finished, it creates git
+// worktrees under the clone directory based on numWorktrees.
+func gitCloneAndCreateWorktrees(ctx context.Context, ownerRepo gitOwnerRepo, revision string, numWorktrees int) (cloneDir string, worktreeDirs []string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, thirdparty.GitOperationTimeout)
+	defer cancel()
+
+	dir, err := thirdparty.GitCloneMinimal(ctx, ownerRepo.owner, ownerRepo.repo, revision)
+	if err != nil {
+		return "", []string{}, errors.Wrapf(err, "git cloning repo '%s/%s' at revision '%s'", ownerRepo.owner, ownerRepo.repo, revision)
+	}
+
+	for i := range numWorktrees {
+		worktreeDir := filepath.Join(dir, fmt.Sprintf("worktree-%d", i))
+		if err := thirdparty.GitCreateWorktree(ctx, dir, worktreeDir); err != nil {
+			return dir, worktreeDirs, errors.Wrapf(err, "creating git worktree for repo '%s/%s'", ownerRepo.owner, ownerRepo.repo)
+		}
+		worktreeDirs = append(worktreeDirs, worktreeDir)
+	}
+
+	return dir, worktreeDirs, nil
+}
+
 const (
 	ReadFromGithub    = "github"
 	ReadFromLocal     = "local"
@@ -817,14 +1300,22 @@ const (
 	ReadFromPatchDiff = "patch_diff"
 )
 
+// readFromRemoteSource returns true if the readFrom option requires retrieving
+// a file from a remote source (i.e. GitHub). If ReadFileFrom is empty, the
+// default behavior is that it reads from a remote source.
+func readFromRemoteSource(readFrom string) bool {
+	return utility.StringSliceContains([]string{"", ReadFromGithub, ReadFromPatch, ReadFromPatchDiff}, readFrom)
+}
+
 type GetProjectOpts struct {
-	Ref                       *ProjectRef
-	PatchOpts                 *PatchOpts
-	LocalModules              map[string]string
-	RemotePath                string
-	Revision                  string
+	Ref          *ProjectRef
+	PatchOpts    *PatchOpts
+	LocalModules map[string]string
+	RemotePath   string
+	Revision     string
+	// ReadFileFrom determines where the file should be fetched from. If
+	// unspecified, the default is ReadFromGithub.
 	ReadFileFrom              string
-	Identifier                string
 	UnmarshalStrict           bool
 	LocalModuleIncludes       []patch.LocalModuleInclude
 	ReferencePatchID          string
@@ -833,6 +1324,17 @@ type GetProjectOpts struct {
 	// IsIncludedFile indicates whether the file being retrieved is an included
 	// YAML file.
 	IsIncludedFile bool
+	// Worktree is the directory of the git worktree to use when retrieving
+	// files via git. Only set if reading a remote file using git.
+	Worktree string
+	// LocalIncludeDir is the base directory for resolving relative include
+	// file paths when ReadFileFrom is ReadFromLocal.
+	LocalIncludeDir string
+	// EnableYAMLAnchors opts into cross-file YAML anchor and alias support.
+	EnableYAMLAnchors bool
+	// cacheEnabled routes the translate step through the content-hash translation cache. It is only
+	// set internally by GetProjectFromFile from the ServiceFlag, so external callers stay uncached.
+	cacheEnabled bool
 }
 
 type PatchOpts struct {
@@ -852,6 +1354,9 @@ func (opts *GetProjectOpts) UpdateReadFileFrom(path string) {
 	}
 }
 
+// retrieveFile retrieves a file from its source location. If no
+// opts.ReadFileFrom is specified, it will default to retrieving the file from
+// GitHub.
 func retrieveFile(ctx context.Context, opts GetProjectOpts) ([]byte, error) {
 	if opts.RemotePath == "" && opts.Ref != nil {
 		opts.RemotePath = opts.Ref.RemotePath
@@ -859,7 +1364,11 @@ func retrieveFile(ctx context.Context, opts GetProjectOpts) ([]byte, error) {
 
 	switch opts.ReadFileFrom {
 	case ReadFromLocal:
-		fileContents, err := os.ReadFile(opts.RemotePath)
+		remotePath := opts.RemotePath
+		if !filepath.IsAbs(remotePath) && opts.LocalIncludeDir != "" {
+			remotePath = filepath.Join(opts.LocalIncludeDir, remotePath)
+		}
+		fileContents, err := os.ReadFile(remotePath)
 		if err != nil {
 			return nil, errors.Wrap(err, "reading project config")
 		}
@@ -882,21 +1391,34 @@ func retrieveFile(ctx context.Context, opts GetProjectOpts) ([]byte, error) {
 		return fileContents, nil
 	default:
 		ghAppAuth, err := opts.Ref.GetGitHubAppAuthForAPI(ctx)
-		grip.Warning(message.WrapError(err, message.Fields{
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
 			"message":    "errored while attempting to get GitHub app for API, will fall back to using Evergreen-internal app",
 			"project_id": opts.Ref.Id,
 		}))
-		fileContents, err := thirdparty.GetGitHubFileContent(ctx, opts.Ref.Owner, opts.Ref.Repo, opts.Revision, opts.RemotePath, ghAppAuth, !opts.IsIncludedFile && IsGitUsageForGitHubFileEnabled(ctx))
+		useGit := true
+		if opts.IsIncludedFile && opts.Worktree == "" {
+			// Include files that have a git worktree available should try to
+			// use that because it's an optimization to reduce GitHub API calls
+			// (includes use a lot of GitHub API calls). However, if it doesn't
+			// have a git worktree, this should avoid using git entirely because
+			// without a worktree, retrieving every include file without a
+			// pre-created worktree is very slow.
+			// This can still retrieve the file using the GitHub API even though
+			// git is not an option.
+			useGit = false
+		}
+		fileContents, err := thirdparty.GetGitHubFileContent(ctx, opts.Ref.Owner, opts.Ref.Repo, opts.Revision, opts.RemotePath, opts.Worktree, ghAppAuth, useGit)
 		if err != nil {
-			return nil, errors.Wrapf(err, "fetching project config file for project '%s' at revision '%s'", opts.Identifier, opts.Revision)
+			return nil, errors.Wrapf(err, "fetching project config file for project '%s' at revision '%s'", opts.Ref.Id, opts.Revision)
 		}
 		return fileContents, nil
 	}
 }
 
-func retrieveFileForModule(ctx context.Context, opts GetProjectOpts, modules ModuleList, include parserInclude) ([]byte, error) {
+func retrieveFileForModule(ctx context.Context, opts GetProjectOpts, modules ModuleList, include parserInclude, dirs *gitIncludeDirs, workerIdx int) ([]byte, error) {
 	// Check if the module has a local change passed in through the CLI or previous patch.
-	if opts.ReferencePatchID != "" {
+	// Mainline version IDs are not valid patch IDs and have no LocalModuleIncludes.
+	if opts.ReferencePatchID != "" && patch.IsValidId(opts.ReferencePatchID) {
 		p, err := patch.FindOneId(ctx, opts.ReferencePatchID)
 		if err != nil {
 			return nil, errors.Wrapf(err, "finding patch to repeat '%s'", opts.ReferencePatchID)
@@ -915,8 +1437,9 @@ func retrieveFileForModule(ctx context.Context, opts GetProjectOpts, modules Mod
 	// Look through any given local modules first
 	if path, ok := opts.LocalModules[include.Module]; ok {
 		moduleOpts := GetProjectOpts{
-			RemotePath:   fmt.Sprintf("%s/%s", path, opts.RemotePath),
-			ReadFileFrom: ReadFromLocal,
+			RemotePath:      fmt.Sprintf("%s/%s", path, opts.RemotePath),
+			ReadFileFrom:    ReadFromLocal,
+			LocalIncludeDir: opts.LocalIncludeDir,
 		}
 		return retrieveFile(ctx, moduleOpts)
 	} else if opts.ReadFileFrom == ReadFromLocal {
@@ -930,7 +1453,6 @@ func retrieveFileForModule(ctx context.Context, opts GetProjectOpts, modules Mod
 	repoOwner, repoName, err := module.GetOwnerAndRepo()
 	if err != nil {
 		return nil, errors.Wrapf(err, "getting module owner and repo '%s'", module.Name)
-
 	}
 	pRef := *opts.Ref
 	pRef.Owner = repoOwner
@@ -938,35 +1460,43 @@ func retrieveFileForModule(ctx context.Context, opts GetProjectOpts, modules Mod
 	moduleOpts := GetProjectOpts{
 		Ref:          &pRef,
 		RemotePath:   opts.RemotePath,
-		Revision:     module.Branch,
 		ReadFileFrom: ReadFromGithub,
-		Identifier:   include.Module,
+		Worktree:     dirs.getWorktreeForOwnerRepoWorker(repoOwner, repoName, workerIdx),
+	}
+	moduleOpts.Revision, err = getRevisionForRemoteModule(ctx, *module, include.Module, opts)
+	if err != nil {
+		return nil, errors.Wrapf(err, "getting revision for module '%s'", include.Module)
 	}
 
+	return retrieveFile(ctx, moduleOpts)
+}
+
+// getRevisionForRemoteModule returns the revision or branch to use for the
+// given module include. This only works if retrieving files from a remote
+// source (e.g. GitHub); it will not handle includes from local modules.
+func getRevisionForRemoteModule(ctx context.Context, mod Module, modName string, opts GetProjectOpts) (string, error) {
 	if opts.AutoUpdateModuleRevisions != nil {
-		if revision, ok := opts.AutoUpdateModuleRevisions[include.Module]; ok {
-			moduleOpts.Revision = revision
-			return retrieveFile(ctx, moduleOpts)
+		if revision, ok := opts.AutoUpdateModuleRevisions[modName]; ok {
+			return revision, nil
 		}
 	}
 
-	// If a reference manifest is provided, use the module revision from the manifest.
 	if opts.ReferenceManifestID != "" {
 		m, err := manifest.FindOne(ctx, manifest.ById(opts.ReferenceManifestID))
 		if err != nil {
-			return nil, errors.Wrapf(err, "finding manifest to reference '%s'", opts.ReferenceManifestID)
+			return "", errors.Wrapf(err, "finding reference manifest '%s'", opts.ReferenceManifestID)
 		}
 		// Sometimes the manifest might be nil, in which case we don't want to set the revision.
 		if m != nil {
 			for name, mod := range m.Modules {
-				if name == include.Module {
-					moduleOpts.Revision = mod.Revision
-					break
+				if name == modName {
+					return mod.Revision, nil
 				}
 			}
 		}
 	}
-	return retrieveFile(ctx, moduleOpts)
+
+	return mod.Branch, nil
 }
 
 func getFileForPatchDiff(ctx context.Context, opts GetProjectOpts) ([]byte, error) {
@@ -977,11 +1507,23 @@ func getFileForPatchDiff(ctx context.Context, opts GetProjectOpts) ([]byte, erro
 		return nil, errors.New("project not passed in")
 	}
 	ghAppAuth, err := opts.Ref.GetGitHubAppAuthForAPI(ctx)
-	grip.Warning(message.WrapError(err, message.Fields{
+	grip.Warning(ctx, message.WrapError(err, message.Fields{
 		"message":    "errored while attempting to get GitHub app for API, will fall back to using Evergreen-internal app",
 		"project_id": opts.Ref.Id,
 	}))
-	projectFileBytes, err := thirdparty.GetGitHubFileContent(ctx, opts.Ref.Owner, opts.Ref.Repo, opts.Revision, opts.RemotePath, ghAppAuth, !opts.IsIncludedFile && IsGitUsageForGitHubFileEnabled(ctx))
+	useGit := true
+	if opts.IsIncludedFile && opts.Worktree == "" {
+		// Include files that have a git worktree available should try to
+		// use that because it's an optimization to reduce GitHub API calls
+		// (includes use a lot of GitHub API calls). However, if it doesn't
+		// have a git worktree, this should avoid using git entirely because
+		// without a worktree, retrieving every include file without a
+		// pre-created worktree is very slow.
+		// This can still retrieve the file using the GitHub API even though
+		// git is not an option.
+		useGit = false
+	}
+	projectFileBytes, err := thirdparty.GetGitHubFileContent(ctx, opts.Ref.Owner, opts.Ref.Repo, opts.Revision, opts.RemotePath, opts.Worktree, ghAppAuth, useGit)
 	if err != nil {
 		// if the project file doesn't exist, but our patch includes a project file,
 		// we try to apply the diff and proceed.
@@ -994,29 +1536,17 @@ func getFileForPatchDiff(ctx context.Context, opts GetProjectOpts) ([]byte, erro
 	return projectFileBytes, nil
 }
 
-// IsGitUsageForGitHubFileEnabled returns whether the experimental feature to
-// use git to retrieve files from GitHub is enabled. If the feature flag can't
-// be retrieved, it defaults to false (i.e. git usage is disabled).
-func IsGitUsageForGitHubFileEnabled(ctx context.Context) bool {
-	flags, err := evergreen.GetServiceFlags(ctx)
-	if err != nil {
-		grip.Warning(message.WrapError(err, message.Fields{
-			"message": "could not get service flags, falling back to assuming that using git is disabled",
-		}))
-		return false
-	}
-	return !flags.UseGitForGitHubFilesDisabled
-}
-
 // fetchProjectFilesTimeout is the maximum timeout to fetch project
 // configuration files from its source.
 const fetchProjectFilesTimeout = time.Minute
 
 // GetProjectFromFile fetches project configuration files from its source (e.g.
 // from a patch diff, GitHub, etc).
-func GetProjectFromFile(ctx context.Context, opts GetProjectOpts) (ProjectInfo, error) {
+func GetProjectFromFile(ctx context.Context, opts GetProjectOpts, settings *evergreen.Settings) (ProjectInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchProjectFilesTimeout)
 	defer cancel()
+
+	opts.cacheEnabled = projectTranslationCacheEnabled(settings)
 
 	fileContents, err := retrieveFile(ctx, opts)
 	if err != nil {
@@ -1042,12 +1572,75 @@ func GetProjectFromFile(ctx context.Context, opts GetProjectOpts) (ProjectInfo, 
 	}, nil
 }
 
-// createIntermediateProject marshals the supplied YAML into our
-// intermediate project representation (i.e. before selectors or
-// matrix logic has been evaluated).
+// createIntermediateProject marshals the supplied YAML into our intermediate project representation
+// (i.e. before selectors or matrix logic has been evaluated).
 // If unmarshalStrict is true, use the strict version of unmarshalling.
-func createIntermediateProject(yml []byte, unmarshalStrict bool) (*ParserProject, error) {
+// When anchorRegistry is non-nil, cross-file anchor support is enabled: existing anchors are prepended so the
+// parser can resolve cross-file aliases, and any new anchor definitions are appended to the registry for future files.
+func createIntermediateProject(parseBytes []byte, unmarshalStrict bool, anchorRegistry *anchorEntries) (*ParserProject, error) {
 	p := ParserProject{}
+
+	if anchorRegistry == nil {
+		if unmarshalStrict {
+			strictProjectWithVariables := struct {
+				ParserProject       `yaml:"pp,inline"`
+				ProjectConfigFields `yaml:"pc,inline"`
+				// Variables is only used to suppress yaml unmarshalling errors related
+				// to a non-existent variables field.
+				Variables any `yaml:"variables,omitempty" bson:"-"`
+			}{}
+			if err := util.UnmarshalYAMLStrictWithFallback(parseBytes, &strictProjectWithVariables); err != nil {
+				return nil, errors.Wrap(err, "unmarshalling parser project from YAML")
+			}
+			p = strictProjectWithVariables.ParserProject
+		} else {
+			if err := util.UnmarshalYAMLWithFallback(parseBytes, &p); err != nil {
+				return nil, errors.Wrap(err, "unmarshalling parser project from YAML")
+			}
+		}
+		if p.Functions == nil {
+			p.Functions = map[string]*YAMLCommandSet{}
+		}
+		return &p, nil
+	}
+
+	// Prepend accumulated anchors as a preamble so the parser can resolve cross-file aliases.
+	if len(*anchorRegistry) > 0 {
+		preamble, err := buildAnchorPreamble(anchorRegistry)
+		if err != nil {
+			return nil, errors.Wrap(err, "building anchor preamble")
+		}
+		parseBytes = append(preamble, parseBytes...)
+	}
+
+	result, err := decodeWithAnchors(parseBytes, unmarshalStrict, anchorRegistry)
+	if err != nil {
+		return nil, errors.Wrap(err, "decoding project with anchors")
+	}
+	if result.Functions == nil {
+		result.Functions = map[string]*YAMLCommandSet{}
+	}
+	return result, nil
+}
+
+// decodeWithAnchors decodes parseBytes into a ParserProject using a yaml.Node as an intermediate
+// representation, and merges any new anchor definitions found into anchorRegistry. Returns an
+// empty ParserProject for empty input.
+func decodeWithAnchors(parseBytes []byte, unmarshalStrict bool, anchorRegistry *anchorEntries) (*ParserProject, error) {
+	var node yaml.Node
+	if err := yaml.NewDecoder(bytes.NewReader(parseBytes)).Decode(&node); err != nil && !errors.Is(err, io.EOF) {
+		yamlErr := thirdparty.YAMLFormatError{Message: err.Error()}
+		return nil, errors.Wrap(yamlErr, "unmarshalling parser project from YAML")
+	}
+
+	// node.Kind == 0 means the YAML decoder hit EOF on empty input without populating the node.
+	if node.Kind == 0 {
+		return &ParserProject{}, nil
+	}
+
+	stripEvgAnchorsKey(&node)
+
+	var p ParserProject
 	if unmarshalStrict {
 		strictProjectWithVariables := struct {
 			ParserProject       `yaml:"pp,inline"`
@@ -1055,20 +1648,37 @@ func createIntermediateProject(yml []byte, unmarshalStrict bool) (*ParserProject
 			// Variables is only used to suppress yaml unmarshalling errors related
 			// to a non-existent variables field.
 			Variables any `yaml:"variables,omitempty" bson:"-"`
+			// EvgAnchors silences the "unknown field" error in strict mode when the anchor preamble is prepended.
+			EvgAnchors any `yaml:"_evg_anchors,omitempty"`
 		}{}
-		if err := util.UnmarshalYAMLStrictWithFallback(yml, &strictProjectWithVariables); err != nil {
-			return nil, err
+		if err := util.UnmarshalYAMLStrictWithFallback(parseBytes, &strictProjectWithVariables); err != nil {
+			return nil, errors.Wrap(err, "unmarshalling parser project from YAML")
 		}
 		p = strictProjectWithVariables.ParserProject
 	} else {
-		if err := util.UnmarshalYAMLWithFallback(yml, &p); err != nil {
-			yamlErr := thirdparty.YAMLFormatError{Message: err.Error()}
-			return nil, errors.Wrap(yamlErr, "unmarshalling parser project from YAML")
+		if err := node.Decode(&p); err != nil {
+			// yaml.v3 node decode failed; fall back to yaml.v2, which is more lenient.
+			// The node is still used for anchor collection below.
+			p = ParserProject{}
+			if err2 := yaml2.Unmarshal(parseBytes, &p); err2 != nil {
+				yamlErr := thirdparty.YAMLFormatError{Message: err2.Error()}
+				return nil, errors.Wrap(yamlErr, "unmarshalling parser project from YAML")
+			}
 		}
 	}
 
-	if p.Functions == nil {
-		p.Functions = map[string]*YAMLCommandSet{}
+	for _, anchor := range collectAnchors(&node) {
+		replaced := false
+		for i, existing := range *anchorRegistry {
+			if existing.name == anchor.name {
+				(*anchorRegistry)[i] = anchor
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			*anchorRegistry = append(*anchorRegistry, anchor)
+		}
 	}
 
 	return &p, nil
@@ -1093,30 +1703,38 @@ func capParserPriorities(p *ParserProject) {
 
 // TranslateProject converts our intermediate project representation into
 // the Project type that Evergreen actually uses.
-func TranslateProject(pp *ParserProject) (*Project, error) {
+func TranslateProject(ctx context.Context, pp *ParserProject) (*Project, error) {
+	release, err := acquireTranslateSlot(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "waiting for a translate concurrency slot")
+	}
+	defer release()
+
 	// Transfer top level fields
 	proj := &Project{
-		Stepback:           utility.FromBoolPtr(pp.Stepback),
-		PreTimeoutSecs:     utility.FromIntPtr(pp.PreTimeoutSecs),
-		PostTimeoutSecs:    utility.FromIntPtr(pp.PostTimeoutSecs),
-		PreErrorFailsTask:  utility.FromBoolPtr(pp.PreErrorFailsTask),
-		PostErrorFailsTask: utility.FromBoolPtr(pp.PostErrorFailsTask),
-		OomTracker:         utility.FromBoolTPtr(pp.OomTracker), // oom tracker is true by default
-		Identifier:         utility.FromStringPtr(pp.Identifier),
-		DisplayName:        utility.FromStringPtr(pp.DisplayName),
-		CommandType:        utility.FromStringPtr(pp.CommandType),
-		Ignore:             pp.Ignore,
-		Parameters:         pp.Parameters,
-		Containers:         pp.Containers,
-		Pre:                pp.Pre,
-		Post:               pp.Post,
-		Timeout:            pp.Timeout,
-		CallbackTimeout:    utility.FromIntPtr(pp.CallbackTimeout),
-		Modules:            pp.Modules,
-		Functions:          pp.Functions,
-		ExecTimeoutSecs:    utility.FromIntPtr(pp.ExecTimeoutSecs),
-		TimeoutSecs:        utility.FromIntPtr(pp.TimeoutSecs),
-		NumIncludes:        len(pp.Include),
+
+		Stepback:                       utility.FromBoolPtr(pp.Stepback),
+		PreTimeoutSecs:                 utility.FromIntPtr(pp.PreTimeoutSecs),
+		PostTimeoutSecs:                utility.FromIntPtr(pp.PostTimeoutSecs),
+		PreErrorFailsTask:              utility.FromBoolPtr(pp.PreErrorFailsTask),
+		PostErrorFailsTask:             utility.FromBoolPtr(pp.PostErrorFailsTask),
+		OomTracker:                     utility.FromBoolTPtr(pp.OomTracker), // oom tracker is true by default
+		PS:                             utility.FromStringPtr(pp.Ps),
+		Identifier:                     utility.FromStringPtr(pp.Identifier),
+		DisplayName:                    utility.FromStringPtr(pp.DisplayName),
+		CommandType:                    utility.FromStringPtr(pp.CommandType),
+		DisableMergeQueuePathFiltering: utility.FromBoolPtr(pp.DisableMergeQueuePathFiltering),
+		Ignore:                         pp.Ignore,
+		Parameters:                     pp.Parameters,
+		Pre:                            pp.Pre,
+		Post:                           pp.Post,
+		Timeout:                        pp.Timeout,
+		CallbackTimeout:                utility.FromIntPtr(pp.CallbackTimeout),
+		Modules:                        pp.Modules,
+		Functions:                      pp.Functions,
+		ExecTimeoutSecs:                utility.FromIntPtr(pp.ExecTimeoutSecs),
+		TimeoutSecs:                    utility.FromIntPtr(pp.TimeoutSecs),
+		NumIncludes:                    len(pp.Include),
 	}
 	catcher := grip.NewBasicCatcher()
 	tse := NewParserTaskSelectorEvaluator(pp.Tasks)
@@ -1130,6 +1748,10 @@ func TranslateProject(pp *ParserProject) (*Project, error) {
 
 	proj.BuildVariants, errs = evaluateBuildVariants(tse, tgse, vse, buildVariants, pp.Tasks, proj.TaskGroups)
 	catcher.Extend(errs)
+
+	// Build the task cache for O(1) lookups
+	proj.buildTaskCache()
+
 	return proj, errors.Wrap(catcher.Resolve(), TranslateProjectError)
 }
 
@@ -1208,11 +1830,14 @@ func evaluateTaskUnits(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluator, v
 			GitTagOnly:      pt.GitTagOnly,
 			Stepback:        pt.Stepback,
 			MustHaveResults: pt.MustHaveResults,
+			PS:              pt.Ps,
 		}
 		if strings.Contains(strings.TrimSpace(pt.Name), " ") {
 			evalErrs = append(evalErrs, errors.Errorf("spaces are not allowed in task names ('%s')", pt.Name))
 		}
 		t.AllowedRequesters = pt.AllowedRequesters
+		t.AllowedBranches = pt.AllowedBranches
+		t.IgnoredBranches = pt.IgnoredBranches
 		t.DependsOn, errs = evaluateDependsOn(tse.tagEval, tgse, vse, pt.DependsOn)
 		evalErrs = append(evalErrs, errs...)
 		tasks = append(tasks, t)
@@ -1267,6 +1892,14 @@ func evaluateBuildVariants(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluato
 	var unmatchedSelectors []string
 	var unmatchedCriteria []string
 	var evalErrs, errs []error
+	tasksByName := map[string]parserTask{}
+	for _, t := range tasks {
+		tasksByName[t.Name] = t
+	}
+	tgMap := map[string]TaskGroup{}
+	for _, tg := range tgs {
+		tgMap[tg.Name] = tg
+	}
 	for _, pbv := range pbvs {
 		bv := BuildVariant{
 			DisplayName:        pbv.DisplayName,
@@ -1281,14 +1914,17 @@ func evaluateBuildVariants(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluato
 			PatchOnly:          pbv.PatchOnly,
 			AllowForGitTag:     pbv.AllowForGitTag,
 			GitTagOnly:         pbv.GitTagOnly,
+			AllowedRequesters:  pbv.AllowedRequesters,
+			AllowedBranches:    pbv.AllowedBranches,
+			IgnoredBranches:    pbv.IgnoredBranches,
+			ExecTimeoutSecs:    pbv.ExecTimeoutSecs,
 			Stepback:           pbv.Stepback,
 			DeactivatePrevious: pbv.DeactivatePrevious,
 			RunOn:              pbv.RunOn,
 			Tags:               pbv.Tags,
 			Paths:              pbv.Paths,
 		}
-		bv.AllowedRequesters = pbv.AllowedRequesters
-		bv.Tasks, unmatchedSelectors, unmatchedCriteria, errs = evaluateBVTasks(tse, tgse, vse, pbv, tasks)
+		bv.Tasks, unmatchedSelectors, unmatchedCriteria, errs = evaluateBVTasks(tse, tgse, vse, pbv, tasksByName)
 		if len(unmatchedSelectors) > 0 {
 			bv.TranslationWarnings = append(bv.TranslationWarnings, fmt.Sprintf("buildvariant '%s' has unmatched selector: '%s'", pbv.Name, strings.Join(unmatchedSelectors, "', '")))
 		}
@@ -1328,7 +1964,7 @@ func evaluateBuildVariants(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluato
 
 				var added []BuildVariantTaskUnit
 				pbv.Tasks = r.AddTasks
-				added, _, _, errs = evaluateBVTasks(tse, tgse, vse, pbv, tasks)
+				added, _, _, errs = evaluateBVTasks(tse, tgse, vse, pbv, tasksByName)
 				evalErrs = append(evalErrs, errs...)
 				// check for conflicting duplicates
 				for _, t := range added {
@@ -1345,10 +1981,6 @@ func evaluateBuildVariants(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluato
 			}
 		}
 
-		tgMap := map[string]TaskGroup{}
-		for _, tg := range tgs {
-			tgMap[tg.Name] = tg
-		}
 		dtse := newDisplayTaskSelectorEvaluator(bv, tasks, tgMap)
 
 		// check that display tasks contain real tasks that are not duplicated
@@ -1420,16 +2052,12 @@ func evaluateBuildVariants(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluato
 // match anything, the list of criteria that did not match any tasks, and
 // any errors encountered during evaluation.
 func evaluateBVTasks(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluator, vse *variantSelectorEvaluator,
-	pbv parserBV, tasks []parserTask) ([]BuildVariantTaskUnit, []string, []string, []error) {
+	pbv parserBV, tasksByName map[string]parserTask) ([]BuildVariantTaskUnit, []string, []string, []error) {
 	var evalErrs, errs []error
 	ts := []BuildVariantTaskUnit{}
 	unmatchedSelectors := []string{}
 	unmatchedCriteria := []string{}
 	taskUnitsByName := map[string]BuildVariantTaskUnit{}
-	tasksByName := map[string]parserTask{}
-	for _, t := range tasks {
-		tasksByName[t.Name] = t
-	}
 	for _, pbvt := range pbv.Tasks {
 		// Evaluate each task against both the task and task group selectors
 		// only error if both selectors error because each task should only be found
@@ -1524,22 +2152,26 @@ func evaluateBVTasks(tse *taskSelectorEvaluator, tgse *tagSelectorEvaluator, vse
 // * Build variant's settings
 func getParserBuildVariantTaskUnit(name string, pt parserTask, bvt parserBVTaskUnit, bv parserBV) BuildVariantTaskUnit {
 	res := BuildVariantTaskUnit{
-		Name:           name,
-		Variant:        bv.Name,
-		Patchable:      bvt.Patchable,
-		PatchOnly:      bvt.PatchOnly,
-		Disable:        bvt.Disable,
-		AllowForGitTag: bvt.AllowForGitTag,
-		GitTagOnly:     bvt.GitTagOnly,
-		Priority:       bvt.Priority,
-		Stepback:       bvt.Stepback,
-		RunOn:          bvt.RunOn,
-		CronBatchTime:  bvt.CronBatchTime,
-		BatchTime:      bvt.BatchTime,
-		Activate:       bvt.Activate,
-		CreateCheckRun: bvt.CreateCheckRun,
+		Name:              name,
+		Variant:           bv.Name,
+		Patchable:         bvt.Patchable,
+		PatchOnly:         bvt.PatchOnly,
+		Disable:           bvt.Disable,
+		AllowForGitTag:    bvt.AllowForGitTag,
+		GitTagOnly:        bvt.GitTagOnly,
+		AllowedRequesters: bvt.AllowedRequesters,
+		AllowedBranches:   bvt.AllowedBranches,
+		IgnoredBranches:   bvt.IgnoredBranches,
+		ExecTimeoutSecs:   bvt.ExecTimeoutSecs,
+		Priority:          bvt.Priority,
+		Stepback:          bvt.Stepback,
+		RunOn:             bvt.RunOn,
+		CronBatchTime:     bvt.CronBatchTime,
+		BatchTime:         bvt.BatchTime,
+		Activate:          bvt.Activate,
+		PS:                bvt.PS,
+		CreateCheckRun:    bvt.CreateCheckRun,
 	}
-	res.AllowedRequesters = bvt.AllowedRequesters
 	if res.Priority == 0 {
 		res.Priority = pt.Priority
 	}
@@ -1561,6 +2193,15 @@ func getParserBuildVariantTaskUnit(name string, pt parserTask, bvt parserBVTaskU
 	if len(res.AllowedRequesters) == 0 {
 		res.AllowedRequesters = pt.AllowedRequesters
 	}
+	if len(res.AllowedBranches) == 0 {
+		res.AllowedBranches = pt.AllowedBranches
+	}
+	if len(res.IgnoredBranches) == 0 {
+		res.IgnoredBranches = pt.IgnoredBranches
+	}
+	if res.ExecTimeoutSecs == 0 {
+		res.ExecTimeoutSecs = pt.ExecTimeoutSecs
+	}
 	if res.Stepback == nil {
 		res.Stepback = pt.Stepback
 	}
@@ -1570,6 +2211,9 @@ func getParserBuildVariantTaskUnit(name string, pt parserTask, bvt parserBVTaskU
 	}
 	if len(res.RunOn) == 0 {
 		res.RunOn = pt.RunOn
+	}
+	if res.PS == nil {
+		res.PS = pt.Ps
 	}
 
 	// Build variant level settings are lower priority than project task level
@@ -1589,7 +2233,15 @@ func getParserBuildVariantTaskUnit(name string, pt parserTask, bvt parserBVTaskU
 	if len(res.AllowedRequesters) == 0 {
 		res.AllowedRequesters = bv.AllowedRequesters
 	}
-
+	if len(res.AllowedBranches) == 0 {
+		res.AllowedBranches = bv.AllowedBranches
+	}
+	if len(res.IgnoredBranches) == 0 {
+		res.IgnoredBranches = bv.IgnoredBranches
+	}
+	if res.ExecTimeoutSecs == 0 {
+		res.ExecTimeoutSecs = bv.ExecTimeoutSecs
+	}
 	if res.Disable == nil {
 		res.Disable = bv.Disable
 	}
@@ -1692,4 +2344,48 @@ func evaluateRequesters(userRequesters []evergreen.UserRequester) []string {
 
 func preGeneratedParserProjectId(originalId string) string {
 	return fmt.Sprintf("%s_%s", "pre_generation", originalId)
+}
+
+// ClearParamsYAML resolves and removes the params_yaml (which is a DB-only field)
+// from all commands in the parser project. This is used when serializing the project
+// to a human-editable YAML file (e.g. for debug spawn hosts) so that only
+// the params map is present.
+func (pp *ParserProject) ClearParamsYAML() error {
+	catcher := grip.NewBasicCatcher()
+	catcher.Add(clearCommandSetParamsYAML(pp.Pre))
+	catcher.Add(clearCommandSetParamsYAML(pp.Post))
+	catcher.Add(clearCommandSetParamsYAML(pp.Timeout))
+	for _, f := range pp.Functions {
+		catcher.Add(clearCommandSetParamsYAML(f))
+	}
+	for i := range pp.Tasks {
+		for j := range pp.Tasks[i].Commands {
+			catcher.Add(pp.Tasks[i].Commands[j].resolveParams())
+			pp.Tasks[i].Commands[j].ParamsYAML = ""
+		}
+	}
+	for i := range pp.TaskGroups {
+		catcher.Add(clearCommandSetParamsYAML(pp.TaskGroups[i].SetupGroup))
+		catcher.Add(clearCommandSetParamsYAML(pp.TaskGroups[i].TeardownGroup))
+		catcher.Add(clearCommandSetParamsYAML(pp.TaskGroups[i].SetupTask))
+		catcher.Add(clearCommandSetParamsYAML(pp.TaskGroups[i].TeardownTask))
+		catcher.Add(clearCommandSetParamsYAML(pp.TaskGroups[i].Timeout))
+	}
+	return catcher.Resolve()
+}
+
+func clearCommandSetParamsYAML(cs *YAMLCommandSet) error {
+	if cs == nil {
+		return nil
+	}
+	catcher := grip.NewBasicCatcher()
+	if cs.SingleCommand != nil {
+		catcher.Add(cs.SingleCommand.resolveParams())
+		cs.SingleCommand.ParamsYAML = ""
+	}
+	for i := range cs.MultiCommand {
+		catcher.Add(cs.MultiCommand[i].resolveParams())
+		cs.MultiCommand[i].ParamsYAML = ""
+	}
+	return catcher.Resolve()
 }

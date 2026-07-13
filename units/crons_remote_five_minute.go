@@ -47,11 +47,18 @@ func (j *cronsRemoteFiveMinuteJob) Run(ctx context.Context) {
 
 	ops := []amboy.QueueOperation{
 		PopulateTaskMonitoring(5),
-		PopulatePodHealthCheckJobs(),
 		PopulateActivationJobs(10),
+		PopulateMergeQueuePatchRecoveryJobs(),
 		PopulateHostProvisioningConversionJobs(j.env),
 		PopulateHostRestartJasperJobs(j.env),
 		PopulateGithubAPILimitJob(),
+		PopulateMergeQueueMetricsJobs(),
+		PopulateMergeQueueCompletionMetricsFallbackJobs(),
+		// TODO: DEVPROD-34706 Remove PopulateWebhookSecretMigrationJobs and the WebhookSecretMigrationEnabled flag once migration is verified complete in prod.
+		PopulateWebhookSecretMigrationJobs(),
+		// Cleanup runs after migration is verified complete in prod. Enable by setting WebhookSecretCleanupEnabled=true.
+		PopulateWebhookSecretCleanupJobs(),
+		PopulateLargeParserProjectTaskStatsJob(),
 	}
 
 	queue := j.env.RemoteQueue()
@@ -65,7 +72,7 @@ func (j *cronsRemoteFiveMinuteJob) Run(ctx context.Context) {
 	}
 	j.ErrorCount = catcher.Len()
 
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"queue": "service",
 		"id":    j.ID(),
 		"type":  j.Type().Name,

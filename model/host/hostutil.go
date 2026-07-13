@@ -2,12 +2,12 @@ package host
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/big"
 	"net"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,6 +18,7 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud/userdata"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/evergreen-ci/utility"
@@ -29,14 +30,11 @@ import (
 	"github.com/mongodb/jasper/remote"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
+	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	OutputBufferSize       = 1000
-	whyIsMyDataMissingText = `The task data has not been fetched yet.
-To fetch the task data, run: "evergreen host fetch"`
-)
+const OutputBufferSize = 1000
 
 // SetupCommand returns the command to run the host setup script.
 func (h *Host) SetupCommand() string {
@@ -151,14 +149,9 @@ func (h *Host) GetSSHPort() int {
 }
 
 // GetSSHOptions returns the options to SSH into this host from an application
-// server.
-func (h *Host) GetSSHOptions(settings *evergreen.Settings) ([]string, error) {
-	// TODO (DEVPROD-15898): stop providing this key.
-	if _, err := os.Stat(settings.KanopySSHKeyPath); err != nil {
-		return nil, errors.New("Kanopy SSH identity file does not exist")
-	}
-	opts := []string{"-i", settings.KanopySSHKeyPath}
-
+// server. It relies on the SSH key already being loaded in ssh-agent.
+func (h *Host) GetSSHOptions() ([]string, error) {
+	var opts []string
 	var hasKnownHostsFile bool
 	var distroPortOption string
 
@@ -234,7 +227,7 @@ func (h *Host) RunSSHShellScriptWithTimeout(ctx context.Context, script string, 
 
 func (h *Host) runSSHCommandWithOutput(ctx context.Context, addCommands func(*jasper.Command) *jasper.Command, timeout time.Duration) (string, error) {
 	env := evergreen.GetEnvironment()
-	sshOpts, err := h.GetSSHOptions(env.Settings())
+	sshOpts, err := h.GetSSHOptions()
 	if err != nil {
 		return "", errors.Wrap(err, "getting host's SSH options")
 	}
@@ -437,28 +430,7 @@ func (h *Host) GenerateUserDataProvisioningScript(ctx context.Context, settings 
 			if err != nil {
 				return "", errors.Wrap(err, "constructing Jasper command to fetch task data")
 			}
-			if !h.ProvisionOptions.UseOAuth {
-				// The legacy approach is to run `evergreen fetch` directly here with
-				// static credentials.
-				postFetchClient += " && " + getTaskDataCmd
-			} else {
-				// Escape single quotes in the command.
-				// This is done by closing the single quoted string, starting a
-				// double quoted string, having it's content be a single quote, then
-				// closing the double quoted string, and reopening the original
-				// single quoted string.
-				getTaskDataCmd := strings.ReplaceAll(getTaskDataCmd, "'", `'"'"'`)
-				// We write the command to a script because the user hasn't authenticated on this host yet.
-				// When the user SSH's in later, they have to run the script by running `evergreen host fetch`.
-				scriptPath := filepath.Join(h.Distro.HomeDir(), evergreen.SpawnhostFetchScriptName)
-				postFetchClient += " && " + fmt.Sprintf("echo '%s' > %s && chmod +x %s", getTaskDataCmd, scriptPath, scriptPath)
-
-				// Users might forget to run `evergreen host fetch`, so we add a note to
-				// where it usually is to remind them.
-				dataMissingFile := filepath.Join(h.Distro.WorkDir, evergreen.WhyIsMyDataMissingName)
-				postFetchClient += fmt.Sprintf(" && mkdir -p %s && chmod 777 %s ", h.Distro.WorkDir, h.Distro.WorkDir)
-				postFetchClient += fmt.Sprintf(" && echo '%s' >> %s && chmod 777 %s", whyIsMyDataMissingText, dataMissingFile, dataMissingFile)
-			}
+			postFetchClient += " && " + getTaskDataCmd
 		}
 	}
 
@@ -572,12 +544,16 @@ func (h *Host) SetupServiceUserCommands(ctx context.Context) (string, error) {
 
 const passwordCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
 
-func generatePassword(length int) string {
+func generatePassword(length int) (string, error) {
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = passwordCharset[rand.Int()%len(passwordCharset)]
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(passwordCharset))))
+		if err != nil {
+			return "", errors.Wrap(err, "generating secure random number")
+		}
+		b[i] = passwordCharset[n.Int64()]
 	}
-	return string(b)
+	return string(b), nil
 }
 
 // CreateServicePassword creates the password for the host's service user.
@@ -585,7 +561,11 @@ func (h *Host) CreateServicePassword(ctx context.Context) error {
 	var password string
 	var valid bool
 	for i := 0; i < 1000; i++ {
-		password = generatePassword(12)
+		var err error
+		password, err = generatePassword(12)
+		if err != nil {
+			return errors.Wrap(err, "generating service password")
+		}
 		if valid = ValidateRDPPassword(password); valid {
 			break
 		}
@@ -698,7 +678,7 @@ func (h *Host) RunJasperProcess(ctx context.Context, env evergreen.Environment, 
 		return nil, errors.Wrap(err, "getting Jasper client")
 	}
 	defer func() {
-		grip.Warning(message.WrapError(client.CloseConnection(), message.Fields{
+		grip.Warning(ctx, message.WrapError(client.CloseConnection(), message.Fields{
 			"message": "could not close connection to Jasper",
 			"host_id": h.Id,
 			"distro":  h.Distro.Id,
@@ -713,16 +693,16 @@ func (h *Host) RunJasperProcess(ctx context.Context, env evergreen.Environment, 
 		}
 	}
 	if !inMemoryLoggerExists {
-		logger, loggerErr := jasper.NewInMemoryLogger(OutputBufferSize)
+		logger, err := jasper.NewInMemoryLogger(OutputBufferSize)
 		if err != nil {
-			return nil, errors.Wrap(loggerErr, "creating new in-memory logger")
+			return nil, errors.Wrap(err, "creating new in-memory logger")
 		}
 		opts.Output.Loggers = append(opts.Output.Loggers, logger)
 	}
 
 	proc, err := client.CreateProcess(ctx, opts)
 	if err != nil {
-		return nil, errors.Wrap(err, "problem creating process")
+		return nil, errors.Wrap(err, "creating process")
 	}
 
 	catcher := grip.NewBasicCatcher()
@@ -738,6 +718,24 @@ func (h *Host) RunJasperProcess(ctx context.Context, env evergreen.Environment, 
 	return logStream.Logs, catcher.Resolve()
 }
 
+// WriteJasperFile writes a file on the host via the Jasper service's streaming
+// WriteFile RPC, which supports large payloads by sending content in chunks.
+func (h *Host) WriteJasperFile(ctx context.Context, env evergreen.Environment, opts options.WriteFile) error {
+	client, err := h.JasperClient(ctx, env)
+	if err != nil {
+		return errors.Wrap(err, "getting Jasper client")
+	}
+	defer func() {
+		grip.Warning(ctx, message.WrapError(client.CloseConnection(), message.Fields{
+			"message": "could not close connection to Jasper",
+			"host_id": h.Id,
+			"distro":  h.Distro.Id,
+		}))
+	}()
+
+	return errors.Wrap(client.WriteFile(ctx, opts), "writing file via Jasper")
+}
+
 // StartJasperProcess makes a request to the host's Jasper service to start a
 // process with the given options without waiting for its completion.
 func (h *Host) StartJasperProcess(ctx context.Context, env evergreen.Environment, opts *options.Create) (string, error) {
@@ -746,7 +744,7 @@ func (h *Host) StartJasperProcess(ctx context.Context, env evergreen.Environment
 		return "", errors.Wrap(err, "getting Jasper client")
 	}
 	defer func() {
-		grip.Warning(message.WrapError(client.CloseConnection(), message.Fields{
+		grip.Warning(ctx, message.WrapError(client.CloseConnection(), message.Fields{
 			"message": "could not close connection to Jasper",
 			"host_id": h.Id,
 			"distro":  h.Distro.Id,
@@ -769,7 +767,7 @@ func (h *Host) GetJasperProcess(ctx context.Context, env evergreen.Environment, 
 		return false, "", errors.Wrap(err, "getting Jasper client")
 	}
 	defer func() {
-		grip.Warning(message.WrapError(client.CloseConnection(), message.Fields{
+		grip.Warning(ctx, message.WrapError(client.CloseConnection(), message.Fields{
 			"message": "could not close connection to Jasper",
 			"host_id": h.Id,
 			"distro":  h.Distro.Id,
@@ -808,13 +806,13 @@ func (h *Host) JasperClient(ctx context.Context, env evergreen.Environment) (rem
 		return nil, errors.New("hosts without any provisioning method cannot use Jasper")
 	}
 
-	settings := env.Settings()
 	if h.Distro.BootstrapSettings.Communication == distro.CommunicationMethodSSH || h.NeedsReprovision == ReprovisionToLegacy {
-		sshOpts, err := h.GetSSHOptions(settings)
+		sshOpts, err := h.GetSSHOptions()
 		if err != nil {
 			return nil, errors.Wrap(err, "getting host's SSH options")
 		}
 
+		settings := env.Settings()
 		var remoteOpts options.Remote
 		remoteOpts.Host = h.Host
 		remoteOpts.User = h.User
@@ -843,6 +841,7 @@ func (h *Host) JasperClient(ctx context.Context, env evergreen.Environment) (rem
 			return nil, errors.New("cannot resolve Jasper service address if neither host name nor IP is set")
 		}
 
+		settings := env.Settings()
 		addrStr := fmt.Sprintf("%s:%d", hostName, settings.HostJasper.Port)
 
 		serviceAddr, err := net.ResolveTCPAddr("tcp", addrStr)
@@ -900,7 +899,7 @@ func (h *Host) withTaggedProcs(ctx context.Context, env evergreen.Environment, t
 	}
 
 	defer func() {
-		grip.Warning(message.WrapError(client.CloseConnection(), message.Fields{
+		grip.Warning(ctx, message.WrapError(client.CloseConnection(), message.Fields{
 			"message": "could not close connection to Jasper",
 			"host_id": h.Id,
 			"distro":  h.Distro.Id,
@@ -926,7 +925,7 @@ func (h *Host) CheckTaskDataFetched(ctx context.Context, env evergreen.Environme
 	)
 
 	return h.withTaggedProcs(ctx, env, evergreen.HostFetchTag, func(procs []jasper.Process) error {
-		grip.WarningWhen(len(procs) > 1, message.Fields{
+		grip.WarningWhen(ctx, len(procs) > 1, message.Fields{
 			"message":   "host is attempting to fetch task data multiple times",
 			"num_procs": len(procs),
 			"host_id":   h.Id,
@@ -988,7 +987,7 @@ func (h *Host) StopAgentMonitor(ctx context.Context, env evergreen.Environment) 
 				catcher.Wrapf(proc.Signal(ctx, syscall.SIGTERM), "signalling agent monitor process with ID '%s'", proc.ID())
 			}
 		}
-		grip.WarningWhen(numRunning > 1, message.Fields{
+		grip.WarningWhen(ctx, numRunning > 1, message.Fields{
 			"message": fmt.Sprintf("host should be running at most one agent monitor, but found %d", len(procs)),
 			"host_id": h.Id,
 			"distro":  h.Distro.Id,
@@ -1143,26 +1142,46 @@ func (h *Host) spawnHostConfig(ctx context.Context, settings *evergreen.Settings
 	}
 
 	conf := struct {
-		User          string `yaml:"user"`
-		APIKey        string `yaml:"api_key,omitempty"`
-		APIServerHost string `yaml:"api_server_host"`
-		UIServerHost  string `yaml:"ui_server_host"`
-		OAuth         struct {
-			Issuer          string `yaml:"issuer"`
-			ClientID        string `yaml:"client_id"`
-			ConnectorID     string `yaml:"connector_id"`
-			DoNotUseBrowser bool   `yaml:"do_not_use_browser"`
+		User              string `yaml:"user"`
+		APIKey            string `yaml:"api_key,omitempty"`
+		APIServerHost     string `yaml:"api_server_host"`
+		CorpAPIServerHost string `yaml:"corp_api_server_host"`
+		UIServerHost      string `yaml:"ui_server_host"`
+		SpawnHostID       string `yaml:"spawn_host_id,omitempty"`
+		TaskID            string `yaml:"task_id,omitempty"`
+		ProjectID         string `yaml:"project_id,omitempty"`
+		OAuth             struct {
+			Issuer               string        `yaml:"issuer"`
+			ClientID             string        `yaml:"client_id"`
+			ConnectorID          string        `yaml:"connector_id"`
+			DoNotUseBrowser      bool          `yaml:"do_not_use_browser"`
+			SpawnHostAccessToken *oauth2.Token `yaml:"spawn_host_access_token,omitempty"`
 		} `yaml:"oauth,omitempty"`
 	}{
 		User: owner.Id,
 	}
-	if settings != nil {
-		if !settings.ServiceFlags.JWTTokenForCLIDisabled {
-			conf.APIServerHost = settings.Api.CorpURL + "/api"
-		} else {
-			conf.APIServerHost = settings.Api.URL + "/api"
+
+	// Only populate the spawn host ID for user-created spawn hosts
+	if h.UserHost {
+		conf.SpawnHostID = h.Id
+
+		// If this host was spawned by a task, include task and project info
+		if h.ProvisionOptions.TaskId != "" {
+			provisionedTask, err := task.FindByIdExecution(ctx, h.ProvisionOptions.TaskId, nil)
+			if err != nil {
+				return nil, errors.Wrapf(err, "getting task '%s' for spawn host config", h.ProvisionOptions.TaskId)
+			}
+			if provisionedTask != nil {
+				conf.TaskID = provisionedTask.Id
+				conf.ProjectID = provisionedTask.Project
+			}
 		}
-		conf.UIServerHost = settings.Ui.Url
+	}
+	if settings != nil {
+		conf.APIServerHost = settings.Api.URL + "/api"
+		conf.CorpAPIServerHost = settings.Api.CorpURL + "/api"
+		conf.UIServerHost = settings.Ui.UIv2Url
+
 		if settings.AuthConfig.OAuth != nil {
 			conf.OAuth.Issuer = settings.AuthConfig.OAuth.Issuer
 			conf.OAuth.ClientID = settings.AuthConfig.OAuth.ClientID
@@ -1170,11 +1189,11 @@ func (h *Host) spawnHostConfig(ctx context.Context, settings *evergreen.Settings
 			conf.OAuth.DoNotUseBrowser = true
 		}
 	}
-
-	if h.ProvisionOptions != nil && !h.ProvisionOptions.UseOAuth {
-		// If the host is not using OAuth, set the API key for the owner.
-		// We always set the 'user' field since it helps scripts identify
-		// which user is associated with the host.
+	if accessToken := owner.TokenExchangeToken; accessToken != nil {
+		conf.OAuth.SpawnHostAccessToken = accessToken
+		// We do not need to remove the access token from the user's document because
+		// it automatically expires and other hosts may need to use it.
+	} else if owner.OnlyAPI {
 		conf.APIKey = owner.APIKey
 	}
 
@@ -1257,7 +1276,7 @@ func (h *Host) SetUserDataHostProvisioned(ctx context.Context) error {
 		return errors.Wrap(err, "marking host as done provisioning itself and now running")
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":              "host successfully provisioned",
 		"host_id":              h.Id,
 		"distro":               h.Distro.Id,

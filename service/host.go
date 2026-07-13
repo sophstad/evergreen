@@ -46,11 +46,11 @@ func (uis *UIServer) getHostFromCache(ctx context.Context, hostID string) (*host
 
 func (uis *UIServer) handleBackendError(message string, statusCode int) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		gimlet.WriteTextResponse(w, statusCode, message)
+		gimlet.WriteTextResponse(r.Context(), w, statusCode, message)
 	}
 }
 
-// returns dockerfle as text
+// returns dockerfile as text
 func getDockerfile(w http.ResponseWriter, r *http.Request) {
 	parts := []string{
 		"ARG BASE_IMAGE",
@@ -62,5 +62,5 @@ func getDockerfile(w http.ResponseWriter, r *http.Request) {
 		"RUN chmod 0777 /${BINARY_NAME}",
 	}
 
-	gimlet.WriteText(w, strings.Join(parts, "\n"))
+	gimlet.WriteText(r.Context(), w, strings.Join(parts, "\n"))
 }

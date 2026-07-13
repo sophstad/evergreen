@@ -15,13 +15,18 @@ import (
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/db"
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
+	"github.com/evergreen-ci/evergreen/model/artifact"
 	"github.com/evergreen-ci/evergreen/model/cost"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/ec2mount"
+	"github.com/evergreen-ci/evergreen/model/ec2settings"
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/log"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/testresult"
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/evergreen-ci/pail"
 	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/anser/bsonutil"
 	adb "github.com/mongodb/anser/db"
@@ -36,6 +41,10 @@ import (
 	"gonum.org/v1/gonum/graph/simple"
 	"gonum.org/v1/gonum/graph/topo"
 )
+
+// hostCollectionName is the MongoDB hosts collection name (must match host.Collection).
+// We use a local constant instead of host.Collection to avoid an import cycle: model/host imports model/task.
+const hostCollectionName = "hosts"
 
 const (
 	dependencyKey = "dependencies"
@@ -57,7 +66,14 @@ const (
 
 	// length of time to cache the expected duration in the task document
 	predictionTTL = 8 * time.Hour
+
+	// dependencyResolutionTimeout is the maximum time allowed for recursive
+	// dependency resolution.
+	dependencyResolutionTimeout = 10 * time.Minute
 )
+
+// maxDependencyDepth is the maximum recursion depth for dependency traversal.
+var maxDependencyDepth = 500
 
 var (
 	// A regex that matches either / or \ for splitting directory paths
@@ -68,24 +84,25 @@ var (
 type Task struct {
 	Id     string `bson:"_id" json:"id"`
 	Secret string `bson:"secret" json:"secret"`
-	// time information for task
-	// CreateTime - the creation time for the task, derived from the commit time or the patch creation time.
+	// Time fields (see also model.Version for the same CreateTime vs IngestTime distinction):
+	// CreateTime - logical time for this task, aligned with the parent version's semantics: derived from
+	// commit/revision metadata or patch timing (same idea as the version's CreateTime). It is not the
+	// wall-clock time the task row was written; use IngestTime for that.
+	// IngestTime - wall-clock time this task document was first inserted in Evergreen (set in createOneTask).
 	// DispatchTime - the time the task runner starts up the agent on the host.
 	// ScheduledTime - the time the task is scheduled.
 	// StartTime - the time the agent starts the task on the host after spinning it up.
 	// FinishTime - the time the task was completed on the remote host.
 	// ActivatedTime - the time the task was marked as available to be scheduled, automatically or by a developer.
 	// DependenciesMet - for tasks that have dependencies, the time all dependencies are met.
-	// ContainerAllocated - for tasks that run on containers, the time the container was allocated.
-	CreateTime             time.Time `bson:"create_time" json:"create_time"`
-	IngestTime             time.Time `bson:"injest_time" json:"ingest_time"`
-	DispatchTime           time.Time `bson:"dispatch_time" json:"dispatch_time"`
-	ScheduledTime          time.Time `bson:"scheduled_time" json:"scheduled_time"`
-	StartTime              time.Time `bson:"start_time" json:"start_time"`
-	FinishTime             time.Time `bson:"finish_time" json:"finish_time"`
-	ActivatedTime          time.Time `bson:"activated_time" json:"activated_time"`
-	DependenciesMetTime    time.Time `bson:"dependencies_met_time,omitempty" json:"dependencies_met_time,omitempty"`
-	ContainerAllocatedTime time.Time `bson:"container_allocated_time,omitempty" json:"container_allocated_time,omitempty"`
+	CreateTime          time.Time `bson:"create_time" json:"create_time"`
+	IngestTime          time.Time `bson:"injest_time" json:"ingest_time"`
+	DispatchTime        time.Time `bson:"dispatch_time" json:"dispatch_time"`
+	ScheduledTime       time.Time `bson:"scheduled_time" json:"scheduled_time"`
+	StartTime           time.Time `bson:"start_time" json:"start_time"`
+	FinishTime          time.Time `bson:"finish_time" json:"finish_time"`
+	ActivatedTime       time.Time `bson:"activated_time" json:"activated_time"`
+	DependenciesMetTime time.Time `bson:"dependencies_met_time,omitempty" json:"dependencies_met_time,omitempty"`
 
 	Version string `bson:"version" json:"version,omitempty"`
 	// Project is the project id of the task.
@@ -113,24 +130,11 @@ type Task struct {
 	ActivatedBy              string `bson:"activated_by" json:"activated_by"`
 	DeactivatedForDependency bool   `bson:"deactivated_for_dependency" json:"deactivated_for_dependency"`
 
-	// ContainerAllocated indicates whether this task has been allocated a
-	// container to run it. It only applies to tasks running in containers.
-	ContainerAllocated bool `bson:"container_allocated" json:"container_allocated"`
-	// ContainerAllocationAttempts is the number of times this task has
-	// been allocated a container to run it (for a single execution).
-	ContainerAllocationAttempts int `bson:"container_allocation_attempts" json:"container_allocation_attempts"`
-
-	BuildId  string `bson:"build_id" json:"build_id"`
-	DistroId string `bson:"distro" json:"distro"`
-	// Container is the name of the container configuration for running a
-	// container task.
-	Container string `bson:"container,omitempty" json:"container,omitempty"`
-	// ContainerOpts contains the options to configure the container that will
-	// run the task.
-	ContainerOpts           ContainerOptions `bson:"container_options,omitempty" json:"container_options"`
-	BuildVariant            string           `bson:"build_variant" json:"build_variant"`
-	BuildVariantDisplayName string           `bson:"build_variant_display_name" json:"-"`
-	DependsOn               []Dependency     `bson:"depends_on" json:"depends_on"`
+	BuildId                 string       `bson:"build_id" json:"build_id"`
+	DistroId                string       `bson:"distro" json:"distro"`
+	BuildVariant            string       `bson:"build_variant" json:"build_variant"`
+	BuildVariantDisplayName string       `bson:"build_variant_display_name" json:"-"`
+	DependsOn               []Dependency `bson:"depends_on" json:"depends_on"`
 	// UnattainableDependency caches the contents of DependsOn for more
 	// efficient querying. It is true if any of its dependencies is unattainable
 	// and is false if all of its dependencies are attainable.
@@ -155,10 +159,6 @@ type Task struct {
 
 	// The host the task was run on. This value is only set for host tasks.
 	HostId string `bson:"host_id,omitempty" json:"host_id"`
-
-	// PodID is the pod that was assigned to run the task. This value is only
-	// set for container tasks.
-	PodID string `bson:"pod_id,omitempty" json:"pod_id"`
 
 	// ExecutionPlatform determines the execution environment that the task runs
 	// in.
@@ -246,6 +246,8 @@ type Task struct {
 	PredictedTaskCost cost.Cost `bson:"predicted_cost,omitempty" json:"predicted_cost,omitempty"`
 	// TaskCost is the actual cost of the task based on runtime and distro cost rates
 	TaskCost cost.Cost `bson:"cost,omitempty" json:"cost,omitempty"`
+	// S3Usage tracks S3 API usage for cost calculation
+	S3Usage s3usage.S3Usage `bson:"s3_usage,omitempty" json:"s3_usage,omitempty"`
 	// WaitSinceDependenciesMet is populated in GetDistroQueueInfo, used for host allocation
 	WaitSinceDependenciesMet time.Duration `bson:"wait_since_dependencies_met,omitempty" json:"wait_since_dependencies_met,omitempty"`
 
@@ -410,26 +412,6 @@ const (
 	ExecutionPlatformContainer ExecutionPlatform = "container"
 )
 
-// ContainerOptions represent options to create the container to run a task.
-type ContainerOptions struct {
-	CPU        int    `bson:"cpu,omitempty" json:"cpu"`
-	MemoryMB   int    `bson:"memory_mb,omitempty" json:"memory_mb"`
-	WorkingDir string `bson:"working_dir,omitempty" json:"working_dir"`
-	Image      string `bson:"image,omitempty" json:"image"`
-	// RepoCredsName is the name of the project container secret containing the
-	// repository credentials.
-	RepoCredsName  string                   `bson:"repo_creds_name,omitempty" json:"repo_creds_name"`
-	OS             evergreen.ContainerOS    `bson:"os,omitempty" json:"os"`
-	Arch           evergreen.ContainerArch  `bson:"arch,omitempty" json:"arch"`
-	WindowsVersion evergreen.WindowsVersion `bson:"windows_version,omitempty" json:"windows_version"`
-}
-
-// IsZero implements the bsoncodec.Zeroer interface for the sake of defining the
-// zero value for BSON marshalling.
-func (o ContainerOptions) IsZero() bool {
-	return o == ContainerOptions{}
-}
-
 func (t *Task) MarshalBSON() ([]byte, error)  { return mgobson.Marshal(t) }
 func (t *Task) UnmarshalBSON(in []byte) error { return mgobson.Unmarshal(in, t) }
 
@@ -521,12 +503,6 @@ func (t *Task) IsFinished() bool {
 	return evergreen.IsFinishedTaskStatus(t.Status)
 }
 
-// IsDispatchable returns true if the task should make progress towards
-// dispatching to run.
-func (t *Task) IsDispatchable() bool {
-	return t.IsHostDispatchable() || t.ShouldAllocateContainer() || t.IsContainerDispatchable()
-}
-
 // IsHostDispatchable returns true if the task should run on a host and can be
 // dispatched.
 func (t *Task) IsHostDispatchable() bool {
@@ -543,78 +519,9 @@ func (t *Task) IsStuckTask() bool {
 	return t.NumNextTaskDispatches >= evergreen.MaxTaskDispatchAttempts
 }
 
-// IsContainerTask returns true if it's a task that runs on containers.
-func (t *Task) IsContainerTask() bool {
-	return t.ExecutionPlatform == ExecutionPlatformContainer
-}
-
 // IsRestartFailedOnly returns true if the task should only restart failed tests.
 func (t *Task) IsRestartFailedOnly() bool {
 	return t.ResetFailedWhenFinished && !t.ResetWhenFinished
-}
-
-// ShouldAllocateContainer indicates whether a task should be allocated a
-// container or not.
-func (t *Task) ShouldAllocateContainer() bool {
-	if t.ContainerAllocated {
-		return false
-	}
-	if t.RemainingContainerAllocationAttempts() == 0 {
-		return false
-	}
-
-	return t.isContainerScheduled()
-}
-
-// RemainingContainerAllocationAttempts returns the number of times this task
-// execution is allowed to try allocating a container.
-func (t *Task) RemainingContainerAllocationAttempts() int {
-	return maxContainerAllocationAttempts - t.ContainerAllocationAttempts
-}
-
-// IsContainerDispatchable returns true if the task should run in a container
-// and can be dispatched.
-func (t *Task) IsContainerDispatchable() bool {
-	if !t.ContainerAllocated {
-		return false
-	}
-	return t.isContainerScheduled()
-}
-
-// isContainerTaskScheduled returns whether the task is in a state where it
-// should eventually dispatch to run on a container and is logically equivalent
-// to ScheduledContainerTasksQuery. This encompasses two potential states:
-//  1. A container is not yet allocated to the task but it's ready to be
-//     allocated one. Note that this is a subset of all container tasks that
-//     could eventually run (i.e. evergreen.TaskWillRun from
-//     (Task).GetDisplayStatus), because a container task is not scheduled until
-//     all of its dependencies have been met.
-//  2. The container is allocated but the agent has not picked up the task yet.
-func (t *Task) isContainerScheduled() bool {
-	if !t.IsContainerTask() {
-		return false
-	}
-	if t.Status != evergreen.TaskUndispatched {
-		return false
-	}
-	if !t.Activated {
-		return false
-	}
-	if t.Priority <= evergreen.DisabledTaskPriority {
-		return false
-	}
-	if !t.OverrideDependencies {
-		for _, dep := range t.DependsOn {
-			if dep.Unattainable {
-				return false
-			}
-			if !dep.Finished {
-				return false
-			}
-		}
-	}
-
-	return true
 }
 
 // SatisfiesDependency checks a task the receiver task depends on
@@ -682,7 +589,7 @@ func (t *Task) AddDependency(ctx context.Context, d Dependency) error {
 	// ensure the dependency doesn't already exist
 	for _, existingDependency := range t.DependsOn {
 		if d.TaskId == t.Id {
-			grip.Error(message.Fields{
+			grip.Error(ctx, message.Fields{
 				"message": "task is attempting to add a dependency on itself, skipping this dependency",
 				"task_id": t.Id,
 				"stack":   string(debug.Stack()),
@@ -744,15 +651,20 @@ func (t *Task) DependenciesMet(ctx context.Context, depCaches map[string]Task) (
 	}
 
 	t.setDependenciesMetTime()
+	// Use a detached context for this non-critical cache write so it can
+	// succeed even if the caller's context (e.g. the scheduler deadline)
+	// has expired.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer writeCancel()
 	err = UpdateOne(
-		ctx,
+		writeCtx,
 		bson.M{IdKey: t.Id},
 		bson.M{
 			"$set": bson.M{
 				DependenciesMetTimeKey: t.DependenciesMetTime,
 			},
 		})
-	grip.Error(message.WrapError(err, message.Fields{
+	grip.Error(ctx, message.WrapError(err, message.Fields{
 		"message": "task.DependenciesMet() failed to update task",
 		"task_id": t.Id}))
 
@@ -966,6 +878,18 @@ func (t *Task) PreviousCompletedTask(ctx context.Context, project string, status
 	return FindOne(ctx, query)
 }
 
+// NextCompletedTask finds the next completed task for the same project +
+// build variant + display name combination as the specified task.
+// It defaults to completed statuses if the array is empty.
+func (t *Task) NextCompletedTask(ctx context.Context, project string, statuses []string) (*Task, error) {
+	if len(statuses) == 0 {
+		statuses = evergreen.TaskCompletedStatuses
+	}
+	query := db.Query(ByAfterRevisionWithStatusesAndRequesters(t.RevisionOrderNumber, statuses, t.BuildVariant,
+		t.DisplayName, project, evergreen.SystemVersionRequesterTypes)).Sort([]string{RevisionOrderNumberKey})
+	return FindOne(ctx, query)
+}
+
 func (t *Task) cacheExpectedDuration(ctx context.Context) error {
 	return UpdateOne(
 		ctx,
@@ -980,50 +904,6 @@ func (t *Task) cacheExpectedDuration(ctx context.Context) error {
 			},
 		},
 	)
-}
-
-// MarkAsContainerDispatched marks that the container task has been dispatched
-// to a pod.
-func (t *Task) MarkAsContainerDispatched(ctx context.Context, env evergreen.Environment, podID, agentVersion string) error {
-	dispatchedAt := time.Now()
-
-	query := ScheduledContainerTasksQuery()
-	query[IdKey] = t.Id
-	query[StatusKey] = evergreen.TaskUndispatched
-	query[ContainerAllocatedKey] = true
-	set := bson.M{
-		StatusKey:        evergreen.TaskDispatched,
-		DispatchTimeKey:  dispatchedAt,
-		LastHeartbeatKey: dispatchedAt,
-		PodIDKey:         podID,
-		AgentVersionKey:  agentVersion,
-	}
-	output, ok := t.initializeTaskOutputInfo(env)
-	if ok {
-		set[TaskOutputInfoKey] = output
-	}
-	res, err := env.DB().Collection(Collection).UpdateOne(ctx, query, []bson.M{
-		{
-			"$set": set,
-		},
-		addDisplayStatusCache,
-	})
-	if err != nil {
-		return errors.Wrap(err, "updating task")
-	}
-	if res.ModifiedCount == 0 {
-		return errors.New("task was not updated")
-	}
-
-	t.Status = evergreen.TaskDispatched
-	t.DispatchTime = dispatchedAt
-	t.LastHeartbeat = dispatchedAt
-	t.PodID = podID
-	t.AgentVersion = agentVersion
-	t.TaskOutputInfo = output
-	t.DisplayStatusCache = t.DetermineDisplayStatus()
-
-	return nil
 }
 
 // MarkAsHostDispatched marks that the task has been dispatched onto a
@@ -1149,100 +1029,6 @@ func (t *Task) markAsHostUndispatchedWithFunc(doUpdate func(update []bson.M) err
 	t.AbortInfo = AbortInfo{}
 	t.Details = apimodels.TaskEndDetail{}
 	t.DisplayStatusCache = t.DetermineDisplayStatus()
-
-	return nil
-}
-
-// maxContainerAllocationAttempts is the maximum number of times a container
-// task is allowed to try to allocate a container for a single execution.
-const maxContainerAllocationAttempts = 5
-
-// MarkAsContainerAllocated marks a container task as allocated a container.
-// This will fail if the task is not in a state where it needs a container to be
-// allocated to it.
-func (t *Task) MarkAsContainerAllocated(ctx context.Context, env evergreen.Environment) error {
-	if t.ContainerAllocated {
-		return errors.New("cannot allocate a container task if it's currently allocated")
-	}
-	if t.RemainingContainerAllocationAttempts() == 0 {
-		return errors.Errorf("task execution has hit the max allowed allocation attempts (%d)", maxContainerAllocationAttempts)
-	}
-	q := needsContainerAllocation()
-	q[IdKey] = t.Id
-	q[ContainerAllocationAttemptsKey] = bson.M{"$lt": maxContainerAllocationAttempts}
-
-	allocatedAt := time.Now()
-	update, err := env.DB().Collection(Collection).UpdateOne(ctx, q, bson.M{
-		"$set": bson.M{
-			ContainerAllocatedKey:     true,
-			ContainerAllocatedTimeKey: allocatedAt,
-		},
-		"$inc": bson.M{
-			ContainerAllocationAttemptsKey: 1,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	if update.ModifiedCount == 0 {
-		return errors.New("task was not updated")
-	}
-
-	t.ContainerAllocated = true
-	t.ContainerAllocatedTime = allocatedAt
-
-	return nil
-}
-
-func containerDeallocatedUpdate() bson.M {
-	return bson.M{
-		"$set": bson.M{
-			ContainerAllocatedKey: false,
-		},
-		"$unset": bson.M{
-			ContainerAllocatedTimeKey: 1,
-		},
-	}
-}
-
-// MarkAsContainerDeallocated marks a container task that was allocated as no
-// longer allocated a container.
-func (t *Task) MarkAsContainerDeallocated(ctx context.Context, env evergreen.Environment) error {
-	if !t.ContainerAllocated {
-		return errors.New("cannot deallocate a container task if it's not currently allocated")
-	}
-
-	res, err := env.DB().Collection(Collection).UpdateOne(ctx, bson.M{
-		IdKey:                 t.Id,
-		ExecutionPlatformKey:  ExecutionPlatformContainer,
-		ContainerAllocatedKey: true,
-	}, containerDeallocatedUpdate())
-	if err != nil {
-		return errors.Wrap(err, "updating task")
-	}
-	if res.ModifiedCount == 0 {
-		return errors.New("task was not updated")
-	}
-
-	t.ContainerAllocated = false
-	t.ContainerAllocatedTime = time.Time{}
-
-	return nil
-}
-
-// MarkTasksAsContainerDeallocated marks multiple container tasks as no longer
-// allocated containers.
-func MarkTasksAsContainerDeallocated(ctx context.Context, taskIDs []string) error {
-	if len(taskIDs) == 0 {
-		return nil
-	}
-
-	if _, err := UpdateAll(ctx, bson.M{
-		IdKey:                bson.M{"$in": taskIDs},
-		ExecutionPlatformKey: ExecutionPlatformContainer,
-	}, containerDeallocatedUpdate()); err != nil {
-		return errors.Wrap(err, "updating tasks")
-	}
 
 	return nil
 }
@@ -1515,7 +1301,7 @@ func ByBeforeMidwayTaskFromIds(ctx context.Context, t1Id, t2Id string) (*Task, e
 	}
 	if task.RevisionOrderNumber >= upperBoundTask.RevisionOrderNumber ||
 		task.RevisionOrderNumber <= lowerBoundTask.RevisionOrderNumber {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":                 "found midway task is out of bounds",
 			"t1_id":                   t1Id,
 			"t1_order_number":         t1.RevisionOrderNumber,
@@ -1531,7 +1317,7 @@ func ByBeforeMidwayTaskFromIds(ctx context.Context, t1Id, t2Id string) (*Task, e
 	return task, nil
 }
 
-// UnscheduleStaleUnderwaterHostTasks Removes host tasks older than the unscheduable threshold (e.g. one week) from
+// UnscheduleStaleUnderwaterHostTasks Removes host tasks older than the unschedulable threshold (e.g. one week) from
 // the scheduler queue.
 // If you pass an empty string as an argument to this function, this operation
 // will select tasks from all distros.
@@ -1617,19 +1403,16 @@ func (t *Task) MarkSystemFailed(ctx context.Context, description string) error {
 	switch t.ExecutionPlatform {
 	case ExecutionPlatformHost:
 		event.LogHostTaskFinished(ctx, t.Id, t.Execution, t.HostId, evergreen.TaskSystemFailed)
-	case ExecutionPlatformContainer:
-		event.LogContainerTaskFinished(ctx, t.Id, t.Execution, t.PodID, evergreen.TaskSystemFailed)
 	default:
 		event.LogTaskFinished(ctx, t.Id, t.Execution, evergreen.TaskSystemFailed)
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":            "marking task system failed",
 		"included_on":        evergreen.ContainerHealthDashboard,
 		"task_id":            t.Id,
 		"execution":          t.Execution,
 		"status":             t.Status,
 		"host_id":            t.HostId,
-		"pod_id":             t.PodID,
 		"description":        description,
 		"execution_platform": t.ExecutionPlatform,
 	})
@@ -1852,7 +1635,7 @@ func (t *Task) HasResults(ctx context.Context) bool {
 		if t.Archived {
 			execTasks, err := FindByExecutionTasksAndMaxExecution(ctx, t.ExecutionTasks, t.Execution, bson.E{Key: "$or", Value: hasResults})
 			if err != nil {
-				grip.Error(message.WrapError(err, message.Fields{
+				grip.Error(ctx, message.WrapError(err, message.Fields{
 					"message": "getting execution tasks for archived display task",
 				}))
 			}
@@ -1863,7 +1646,7 @@ func (t *Task) HasResults(ctx context.Context) bool {
 			query["$or"] = hasResults
 			execTasksWithResults, err := Count(ctx, db.Query(query))
 			if err != nil {
-				grip.Error(message.WrapError(err, message.Fields{
+				grip.Error(ctx, message.WrapError(err, message.Fields{
 					"message": "getting count of execution tasks with results for display task",
 				}))
 			}
@@ -1915,7 +1698,7 @@ func ActivateTasks(ctx context.Context, tasks []Task, activationTime time.Time, 
 	for _, t := range tasksToActivate {
 		logs = append(logs, event.GetTaskActivatedEvent(t.Id, t.Execution, caller))
 	}
-	grip.Error(message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
+	grip.Error(ctx, message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
 		"message":  "problem logging task activated events",
 		"task_ids": taskIDs,
 		"caller":   caller,
@@ -2138,7 +1921,7 @@ func activateDeactivatedDependencies(ctx context.Context, tasksToActivate map[st
 	for _, t := range tasksToActivate {
 		logs = append(logs, event.GetTaskActivatedEvent(t.Id, t.Execution, caller))
 	}
-	grip.Error(message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
+	grip.Error(ctx, message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
 		"message":  "problem logging task activated events",
 		"task_ids": taskIDsToActivate,
 		"caller":   caller,
@@ -2155,7 +1938,7 @@ func topologicalSort(tasks []Task) ([]Task, error) {
 			taskIds = append(taskIds, t.Id)
 		}
 		panicErr := recovery.HandlePanicWithError(recover(), nil, "problem adding edge")
-		grip.Error(message.WrapError(panicErr, message.Fields{
+		grip.Error(context.Background(), message.WrapError(panicErr, message.Fields{
 			"function":       "topologicalSort",
 			"from_task":      fromTask,
 			"to_task":        toTask,
@@ -2256,7 +2039,7 @@ func DeactivateTasks(ctx context.Context, tasks []Task, updateDependencies bool,
 	for _, t := range tasks {
 		logs = append(logs, event.GetTaskDeactivatedEvent(t.Id, t.Execution, caller))
 	}
-	grip.Error(message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
+	grip.Error(ctx, message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
 		"message":  "problem logging task deactivated events",
 		"task_ids": taskIDs,
 		"caller":   caller,
@@ -2316,7 +2099,7 @@ func deactivateDependencies(ctx context.Context, tasksToUpdate []Task, taskIDsTo
 	for _, t := range tasksToUpdate {
 		logs = append(logs, event.GetTaskDeactivatedEvent(t.Id, t.Execution, caller))
 	}
-	grip.Error(message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
+	grip.Error(ctx, message.WrapError(event.LogManyEvents(ctx, logs), message.Fields{
 		"message":  "problem logging task deactivated events",
 		"task_ids": taskIDsToUpdate,
 		"caller":   caller,
@@ -2350,17 +2133,7 @@ func (t *Task) MarkEnd(ctx context.Context, finishTime time.Time, detail *apimod
 
 	t.TimeTaken = finishTime.Sub(t.StartTime)
 
-	// Calculate task cost now that we have the actual runtime
-	if err := t.UpdateTaskCost(ctx); err != nil {
-		grip.Warning(message.WrapError(err, message.Fields{
-			"message":   "failed to calculate task cost",
-			"task_id":   t.Id,
-			"execution": t.Execution,
-		}))
-		// Don't fail the task finishing if cost calculation fails
-	}
-
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"message":   "marking task finished",
 		"task_id":   t.Id,
 		"execution": t.Execution,
@@ -2368,7 +2141,7 @@ func (t *Task) MarkEnd(ctx context.Context, finishTime time.Time, detail *apimod
 		"details":   t.Details,
 	})
 	if detail.IsEmpty() {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"message":   "detail status was empty, setting to failed",
 			"task_id":   t.Id,
 			"execution": t.Execution,
@@ -2380,38 +2153,29 @@ func (t *Task) MarkEnd(ctx context.Context, finishTime time.Time, detail *apimod
 		}
 	}
 
+	// Calculate EC2 runtime costs now that we have the actual runtime.
+	t.UpdateTaskCost(ctx)
+
 	// record that the task has finished, in memory and in the db
 	t.Status = detail.Status
 	t.FinishTime = finishTime
 	t.Details = *detail
-	t.ContainerAllocated = false
-	t.ContainerAllocatedTime = time.Time{}
 	t.DisplayStatusCache = t.DetermineDisplayStatus()
-	return UpdateOne(
-		ctx,
-		bson.M{
-			IdKey: t.Id,
-		},
-		bson.M{
-			"$set": bson.M{
-				FinishTimeKey:         finishTime,
-				StatusKey:             detail.Status,
-				TimeTakenKey:          t.TimeTaken,
-				TaskCostKey:           t.TaskCost,
-				DetailsKey:            detail,
-				StartTimeKey:          t.StartTime,
-				ContainerAllocatedKey: false,
-				DisplayStatusCacheKey: t.DisplayStatusCache,
-				TaskOutputInfoKey:     t.TaskOutputInfo,
-			},
-			"$unset": bson.M{
-				ContainerAllocatedTimeKey: 1,
-			},
-		})
+	setFields := bson.M{
+		FinishTimeKey:         finishTime,
+		StatusKey:             detail.Status,
+		TimeTakenKey:          t.TimeTaken,
+		DetailsKey:            detail,
+		StartTimeKey:          t.StartTime,
+		DisplayStatusCacheKey: t.DisplayStatusCache,
+		TaskOutputInfoKey:     t.TaskOutputInfo,
+	}
+	ec2EBSSetFields(TaskCostKey, t.TaskCost, setFields)
+	return UpdateOne(ctx, bson.M{IdKey: t.Id}, bson.M{"$set": setFields})
 }
 
 // GetDisplayStatus finds and sets DisplayStatus to the task. It should reflect
-// the statuses assigned during the addDisplayStatus aggregation step.
+// the statuses assigned by DisplayStatusExpression / addDisplayStatusCache.
 func (t *Task) GetDisplayStatus() string {
 	if t.DisplayStatus != "" {
 		return t.DisplayStatus
@@ -2582,7 +2346,6 @@ func resetTaskUpdate(t *Task, caller string, prediction *CostPredictionResult) [
 		t.ActivatedBy = caller
 		t.Secret = newSecret
 		t.HostId = ""
-		t.PodID = ""
 		t.Status = evergreen.TaskUndispatched
 		t.DispatchTime = utility.ZeroTime
 		t.StartTime = utility.ZeroTime
@@ -2601,7 +2364,6 @@ func resetTaskUpdate(t *Task, caller string, prediction *CostPredictionResult) [
 		t.AgentVersion = ""
 		t.HostCreateDetails = []HostCreateDetail{}
 		t.OverrideDependencies = false
-		t.ContainerAllocationAttempts = 0
 		t.NumNextTaskDispatches = 0
 		t.CanReset = false
 		t.IsAutomaticRestart = false
@@ -2613,20 +2375,19 @@ func resetTaskUpdate(t *Task, caller string, prediction *CostPredictionResult) [
 	}
 
 	setFields := bson.M{
-		ActivatedKey:                   true,
-		ActivatedTimeKey:               now,
-		ActivatedByKey:                 caller,
-		SecretKey:                      newSecret,
-		StatusKey:                      evergreen.TaskUndispatched,
-		DispatchTimeKey:                utility.ZeroTime,
-		StartTimeKey:                   utility.ZeroTime,
-		ScheduledTimeKey:               utility.ZeroTime,
-		FinishTimeKey:                  utility.ZeroTime,
-		DependenciesMetTimeKey:         utility.ZeroTime,
-		TimeTakenKey:                   0,
-		LastHeartbeatKey:               utility.ZeroTime,
-		ContainerAllocationAttemptsKey: 0,
-		NumNextTaskDispatchesKey:       0,
+		ActivatedKey:             true,
+		ActivatedTimeKey:         now,
+		ActivatedByKey:           caller,
+		SecretKey:                newSecret,
+		StatusKey:                evergreen.TaskUndispatched,
+		DispatchTimeKey:          utility.ZeroTime,
+		StartTimeKey:             utility.ZeroTime,
+		ScheduledTimeKey:         utility.ZeroTime,
+		FinishTimeKey:            utility.ZeroTime,
+		DependenciesMetTimeKey:   utility.ZeroTime,
+		TimeTakenKey:             0,
+		LastHeartbeatKey:         utility.ZeroTime,
+		NumNextTaskDispatchesKey: 0,
 	}
 
 	if prediction != nil {
@@ -2646,7 +2407,6 @@ func resetTaskUpdate(t *Task, caller string, prediction *CostPredictionResult) [
 				ResetFailedWhenFinishedKey,
 				AgentVersionKey,
 				HostIdKey,
-				PodIDKey,
 				HostCreateDetailsKey,
 				OverrideDependenciesKey,
 				CanResetKey,
@@ -2708,9 +2468,24 @@ func (t *Task) SetNumActivatedGeneratedTasks(ctx context.Context, numActivatedGe
 // that are not in the original task slice (this includes earlier tasks in task groups, if applicable).
 // depCache should originally be nil. We assume there are no dependency cycles.
 func GetRecursiveDependenciesUp(ctx context.Context, tasks []Task, depCache map[string]Task) ([]Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, dependencyResolutionTimeout)
+	defer cancel()
+
 	if depCache == nil {
 		depCache = make(map[string]Task)
 	}
+
+	return getRecursiveDependenciesUpHelper(ctx, tasks, depCache, 0)
+}
+
+func getRecursiveDependenciesUpHelper(ctx context.Context, tasks []Task, depCache map[string]Task, depth int) ([]Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Wrapf(err, "dependency resolution cancelled or timed out at depth %d", depth)
+	}
+	if depth >= maxDependencyDepth {
+		return nil, errors.Errorf("dependency resolution exceeded maximum depth of %d", maxDependencyDepth)
+	}
+
 	for _, t := range tasks {
 		depCache[t.Id] = t
 	}
@@ -2747,7 +2522,7 @@ func GetRecursiveDependenciesUp(ctx context.Context, tasks []Task, depCache map[
 		return nil, errors.Wrap(err, "getting dependencies")
 	}
 
-	recursiveDeps, err := GetRecursiveDependenciesUp(ctx, deps, depCache)
+	recursiveDeps, err := getRecursiveDependenciesUpHelper(ctx, deps, depCache, depth+1)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting recursive dependencies")
 	}
@@ -2759,9 +2534,24 @@ func GetRecursiveDependenciesUp(ctx context.Context, tasks []Task, depCache map[
 // taskMap should originally be nil.
 // We assume there are no dependency cycles.
 func getRecursiveDependenciesDown(ctx context.Context, tasks []string, taskMap map[string]bool) ([]Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, dependencyResolutionTimeout)
+	defer cancel()
+
 	if taskMap == nil {
 		taskMap = make(map[string]bool)
 	}
+
+	return getRecursiveDependenciesDownHelper(ctx, tasks, taskMap, 0)
+}
+
+func getRecursiveDependenciesDownHelper(ctx context.Context, tasks []string, taskMap map[string]bool, depth int) ([]Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Wrapf(err, "dependency resolution cancelled or timed out at depth %d", depth)
+	}
+	if depth >= maxDependencyDepth {
+		return nil, errors.Errorf("dependency resolution exceeded maximum depth of %d", maxDependencyDepth)
+	}
+
 	for _, t := range tasks {
 		taskMap[t] = true
 	}
@@ -2783,7 +2573,7 @@ func getRecursiveDependenciesDown(ctx context.Context, tasks []string, taskMap m
 		}
 	}
 
-	// everything is aleady in the map or nothing depends on tasks
+	// everything is already in the map or nothing depends on tasks
 	if len(newDeps) == 0 {
 		return nil, nil
 	}
@@ -2792,7 +2582,7 @@ func getRecursiveDependenciesDown(ctx context.Context, tasks []string, taskMap m
 	for _, t := range newDeps {
 		newDepIDs = append(newDepIDs, t.Id)
 	}
-	recurseTasks, err := getRecursiveDependenciesDown(ctx, newDepIDs, taskMap)
+	recurseTasks, err := getRecursiveDependenciesDownHelper(ctx, newDepIDs, taskMap, depth+1)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting recursive dependencies")
 	}
@@ -2868,7 +2658,7 @@ func MarkAllForUnattainableDependencies(ctx context.Context, tasks []Task, depen
 	if err != nil {
 		return nil, errors.Wrap(err, "finding updated tasks")
 	}
-	grip.ErrorWhen(len(updatedTasks) != len(tasks), message.Fields{
+	grip.ErrorWhen(ctx, len(updatedTasks) != len(tasks), message.Fields{
 		"message":            "successfully updated dependencies for tasks but the subsequent query for updated tasks returned a different number of tasks than expected (which may cause bugs blocking other tasks)",
 		"expected_num_tasks": len(tasks),
 		"actual_num_tasks":   len(updatedTasks),
@@ -3068,7 +2858,6 @@ func (t *Task) String() (taskStruct string) {
 	taskStruct += fmt.Sprintf("Display Status: %v\n", t.DisplayStatusCache)
 	taskStruct += fmt.Sprintf("Host: %v\n", t.HostId)
 	taskStruct += fmt.Sprintf("ScheduledTime: %v\n", t.ScheduledTime)
-	taskStruct += fmt.Sprintf("ContainerAllocatedTime: %v\n", t.ContainerAllocatedTime)
 	taskStruct += fmt.Sprintf("DispatchTime: %v\n", t.DispatchTime)
 	taskStruct += fmt.Sprintf("StartTime: %v\n", t.StartTime)
 	taskStruct += fmt.Sprintf("FinishTime: %v\n", t.FinishTime)
@@ -3176,7 +2965,7 @@ func ArchiveMany(ctx context.Context, tasks []Task) error {
 			execTaskIds = append(execTaskIds, t.ExecutionTasks...)
 			for _, et := range execTasks {
 				if !utility.StringSliceContains(evergreen.TaskCompletedStatuses, et.Status) {
-					grip.Debug(message.Fields{
+					grip.Debug(ctx, message.Fields{
 						"message":   "execution task is in incomplete state, skipping archiving",
 						"task_id":   et.Id,
 						"execution": et.Execution,
@@ -3604,7 +3393,7 @@ func (t *Task) IsPartOfDisplay(ctx context.Context) bool {
 	if t.DisplayTaskId == nil {
 		dt, err := t.GetDisplayTask(ctx)
 		if err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"message":        "unable to get display task",
 				"execution_task": t.Id,
 			}))
@@ -3651,7 +3440,7 @@ func (t *Task) GetDisplayTask(ctx context.Context) (*Task, error) {
 	}
 
 	if t.DisplayTaskId == nil {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message": "missing display task ID",
 			"task_id": t.Id,
 			"dt_id":   dtId,
@@ -3659,7 +3448,7 @@ func (t *Task) GetDisplayTask(ctx context.Context) (*Task, error) {
 		})
 		// Cache display task ID for future use. If we couldn't find the display task,
 		// we cache the empty string to show that it doesn't exist.
-		grip.Error(message.WrapError(t.SetDisplayTaskID(ctx, dtId), message.Fields{
+		grip.Error(ctx, message.WrapError(t.SetDisplayTaskID(ctx, dtId), message.Fields{
 			"message":         "failed to cache display task ID for task",
 			"task_id":         t.Id,
 			"display_task_id": dtId,
@@ -3729,7 +3518,7 @@ func (t *Task) FetchExpectedDuration(ctx context.Context) util.DurationStats {
 		t.DurationPrediction.CollectedAt = time.Now().Add(-time.Minute)
 
 		if err := t.cacheExpectedDuration(ctx); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"task":    t.Id,
 				"message": "caching expected duration",
 			}))
@@ -3740,9 +3529,9 @@ func (t *Task) FetchExpectedDuration(ctx context.Context) util.DurationStats {
 
 	refresher := func(previous util.DurationStats) (util.DurationStats, bool) {
 		defaultVal := util.DurationStats{Average: defaultTaskDuration, StdDev: 0}
-		vals, err := getExpectedDurationsForWindow(t.DisplayName, t.Project, t.BuildVariant,
+		vals, err := getExpectedDurationsForWindow(ctx, t.DisplayName, t.Project, t.BuildVariant,
 			time.Now().Add(-taskCompletionEstimateWindow), time.Now())
-		grip.Notice(message.WrapError(err, message.Fields{
+		grip.Notice(ctx, message.WrapError(err, message.Fields{
 			"name":      t.DisplayName,
 			"id":        t.Id,
 			"project":   t.Project,
@@ -3769,7 +3558,7 @@ func (t *Task) FetchExpectedDuration(ctx context.Context) util.DurationStats {
 		return util.DurationStats{Average: avg, StdDev: stdDev}, true
 	}
 
-	grip.Error(message.WrapError(t.DurationPrediction.SetRefresher(refresher), message.Fields{
+	grip.Error(ctx, message.WrapError(t.DurationPrediction.SetRefresher(refresher), message.Fields{
 		"message": "problem setting cached value refresher",
 		"cause":   "programmer error",
 	}))
@@ -3777,7 +3566,7 @@ func (t *Task) FetchExpectedDuration(ctx context.Context) util.DurationStats {
 	stats, ok := t.DurationPrediction.Get()
 	if ok {
 		if err := t.cacheExpectedDuration(ctx); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"task":    t.Id,
 				"message": "caching expected duration",
 			}))
@@ -3831,7 +3620,8 @@ func (t *Task) GetJQL(searchProjects []string) string {
 	var jqlClause string
 	for _, testResult := range t.LocalTestResults {
 		if testResult.Status == evergreen.TestFailedStatus {
-			fileParts := eitherSlash.Split(testResult.TestName, -1)
+			testName := testResult.GetDisplayTestName()
+			fileParts := eitherSlash.Split(testName, -1)
 			jqlParts = append(jqlParts, fmt.Sprintf("text~\"%v\"", util.EscapeJQLReservedChars(fileParts[len(fileParts)-1])))
 		}
 	}
@@ -4018,7 +3808,7 @@ func (t *Task) UpdateDependsOn(ctx context.Context, status string, newDependency
 	newDependencies := make([]Dependency, 0, len(newDependencyIDs))
 	for _, depID := range newDependencyIDs {
 		if depID == t.Id {
-			grip.Error(message.Fields{
+			grip.Error(ctx, message.Fields{
 				"message": "task is attempting to add a dependency on itself, skipping this dependency",
 				"task_id": t.Id,
 				"stack":   string(debug.Stack()),
@@ -4044,7 +3834,21 @@ func (t *Task) UpdateDependsOn(ctx context.Context, status string, newDependency
 		[]bson.M{
 			{"$set": bson.M{
 				DependsOnKey: bson.M{
-					"$concatArrays": []any{"$" + DependsOnKey, newDependencies},
+					"$concatArrays": []any{
+						"$" + DependsOnKey,
+						// Add dependencies to this task, but avoid adding a
+						// dependency if it's the task's own ID since that would
+						// create a self-dependency cycle.
+						bson.M{
+							"$filter": bson.M{
+								"input": newDependencies,
+								"as":    "dep",
+								"cond": bson.M{
+									"$ne": []any{"$$dep." + DependencyTaskIdKey, "$" + IdKey},
+								},
+							},
+						},
+					},
 				},
 			}},
 			addDisplayStatusCache,
@@ -4305,49 +4109,318 @@ func CalculateTaskCost(runtimeSeconds float64, distroCostData distro.CostData, f
 	}
 }
 
-func (t *Task) getFinanceConfigAndDistro(ctx context.Context) (evergreen.CostConfig, distro.CostData, error) {
+// EBS GP3 pricing constants (us-east-1 rates).
+// Pricing is standardized to us-east-1 and does not account for regional variations.
+// GP2 volumes use GP3 pricing; price differences are ignored.
+const (
+	// GP3FreeThroughputMBps is the free throughput tier for GP3 volumes (125 MB/s).
+	GP3FreeThroughputMBps = 125
+	// GP3ThroughputPricePerMBpsMonth is the price per MB/s-month above the free tier.
+	GP3ThroughputPricePerMBpsMonth = 0.04
+	// GP3StoragePricePerGBMonth is the on-demand price per GB-month for EBS storage (us-east-1).
+	GP3StoragePricePerGBMonth = 0.08
+	// SecondsPerMonth is 2,592,000 (60 * 60 * 24 * 30) and is used to convert monthly pricing to per-second pricing.
+	SecondsPerMonth = 60 * 60 * 24 * 30
+)
+
+// calculateTotalGP3Throughput sums the throughput of all GP3 volumes in mount points.
+func calculateTotalGP3Throughput(mountPoints []ec2mount.MountPoint) int32 {
+	var totalThroughput int32
+	for _, mp := range mountPoints {
+		if mp.VolumeType == evergreen.VolumeTypeGp3 && mp.Throughput > 0 {
+			totalThroughput += mp.Throughput
+		}
+	}
+	return totalThroughput
+}
+
+// calculateBillableThroughput returns the throughput amount that should be billed.
+// Returns 0 if total throughput is at or below the free tier (125 MB/s).
+func calculateBillableThroughput(totalThroughput int32) int32 {
+	if totalThroughput <= GP3FreeThroughputMBps {
+		return 0
+	}
+	return totalThroughput - GP3FreeThroughputMBps
+}
+
+// CalculateEBSThroughputOnDemandCost calculates the raw on-demand cost for EBS GP3 throughput.
+// Pricing is based on us-east-1 rates: $0.04 per MB/s-month above the 125 MB/s baseline.
+// It does not apply a discount; use CalculateEBSThroughputAdjustedCost for the discounted cost.
+func CalculateEBSThroughputOnDemandCost(runtimeSeconds float64, mountPoints []ec2mount.MountPoint) float64 {
+	if runtimeSeconds <= 0 {
+		return 0
+	}
+
+	totalThroughput := calculateTotalGP3Throughput(mountPoints)
+	billableThroughput := calculateBillableThroughput(totalThroughput)
+
+	if billableThroughput == 0 {
+		return 0
+	}
+
+	// Convert from per-month to per-second pricing (raw cost, no discount)
+	costPerSecond := (float64(billableThroughput) * GP3ThroughputPricePerMBpsMonth) / SecondsPerMonth
+
+	return costPerSecond * runtimeSeconds
+}
+
+// CalculateEBSThroughputAdjustedCost calculates the adjusted cost for EBS GP3 throughput.
+// It applies the discount: adjusted = on_demand * (1 - EBSDiscount).
+func CalculateEBSThroughputAdjustedCost(runtimeSeconds float64, mountPoints []ec2mount.MountPoint, ebsConfig evergreen.EBSCostConfig) float64 {
+	onDemandCost := CalculateEBSThroughputOnDemandCost(runtimeSeconds, mountPoints)
+	return onDemandCost * (1 - ebsConfig.EBSDiscount)
+}
+
+// calculateEBSThroughputCost sets the EBS GP3 throughput cost on TaskCost based on the distro's mount points.
+func (t *Task) calculateEBSThroughputCost(ctx context.Context, financeConfig evergreen.CostConfig, d *distro.Distro) {
+	if d == nil {
+		return
+	}
+	mountPoints, err := ec2settings.MountPointsForDistro(d, getHostRegionForTask(ctx, t))
+	if err != nil {
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message":   "failed to extract mount points from distro",
+			"task_id":   t.Id,
+			"distro_id": t.DistroId,
+		}))
+		return
+	}
+	if len(mountPoints) == 0 {
+		return
+	}
+	runtimeSeconds := t.TimeTaken.Seconds()
+	t.TaskCost.OnDemandEBSThroughputCost = CalculateEBSThroughputOnDemandCost(
+		runtimeSeconds,
+		mountPoints,
+	)
+	t.TaskCost.AdjustedEBSThroughputCost = CalculateEBSThroughputAdjustedCost(
+		runtimeSeconds,
+		mountPoints,
+		financeConfig.EBSCost,
+	)
+	t.TaskCost.OnDemandEBSStorageCost = CalculateEBSStorageOnDemandCost(
+		runtimeSeconds,
+		mountPoints,
+	)
+	t.TaskCost.AdjustedEBSStorageCost = CalculateEBSStorageAdjustedCost(
+		runtimeSeconds,
+		mountPoints,
+		financeConfig.EBSCost,
+	)
+}
+
+// calculateTotalVolumeSize sums each volume's size in GB across mount points.
+// GP3 pricing standardization applies only in the cost calculation.
+func calculateTotalVolumeSize(mountPoints []ec2mount.MountPoint) int32 {
+	var totalSize int32
+	for _, mp := range mountPoints {
+		if mp.Size <= 0 {
+			continue
+		}
+		totalSize += mp.Size
+	}
+	return totalSize
+}
+
+// CalculateEBSStorageOnDemandCost calculates the raw on-demand cost for EBS storage.
+// Pricing is based on us-east-1 rates: $0.08 per GB-month (GP3); GP2 volumes use the same rate in this model.
+// It does not apply a discount; use CalculateEBSStorageAdjustedCost for the discounted cost.
+func CalculateEBSStorageOnDemandCost(runtimeSeconds float64, mountPoints []ec2mount.MountPoint) float64 {
+	if runtimeSeconds <= 0 {
+		return 0
+	}
+
+	totalSize := calculateTotalVolumeSize(mountPoints)
+	if totalSize == 0 {
+		return 0
+	}
+
+	return (float64(totalSize) * GP3StoragePricePerGBMonth / SecondsPerMonth) * runtimeSeconds
+}
+
+// CalculateEBSStorageAdjustedCost calculates the adjusted EBS storage cost.
+// It applies the discount: adjusted = on_demand * (1 - EBSDiscount).
+func CalculateEBSStorageAdjustedCost(runtimeSeconds float64, mountPoints []ec2mount.MountPoint, ebsConfig evergreen.EBSCostConfig) float64 {
+	onDemandCost := CalculateEBSStorageOnDemandCost(runtimeSeconds, mountPoints)
+	return onDemandCost * (1 - ebsConfig.EBSDiscount)
+}
+
+func (t *Task) getFinanceConfigAndDistro(ctx context.Context) (evergreen.CostConfig, distro.CostData, *distro.Distro, error) {
 	financeConfig := evergreen.CostConfig{}
 	if err := financeConfig.Get(ctx); err != nil {
-		return financeConfig, distro.CostData{}, errors.Wrap(err, "getting finance configuration")
+		return financeConfig, distro.CostData{}, nil, errors.Wrap(err, "getting finance configuration")
 	}
 
 	if !financeConfig.IsConfigured() {
-		return financeConfig, distro.CostData{}, errors.New("finance configuration not set up")
+		return financeConfig, distro.CostData{}, nil, errors.New("finance configuration not set up")
 	}
 
 	d, err := distro.FindOneId(ctx, t.DistroId)
 	if err != nil {
-		return financeConfig, distro.CostData{}, errors.Wrapf(err, "finding distro '%s'", t.DistroId)
+		return financeConfig, distro.CostData{}, nil, errors.Wrapf(err, "finding distro '%s'", t.DistroId)
 	}
 	if d == nil {
-		return financeConfig, distro.CostData{}, errors.Errorf("distro '%s' not found", t.DistroId)
+		return financeConfig, distro.CostData{}, nil, errors.Errorf("distro '%s' not found", t.DistroId)
 	}
 
 	if !d.CostData.IsConfigured() {
-		return financeConfig, distro.CostData{}, errors.New("distro cost data not configured")
+		return financeConfig, distro.CostData{}, nil, errors.New("distro cost data not configured")
 	}
 
-	return financeConfig, d.CostData, nil
+	return financeConfig, d.CostData, d, nil
 }
 
-func (t *Task) UpdateTaskCost(ctx context.Context) error {
-	if t.TimeTaken <= 0 {
-		return nil
+// getHostRegionForTask returns the AWS region where the task's host is running, derived from the host's zone.
+// Returns empty string if the host is not found, has no zone, or the task has no host.
+func getHostRegionForTask(ctx context.Context, t *Task) string {
+	if t.HostId == "" {
+		return ""
 	}
-
-	financeConfig, costData, err := t.getFinanceConfigAndDistro(ctx)
+	var result struct {
+		Zone string `bson:"zone"`
+	}
+	err := evergreen.GetEnvironment().DB().Collection(hostCollectionName).FindOne(ctx,
+		bson.M{"_id": t.HostId},
+		options.FindOne().SetProjection(bson.M{"zone": 1}),
+	).Decode(&result)
 	if err != nil {
-		return nil
+		return ""
+	}
+	return util.AZToRegion(result.Zone)
+}
+
+// UpdateTaskCost computes EC2 and EBS costs from the task's runtime and distro pricing into t.TaskCost.
+func (t *Task) UpdateTaskCost(ctx context.Context) {
+	if t.TimeTaken <= 0 {
+		return
 	}
 
-	runtimeSeconds := t.TimeTaken.Seconds()
-	t.TaskCost = CalculateTaskCost(runtimeSeconds, costData, financeConfig)
+	financeConfig, costData, d, err := t.getFinanceConfigAndDistro(ctx)
+	if err != nil {
+		grip.Debug(ctx, message.WrapError(err, message.Fields{
+			"message": "computing task cost",
+			"task_id": t.Id,
+		}))
+		return
+	}
+	t.calculateRuntimeCost(financeConfig, costData)
+	t.calculateEBSThroughputCost(ctx, financeConfig, d)
+}
 
-	return UpdateOne(ctx, bson.M{"_id": t.Id}, bson.M{
-		"$set": bson.M{
-			TaskCostKey: t.TaskCost,
-		},
-	})
+// ec2EBSSetFields populates m with dotted-path $set entries for the EC2 and EBS cost fields under prefix.
+// S3 cost fields are intentionally excluded — they are owned by SaveS3Usage.
+func ec2EBSSetFields(prefix string, c cost.Cost, m bson.M) {
+	m[bsonutil.GetDottedKeyName(prefix, cost.OnDemandEC2CostKey)] = c.OnDemandEC2Cost
+	m[bsonutil.GetDottedKeyName(prefix, cost.AdjustedEC2CostKey)] = c.AdjustedEC2Cost
+	m[bsonutil.GetDottedKeyName(prefix, cost.OnDemandEBSThroughputCostKey)] = c.OnDemandEBSThroughputCost
+	m[bsonutil.GetDottedKeyName(prefix, cost.AdjustedEBSThroughputCostKey)] = c.AdjustedEBSThroughputCost
+	m[bsonutil.GetDottedKeyName(prefix, cost.OnDemandEBSStorageCostKey)] = c.OnDemandEBSStorageCost
+	m[bsonutil.GetDottedKeyName(prefix, cost.AdjustedEBSStorageCostKey)] = c.AdjustedEBSStorageCost
+}
+
+// calculateRuntimeCost sets the EC2 cost fields on TaskCost based on the task's runtime and distro pricing.
+func (t *Task) calculateRuntimeCost(financeConfig evergreen.CostConfig, costData distro.CostData) {
+	t.TaskCost = CalculateTaskCost(t.TimeTaken.Seconds(), costData, financeConfig)
+}
+
+// bucketExpirationLookup resolves the S3 lifecycle expiration days for a given bucket and file key.
+// Log buckets read from admin BucketsConfig; artifact buckets read from s3_lifecycle_rules.
+type bucketExpirationLookup func(ctx context.Context, bucket, fileKey string) (days int, found bool)
+
+// SaveS3Usage persists the task's S3 usage metrics and calculates S3 costs.
+func (t *Task) SaveS3Usage(ctx context.Context, logLookup, artifactLookup bucketExpirationLookup, logBucketName string) error {
+	costConfig := &evergreen.CostConfig{}
+	if err := costConfig.Get(ctx); err != nil {
+		return errors.Wrap(err, "getting cost config")
+	}
+
+	t.calculateS3PutCosts(costConfig)
+	t.setS3ArtifactStorageCosts(ctx, artifactLookup, costConfig)
+	t.setS3LogStorageCosts(ctx, logBucketName, logLookup, costConfig)
+
+	setFields := bson.M{
+		S3UsageKey: t.S3Usage,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.OnDemandS3ArtifactPutCostKey):     t.TaskCost.OnDemandS3ArtifactPutCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.AdjustedS3ArtifactPutCostKey):     t.TaskCost.AdjustedS3ArtifactPutCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.OnDemandS3LogPutCostKey):          t.TaskCost.OnDemandS3LogPutCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.AdjustedS3LogPutCostKey):          t.TaskCost.AdjustedS3LogPutCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.OnDemandS3ArtifactStorageCostKey): t.TaskCost.OnDemandS3ArtifactStorageCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.AdjustedS3ArtifactStorageCostKey): t.TaskCost.AdjustedS3ArtifactStorageCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.OnDemandS3LogStorageCostKey):      t.TaskCost.OnDemandS3LogStorageCost,
+		bsonutil.GetDottedKeyName(TaskCostKey, cost.AdjustedS3LogStorageCostKey):      t.TaskCost.AdjustedS3LogStorageCost,
+	}
+
+	return UpdateOne(ctx, bson.M{"_id": t.Id}, bson.M{"$set": setFields})
+}
+
+// setS3LogStorageCosts calculates and sets the task's S3 log storage cost using lifecycle rules for the log bucket.
+func (t *Task) setS3LogStorageCosts(ctx context.Context, logBucketName string, lookup bucketExpirationLookup, costConfig *evergreen.CostConfig) {
+	if logBucketName == "" || lookup == nil {
+		return
+	}
+	// Reset before accumulating so this function is idempotent when called more than once per task.
+	t.TaskCost.OnDemandS3LogStorageCost = 0
+	t.TaskCost.AdjustedS3LogStorageCost = 0
+	for _, lm := range []s3usage.LogTypeMetrics{t.S3Usage.Logs.Task, t.S3Usage.Logs.Agent, t.S3Usage.Logs.System, t.S3Usage.Logs.Test} {
+		if lm.LogKey == "" {
+			continue
+		}
+		days, found := lookup(ctx, logBucketName, lm.LogKey)
+		if !found {
+			days = costConfig.S3Cost.Storage.DefaultMaxArtifactExpirationDays
+		}
+		onDemandCost, adjustedCost := s3usage.CalculateS3StorageCostWithConfig(ctx, lm.Bytes, days, costConfig)
+		t.TaskCost.OnDemandS3LogStorageCost += onDemandCost
+		t.TaskCost.AdjustedS3LogStorageCost += adjustedCost
+	}
+}
+
+// lookupExpirationDays returns the lifecycle expiration days for an artifact.
+// Devprod-ownership filtering happens at write time, so persisted entries are in scope here.
+func lookupExpirationDays(ctx context.Context, bucket, fileKey string, lookup bucketExpirationLookup, costConfig *evergreen.CostConfig) (days int, usedLookup bool) {
+	if lookup != nil {
+		if days, ok := lookup(ctx, bucket, fileKey); ok {
+			return days, true
+		}
+	}
+	return costConfig.S3Cost.Storage.DefaultMaxArtifactExpirationDays, false
+}
+
+// calculateS3PutCosts calculates S3 PUT costs for both artifact uploads and log uploads.
+// Artifact PUT counts exclude non-DevProd-owned uploads when the allowlist is configured; that filtering
+// happens in s3usage.S3Usage.IncrementArtifacts (agent s3.put), so aggregates here already match priced PUTs.
+func (t *Task) calculateS3PutCosts(costConfig *evergreen.CostConfig) {
+	if t.S3Usage.Artifacts.PutRequests > 0 {
+		t.TaskCost.OnDemandS3ArtifactPutCost, t.TaskCost.AdjustedS3ArtifactPutCost = s3usage.CalculateS3PutCostWithConfig(t.S3Usage.Artifacts.PutRequests, costConfig)
+	}
+	if t.S3Usage.Logs.PutRequests > 0 {
+		t.TaskCost.OnDemandS3LogPutCost, t.TaskCost.AdjustedS3LogPutCost = s3usage.CalculateS3PutCostWithConfig(t.S3Usage.Logs.PutRequests, costConfig)
+	}
+}
+
+// setS3ArtifactStorageCosts calculates and sets the task's S3 artifact storage cost. Skipped if the lifecycle rules lookup is nil.
+func (t *Task) setS3ArtifactStorageCosts(ctx context.Context, lookup bucketExpirationLookup, costConfig *evergreen.CostConfig) {
+	if lookup == nil {
+		return
+	}
+	// Reset before accumulating so this function is idempotent when called more than once per task.
+	t.TaskCost.OnDemandS3ArtifactStorageCost = 0
+	t.TaskCost.AdjustedS3ArtifactStorageCost = 0
+	for _, bucketEntry := range t.S3Usage.Artifacts.BytesByBucketAndKey {
+		for _, fileEntry := range bucketEntry.Files {
+			days, usedLookup := lookupExpirationDays(ctx, bucketEntry.Bucket, fileEntry.FileKey, lookup, costConfig)
+			if !usedLookup {
+				grip.Info(ctx, message.Fields{
+					"message": "no S3 lifecycle rule found for artifact bucket, using default expiration days",
+					"bucket":  bucketEntry.Bucket,
+					"task_id": t.Id,
+				})
+			}
+			onDemandCost, adjustedCost := s3usage.CalculateS3StorageCostWithConfig(ctx, fileEntry.Bytes, days, costConfig)
+			t.TaskCost.OnDemandS3ArtifactStorageCost += onDemandCost
+			t.TaskCost.AdjustedS3ArtifactStorageCost += adjustedCost
+		}
+	}
 }
 
 type CostPredictionResult struct {
@@ -4367,12 +4440,8 @@ func (t *Task) ComputePredictedCostForWeek(ctx context.Context) (CostPredictionR
 		return CostPredictionResult{}, nil
 	}
 
-	result := results[0]
 	return CostPredictionResult{
-		PredictedCost: cost.Cost{
-			OnDemandEC2Cost: result.AvgOnDemandCost,
-			AdjustedEC2Cost: result.AvgAdjustedCost,
-		},
+		PredictedCost: results[0].toCost(),
 	}, nil
 }
 
@@ -4402,30 +4471,88 @@ func addPredictedCostToUpdate(setFields bson.M, predictedCost cost.Cost) {
 	}
 }
 
-// moveLogsByNamesToBucket moves task + test logs to the specified bucket
-func (t *Task) moveLogsByNamesToBucket(ctx context.Context, settings *evergreen.Settings, output *TaskOutput) error {
-	if output.TestLogs.BucketConfig != output.TaskLogs.BucketConfig {
-		// test logs and task logs will always be in the same bucket
+// isContextError returns true if the error is due to context timeout or cancellation.
+// The AWS SDK may wrap these errors, so we also check the error message.
+func isContextError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "canceled")
+}
+
+// allObjectsExistInBucket returns true if all keys exist in the bucket.
+func allObjectsExistInBucket(ctx context.Context, bucket pail.Bucket, keys []string) bool {
+	for _, key := range keys {
+		exists, err := bucket.Exists(ctx, key)
+		if err != nil || !exists {
+			return false
+		}
+	}
+	return true
+}
+
+// setOutputBucketConfig sets both task and test log bucket configs in memory and persists them.
+func (t *Task) setOutputBucketConfig(ctx context.Context, cfg evergreen.BucketConfig, runInOldTaskCollection bool) error {
+	t.TaskOutputInfo.TaskLogs.BucketConfig = cfg
+	t.TaskOutputInfo.TestLogs.BucketConfig = cfg
+	if runInOldTaskCollection {
+		return errors.Wrap(updateOneOld(
+			ctx,
+			bson.M{IdKey: t.Id},
+			bson.M{"$set": bson.M{TaskOutputInfoKey: t.TaskOutputInfo}},
+		), "updating task output bucket config")
+	}
+	return errors.Wrap(UpdateOne(
+		ctx,
+		bson.M{IdKey: t.Id},
+		bson.M{"$set": bson.M{TaskOutputInfoKey: t.TaskOutputInfo}},
+	), "updating task output bucket config")
+}
+
+// moveLogsByNamesToBucket moves task + test logs to the specified bucket.
+func (t *Task) moveLogsByNamesToBucket(ctx context.Context, settings *evergreen.Settings, output *TaskOutput, sourceBucketCfg *evergreen.BucketConfig, runInOldTaskCollection bool) error {
+	if output.TestLogs.BucketConfig.Name != output.TaskLogs.BucketConfig.Name {
+		// moveLogsByNamesToBucket uses one source bucket for task and test log keys; names must agree.
 		return errors.New("test log and task log buckets do not match")
 	}
 	failedCfg := settings.Buckets.LogBucketFailedTasks
 	if failedCfg.Name == "" {
 		return errors.New("failed bucket is not configured")
 	}
-	srcBucket, err := newBucket(ctx, output.TestLogs.BucketConfig, output.TestLogs.AWSCredentials)
+	if runInOldTaskCollection && t.OldTaskId == "" {
+		return errors.Errorf("cannot move logs for task %q: runInOldTaskCollection is true but old_task_id is empty", t.Id)
+	}
+	// Use the provided source bucket config if available, otherwise use the task's current bucket config
+	srcCfg := output.TestLogs.BucketConfig
+	if sourceBucketCfg != nil && sourceBucketCfg.Name != "" {
+		srcCfg = *sourceBucketCfg
+	}
+	srcBucket, err := newBucket(ctx, srcCfg, output.TestLogs.AWSCredentials)
 	if err != nil {
 		return errors.Wrap(err, "getting regular test log bucket")
 	}
 
 	logService := log.NewLogServiceV0(srcBucket)
 
+	// use OldTaskId because S3 log keys were written using that ID
+	logTaskID := t.Id
+	if runInOldTaskCollection {
+		logTaskID = t.OldTaskId
+	}
+
+	logTask := *t
+	logTask.Id = logTaskID
 	logNames := make([]string, 0, 4)
 	// add task logs
 	for _, logType := range []TaskLogType{TaskLogTypeAgent, TaskLogTypeSystem, TaskLogTypeTask} {
-		logNames = append(logNames, getLogName(*t, logType, output.TaskLogs.ID()))
+		logNames = append(logNames, getLogName(logTask, logType, output.TaskLogs.ID()))
 	}
 	// add test logs
-	logNames = append(logNames, fmt.Sprintf("%s/%s/%d/%s", t.Project, t.Id, t.Execution, output.TestLogs.ID()))
+	logNames = append(logNames, fmt.Sprintf("%s/%s/%d/%s", t.Project, logTaskID, t.Execution, output.TestLogs.ID()))
 
 	keys, err := logService.GetChunkKeys(ctx, logNames)
 	if err != nil {
@@ -4437,28 +4564,45 @@ func (t *Task) moveLogsByNamesToBucket(ctx context.Context, settings *evergreen.
 		return errors.Wrap(err, "getting failed bucket")
 	}
 
-	if err = logService.MoveObjectsToBucket(ctx, allKeys, failedBucket); err != nil {
-		return errors.Wrap(err, "moving logs to failed bucket")
+	moveErr := logService.MoveObjectsToBucket(ctx, allKeys, failedBucket)
+	if moveErr != nil {
+		// When the client times out, S3 CopyObject may have already completed server-side.
+		// Verify whether the objects actually exist in the failed bucket before updating the DB.
+		// If they do, update the DB to fix the inconsistency. If not, return the error for retry.
+		if isContextError(moveErr) {
+			grip.Info(ctx, message.Fields{
+				"message":   "failed_bucket_move: move timed out or canceled, verifying objects in destination",
+				"task_id":   t.Id,
+				"execution": t.Execution,
+				"key_count": len(allKeys),
+			})
+			if allObjectsExistInBucket(ctx, failedBucket, allKeys) {
+				grip.Info(ctx, message.Fields{
+					"message":   "failed_bucket_move: all objects found in failed bucket, updating DB to fix inconsistency",
+					"task_id":   t.Id,
+					"execution": t.Execution,
+				})
+				if updateErr := t.setOutputBucketConfig(ctx, failedCfg, runInOldTaskCollection); updateErr != nil {
+					return errors.Wrap(moveErr, "moving logs to failed bucket")
+				}
+				return nil
+			}
+			grip.Info(ctx, message.Fields{
+				"message":   "failed_bucket_move: not all objects in failed bucket, returning error for retry",
+				"task_id":   t.Id,
+				"execution": t.Execution,
+				"key_count": len(allKeys),
+			})
+		}
+		return errors.Wrap(moveErr, "moving logs to failed bucket")
 	}
 
-	// Update the task output info with the new bucket config.
-	t.TaskOutputInfo.TaskLogs.BucketConfig = failedCfg
-	t.TaskOutputInfo.TestLogs.BucketConfig = failedCfg
-	err = UpdateOne(
-		ctx,
-		bson.M{
-			IdKey: t.Id,
-		},
-		bson.M{
-			"$set": bson.M{
-				TaskOutputInfoKey: t.TaskOutputInfo,
-			},
-		})
-	return errors.Wrapf(err, "updating task output for task %s", t.Id)
+	return errors.Wrapf(t.setOutputBucketConfig(ctx, failedCfg, runInOldTaskCollection), "updating task output for task %s", t.Id)
 }
 
 // MoveTestAndTaskLogsToFailedBucket moves task + test logs to the failed-task bucket
-func (t *Task) MoveTestAndTaskLogsToFailedBucket(ctx context.Context, settings *evergreen.Settings) error {
+// using the provided source bucket config
+func (t *Task) MoveTestAndTaskLogsToFailedBucket(ctx context.Context, settings *evergreen.Settings, sourceBucketCfg evergreen.BucketConfig, runInOldTaskCollection bool) error {
 	if t.UsesLongRetentionBucket(settings) {
 		return nil
 	}
@@ -4467,8 +4611,50 @@ func (t *Task) MoveTestAndTaskLogsToFailedBucket(ctx context.Context, settings *
 		return nil
 	}
 
-	return t.moveLogsByNamesToBucket(ctx, settings, output)
+	return t.moveLogsByNamesToBucket(ctx, settings, output, &sourceBucketCfg, runInOldTaskCollection)
+}
 
+// RevertBucketConfigToSource updates the task's DB bucket config back to sourceBucketCfg.
+func (t *Task) RevertBucketConfigToSource(ctx context.Context, sourceBucketCfg evergreen.BucketConfig) error {
+	if t.TaskOutputInfo == nil {
+		return nil
+	}
+	// runInOldTaskCollection is always false because the stuck state only arises from the task-end stuck case where
+	// logger rotation set output to thefailed bucket but the move did not complete. Hourly retry on old_tasks does not create that
+	// state, so tasks in old_tasks do not need revert.
+	return t.setOutputBucketConfig(ctx, sourceBucketCfg, false)
+}
+
+// RevertBucketConfigToSourceIfLogsExist checks whether the task's log files are still in sourceBucketCfg.
+// If they are, it calls RevertBucketConfigToSource to set the bucket config back to the source bucket.
+func (t *Task) RevertBucketConfigToSourceIfLogsExist(ctx context.Context, sourceBucketCfg evergreen.BucketConfig) (bool, error) {
+	output, ok := t.GetTaskOutputSafe()
+	if !ok {
+		return false, nil
+	}
+
+	srcBucket, err := newBucket(ctx, sourceBucketCfg, output.TestLogs.AWSCredentials)
+	if err != nil {
+		return false, errors.Wrap(err, "getting source bucket")
+	}
+
+	// List using the execution-level prefix, which is a complete path component and works
+	// correctly with both S3 (string-prefix) and local (directory-walk) buckets. This prefix
+	// covers all task and test log files for the given task execution.
+	execPrefix := fmt.Sprintf("%s/%s/%d/", t.Project, t.Id, t.Execution)
+	it, err := srcBucket.List(ctx, execPrefix)
+	if err != nil {
+		return false, errors.Wrap(err, "listing log keys in source bucket")
+	}
+	// We only need to find at least one file still in the source bucket. Even
+	// in a partial move, pointing back to the source bucket is the right
+	// choice: tasks can still read whatever logs remain there, and the next
+	// move job will re-attempt the full move to the failed bucket.
+	if !it.Next(ctx) {
+		return false, it.Err()
+	}
+
+	return true, t.RevertBucketConfigToSource(ctx, sourceBucketCfg)
 }
 
 // UsesLongRetentionBucket returns true if the task failed and is not in LongRetentionProjects.
@@ -4477,4 +4663,97 @@ func (t *Task) UsesLongRetentionBucket(settings *evergreen.Settings) bool {
 		return true
 	}
 	return false
+}
+
+// GetS3ArtifactUsageFromDB reconstructs artifact S3 usage on the crash path when the agent
+// never sent a final report. Counts only devprod-owned uploads (ARN or account ID). Re-uploads
+// to the same (bucket, key, role ARN) are deduped: PUTs accumulate, bytes take the last non-zero size.
+func (t *Task) GetS3ArtifactUsageFromDB(ctx context.Context) (s3usage.ArtifactMetrics, error) {
+	entries, err := artifact.FindAll(ctx, artifact.ByTaskIdAndExecution(t.Id, t.Execution))
+	if err != nil {
+		return s3usage.ArtifactMetrics{}, errors.Wrap(err, "finding artifact entries")
+	}
+
+	costConfig := &evergreen.CostConfig{}
+	if err := costConfig.Get(ctx); err != nil {
+		return s3usage.ArtifactMetrics{}, errors.Wrap(err, "getting cost config")
+	}
+
+	type fileKey struct{ bucket, key, roleARN string }
+	byFile := map[fileKey]*s3usage.FileBytes{}
+	for _, entry := range entries {
+		for _, f := range entry.Files {
+			if f.PutRequests == 0 {
+				continue
+			}
+			if !evergreen.IsDevprodOwnedUpload(f.AWSRoleARN, f.AWSAccountID, costConfig.S3Cost.Storage.DevprodOwnedAWSAccountIDs) {
+				continue
+			}
+			fk := fileKey{f.Bucket, f.FileKey, f.AWSRoleARN}
+			if existing, ok := byFile[fk]; ok {
+				existing.PutRequests += f.PutRequests
+				if f.FileSize > 0 {
+					existing.Bytes = f.FileSize
+				}
+				continue
+			}
+			byFile[fk] = &s3usage.FileBytes{
+				FileKey:     f.FileKey,
+				Bytes:       f.FileSize,
+				PutRequests: f.PutRequests,
+			}
+		}
+	}
+
+	if len(byFile) == 0 {
+		return s3usage.ArtifactMetrics{}, nil
+	}
+
+	type bucketKey struct{ bucket, roleARN string }
+	byBucket := map[bucketKey]*s3usage.BucketFileMetrics{}
+	var files []s3usage.FileMetrics
+	var totalPuts int
+	var totalBytes int64
+	for fk, fb := range byFile {
+		bk := bucketKey{fk.bucket, fk.roleARN}
+		if _, ok := byBucket[bk]; !ok {
+			byBucket[bk] = &s3usage.BucketFileMetrics{Bucket: fk.bucket, AWSRoleARN: fk.roleARN}
+		}
+		byBucket[bk].Files = append(byBucket[bk].Files, *fb)
+		files = append(files, s3usage.FileMetrics{FileSizeBytes: fb.Bytes, PutRequests: fb.PutRequests})
+		totalPuts += fb.PutRequests
+		totalBytes += fb.Bytes
+	}
+
+	bucketMetrics := make([]s3usage.BucketFileMetrics, 0, len(byBucket))
+	for _, bm := range byBucket {
+		bucketMetrics = append(bucketMetrics, *bm)
+	}
+
+	maxPuts, minPuts := s3usage.ComputePerFileExtremes(files)
+	return s3usage.ArtifactMetrics{
+		S3UploadMetrics: s3usage.S3UploadMetrics{
+			PutRequests: totalPuts,
+			UploadBytes: totalBytes,
+		},
+		Count:                      len(files),
+		ArtifactWithMaxPutRequests: maxPuts,
+		ArtifactWithMinPutRequests: minPuts,
+		BytesByBucketAndKey:        bucketMetrics,
+	}, nil
+}
+
+// HasValidDistro determines if the task has a valid distro.
+func (t *Task) HasValidDistro(ctx context.Context) bool {
+	// Display tasks do not have distros.
+	if t.DisplayOnly {
+		return true
+	}
+	// A task's distro may be referenced either by a distro's ID or by one of
+	// its aliases, so both must be considered valid.
+	hasValid, err := distro.HasAnyByIdOrAlias(ctx, append([]string{t.DistroId}, t.SecondaryDistros...))
+	if err != nil {
+		return false
+	}
+	return hasValid
 }

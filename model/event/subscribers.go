@@ -2,6 +2,7 @@ package event
 
 import (
 	"fmt"
+	"strings"
 
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
 	"github.com/evergreen-ci/utility"
@@ -20,6 +21,10 @@ const (
 	SlackSubscriberType             = "slack"
 	SubscriberTypeNone              = "none"
 	RunChildPatchSubscriberType     = "run-child-patch"
+
+	// WebhookAuthorizationHeader is the standard HTTP header key used for a
+	// webhook subscriber's authorization token.
+	WebhookAuthorizationHeader = "Authorization"
 
 	webhookRetryLimit    = 10
 	webhookMinDelayLimit = 10000
@@ -122,12 +127,15 @@ func (s *Subscriber) Validate() error {
 }
 
 type WebhookSubscriber struct {
-	URL        string          `bson:"url"`
-	Secret     []byte          `bson:"secret"`
-	Retries    int             `bson:"retries"`
-	MinDelayMS int             `bson:"min_delay_ms"`
-	TimeoutMS  int             `bson:"timeout_ms"`
-	Headers    []WebhookHeader `bson:"headers"`
+	URL string `bson:"url"`
+	// omitempty (not bson:"-") preserves the DB fallback for subscriptions not yet migrated to Parameter Store.
+	Secret                       []byte          `bson:"secret,omitempty"`
+	SecretParameter              string          `bson:"secret_parameter,omitempty"`
+	AuthorizationHeaderParameter string          `bson:"authorization_header_parameter,omitempty"`
+	Retries                      int             `bson:"retries"`
+	MinDelayMS                   int             `bson:"min_delay_ms"`
+	TimeoutMS                    int             `bson:"timeout_ms"`
+	Headers                      []WebhookHeader `bson:"headers"`
 }
 
 type WebhookHeader struct {
@@ -156,9 +164,14 @@ func (s *WebhookSubscriber) validate() error {
 	catcher.AddWhen(s.TimeoutMS < 0, errors.New("timeout cannot be negative"))
 	catcher.AddWhen(s.TimeoutMS > webhookTimeoutLimit, errors.Errorf("timeout cannot be greater than %d ms", webhookTimeoutLimit))
 
+	seenHeaders := map[string]struct{}{}
 	for _, header := range s.Headers {
 		catcher.AddWhen(header.Key == "", errors.New("header key cannot be empty"))
 		catcher.AddWhen(header.Value == "", errors.New("header value cannot be empty"))
+		for seenHeader := range seenHeaders {
+			catcher.ErrorfWhen(strings.EqualFold(header.Key, seenHeader), "duplicate header key '%s'", header.Key)
+		}
+		seenHeaders[header.Key] = struct{}{}
 	}
 
 	return catcher.Resolve()
@@ -167,11 +180,21 @@ func (s *WebhookSubscriber) validate() error {
 // GetHeader gets the value for the given key.
 func (s *WebhookSubscriber) GetHeader(key string) string {
 	for _, h := range s.Headers {
-		if h.Key == key {
+		if strings.EqualFold(h.Key, key) {
 			return h.Value
 		}
 	}
 	return ""
+}
+
+func (s *WebhookSubscriber) setHeader(key, value string) {
+	for i := range s.Headers {
+		if strings.EqualFold(s.Headers[i].Key, key) {
+			s.Headers[i].Value = value
+			return
+		}
+	}
+	s.Headers = append(s.Headers, WebhookHeader{Key: key, Value: value})
 }
 
 type JIRAIssueSubscriber struct {

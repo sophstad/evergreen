@@ -4,23 +4,27 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	_ "time/tzdata"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/api"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/db/mgo/bson"
+	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/artifact"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
+	"github.com/evergreen-ci/evergreen/model/parsley"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/testresult"
@@ -81,7 +85,7 @@ func findAllTasksByIds(ctx context.Context, taskIDs ...string) ([]task.Task, err
 			foundTaskIds = append(foundTaskIds, ft.Id)
 		}
 		missingTaskIds, _ := utility.StringSliceSymmetricDifference(taskIDs, foundTaskIds)
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"message":       "could not find all tasks",
 			"function":      "findAllTasksByIds",
 			"missing_tasks": missingTaskIds,
@@ -308,7 +312,7 @@ func getAPITaskFromTask(ctx context.Context, url string, task task.Task) (*restM
 
 // getTask returns the task with the given id and execution number
 func getTask(ctx context.Context, taskID string, execution *int, apiURL string) (*restModel.APITask, error) {
-	dbTask, err := task.FindOneIdAndExecutionWithDisplayStatus(ctx, taskID, execution)
+	dbTask, err := task.FindByIdExecution(ctx, taskID, execution)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding task '%s': %s", taskID, err.Error()))
 	}
@@ -431,7 +435,7 @@ func canRestartTask(ctx context.Context, t *task.Task) bool {
 	}
 	// It is possible to restart blocked display tasks. Later tasks in a display task could be blocked on
 	// earlier tasks in the display task, in which case restarting the entire display task may unblock them.
-	return (t.DisplayStatus == evergreen.TaskStatusBlocked && t.DisplayOnly) ||
+	return (t.GetDisplayStatus() == evergreen.TaskStatusBlocked && t.DisplayOnly) ||
 		!utility.StringSliceContains(evergreen.TaskUncompletedStatuses, t.Status)
 }
 
@@ -440,7 +444,7 @@ func canScheduleTask(ctx context.Context, t *task.Task) bool {
 	if t.IsPartOfDisplay(ctx) || t.Aborted {
 		return false
 	}
-	if t.DisplayStatus != evergreen.TaskUnscheduled {
+	if t.GetDisplayStatus() != evergreen.TaskUnscheduled {
 		return false
 	}
 	return true
@@ -564,14 +568,14 @@ func getAPIVolumeList(volumes []host.Volume) ([]*restModel.APIVolume, error) {
 func mustHaveUser(ctx context.Context) *user.DBUser {
 	u := gimlet.GetUser(ctx)
 	if u == nil {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"message": "no user attached to request expecting user",
 		})
 		return &user.DBUser{}
 	}
 	usr, valid := u.(*user.DBUser)
 	if !valid {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"message": "invalid user attached to request expecting user",
 		})
 		return &user.DBUser{}
@@ -641,6 +645,21 @@ func isPopulated(buildVariantOptions *BuildVariantOptions) bool {
 		return false
 	}
 	return len(buildVariantOptions.Tasks) > 0 || len(buildVariantOptions.Variants) > 0 || len(buildVariantOptions.Statuses) > 0
+}
+
+// getAuthorizedSettingsID returns the project/repo ID gated by @requireProjectAccess
+// (settings.Id, mapped from the projectId/repoId GraphQL argument). If the caller also
+// supplied projectRef.id and it differs from the authorized ID, returns an
+// InputValidationError — projectRef.id is not authorized and must not be used as the
+// write key. labelName is used in the error message ("projectId" or "repoId").
+func getAuthorizedSettingsID(ctx context.Context, settings *restModel.APIProjectSettings, labelName string) (string, error) {
+	authorizedID := utility.FromStringPtr(settings.Id)
+	if settings.ProjectRef.Id != nil {
+		if innerID := utility.FromStringPtr(settings.ProjectRef.Id); innerID != authorizedID {
+			return "", InputValidationError.Send(ctx, fmt.Sprintf("%s '%s' does not match projectRef.id '%s'", labelName, authorizedID, innerID))
+		}
+	}
+	return authorizedID, nil
 }
 
 func getRedactedAPIVarsForProject(ctx context.Context, projectId string) (*restModel.APIProjectVars, error) {
@@ -742,7 +761,7 @@ func groupProjects(ctx context.Context, projects []model.ProjectRef, onlyDefault
 			}
 
 			if repoRef == nil {
-				grip.Error(message.Fields{
+				grip.Error(ctx, message.Fields{
 					"message":     "repoRef not found",
 					"repo_ref_id": repoRefId,
 					"project":     project,
@@ -794,9 +813,12 @@ func bbGetCreatedTicketsPointers(ctx context.Context, taskId string) ([]*thirdpa
 		}
 	}
 	settings := evergreen.GetEnvironment().Settings()
-	jiraHandler := thirdparty.NewJiraHandler(*settings.Jira.Export())
+	jiraHandler, err := thirdparty.NewJiraHandler(*settings.Jira.Export())
+	if err != nil {
+		return nil, err
+	}
 	for _, ticket := range searchTickets {
-		jiraIssue, err := jiraHandler.GetJIRATicket(ticket)
+		jiraIssue, err := jiraHandler.GetIssue(ctx, ticket)
 		if err != nil {
 			return nil, err
 		}
@@ -835,7 +857,6 @@ func getHostRequestOptions(ctx context.Context, usr *user.DBUser, spawnHostInput
 		HomeVolumeSize:       utility.FromIntPtr(spawnHostInput.HomeVolumeSize),
 		HomeVolumeID:         utility.FromStringPtr(spawnHostInput.VolumeID),
 		Expiration:           spawnHostInput.Expiration,
-		UseOAuth:             utility.FromBoolPtr(spawnHostInput.UseOAuth),
 	}
 	if spawnHostInput.SleepSchedule != nil {
 		options.SleepScheduleOptions = host.SleepScheduleOptions{
@@ -873,21 +894,38 @@ func getHostRequestOptions(ctx context.Context, usr *user.DBUser, spawnHostInput
 	}
 
 	// Only allow debug spawn host if the host is being spawned by a task.
-	if utility.FromBoolPtr(spawnHostInput.IsDebug) && !utility.FromBoolPtr(spawnHostInput.SpawnHostsStartedByTask) {
+	if utility.FromBoolPtr(spawnHostInput.IsDebug) && t == nil {
 		return nil, InputValidationError.Send(ctx, "Debug spawn hosts can only be spawned by a task.")
 	}
 	options.IsDebug = utility.FromBoolPtr(spawnHostInput.IsDebug)
 
+	if utility.FromStringPtr(spawnHostInput.SetupStepNumber) != "" {
+		if !options.IsDebug {
+			return nil, InputValidationError.Send(ctx, "setupStepNumber can only be set when isDebug is true.")
+		}
+		options.SetupStepNumber = *spawnHostInput.SetupStepNumber
+	}
+
 	return options, nil
 }
 
-func getProjectMetadata(ctx context.Context, projectId *string, patchId *string) (*restModel.APIProjectRef, error) {
-	projectRef, err := model.FindMergedProjectRef(ctx, *projectId, *patchId, false)
+func getAPIProjectRef(ctx context.Context, projectId *string) (*restModel.APIProjectRef, error) {
+	// If project ID is the only field requested we can return it without a database call.
+	if graphql.HasOperationContext(ctx) {
+		requestedFields := graphql.CollectAllFields(ctx)
+		if len(requestedFields) == 1 && requestedFields[0] == "id" {
+			return &restModel.APIProjectRef{
+				Id: projectId,
+			}, nil
+		}
+	}
+
+	projectRef, err := loaders.GetProject(ctx, utility.FromStringPtr(projectId))
 	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding merged project ref for project '%s': %s", utility.FromStringPtr(projectId), err.Error()))
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding merged project ref for project '%s': %s", utility.FromStringPtr(projectId), err.Error()), err)
 	}
 	if projectRef == nil {
-		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("merged project ref for project '%s' not found", utility.FromStringPtr(projectId)))
+		return nil, nil
 	}
 	apiProjectRef := restModel.APIProjectRef{}
 	if err = apiProjectRef.BuildFromService(ctx, *projectRef); err != nil {
@@ -986,6 +1024,10 @@ func convertTestSortOptions(ctx context.Context, dbTask *task.Task, opts []*Test
 }
 
 func getBaseTaskTestResultsOptions(ctx context.Context, dbTask *task.Task) ([]task.Task, error) {
+	if dbTask == nil {
+		return nil, nil
+	}
+
 	var (
 		baseTask *task.Task
 		tasks    []task.Task
@@ -1073,6 +1115,16 @@ func userHasHostPermission(ctx context.Context, u *user.DBUser, distroId string,
 		RequiredLevel: requiredLevel,
 	}
 	return u.Username() == startedBy || u.HasPermission(ctx, opts)
+}
+
+func userHasVolumePermission(ctx context.Context, u *user.DBUser, volumeId string, createdBy string) bool {
+	opts := gimlet.PermissionOpts{
+		Resource:      evergreen.SuperUserPermissionsID,
+		ResourceType:  evergreen.SuperUserResourceType,
+		Permission:    evergreen.PermissionAdminSettings,
+		RequiredLevel: evergreen.AdminSettingsEdit.Value,
+	}
+	return u.Username() == createdBy || u.HasPermission(ctx, opts)
 }
 
 func userHasProjectSettingsPermission(ctx context.Context, u *user.DBUser, projectId string, requiredLevel int) bool {
@@ -1389,4 +1441,244 @@ func setSingleTaskPriority(ctx context.Context, url string, taskID string, prior
 	}
 	apiTask, err := getAPITaskFromTask(ctx, url, *t)
 	return apiTask, err
+}
+
+// buildOptionsFromParentArgs builds patch query options from the parent resolver's args
+func buildOptionsFromParentArgs(ctx context.Context, fc *graphql.FieldContext) (patch.ProjectOrUserPatchesOptions, error) {
+	patchesInput, ok := fc.Parent.Args["patchesInput"].(PatchesInput)
+	if !ok {
+		return patch.ProjectOrUserPatchesOptions{}, InternalServerError.Send(ctx, "failed to get patchesInput from parent args")
+	}
+
+	opts := patch.ProjectOrUserPatchesOptions{
+		PatchName:     patchesInput.PatchName,
+		Statuses:      patchesInput.Statuses,
+		Page:          patchesInput.Page,
+		Limit:         patchesInput.Limit,
+		IncludeHidden: patchesInput.IncludeHidden,
+		Requesters:    patchesInput.Requesters,
+		CountLimit:    utility.FromIntPtr(patchesInput.CountLimit),
+	}
+
+	// Handle merge queue filter
+	if utility.FromBoolPtr(patchesInput.OnlyMergeQueue) {
+		opts.Requesters = []string{evergreen.GithubMergeRequester}
+	}
+
+	// Get the parent object to determine if this is a project or user query.
+	// The parent.Parent should be a Project, User, or UserLite resolver.
+	if fc.Parent.Parent != nil {
+		switch grandparent := fc.Parent.Parent.Result.(type) {
+		case *restModel.APIProjectRef:
+			opts.Project = grandparent.Id
+		case *restModel.APIDBUser:
+			opts.Author = grandparent.UserID
+		case *user.DBUser:
+			opts.Author = utility.ToStringPtr(grandparent.Id)
+		}
+	}
+
+	return opts, nil
+}
+
+// apiParsleyFiltersToService converts a list of APIParsleyFilters into the
+// service-layer parsley.Filter type used by the GraphQL ParsleyFilter type.
+func apiParsleyFiltersToService(filters []restModel.APIParsleyFilter) []*parsley.Filter {
+	res := make([]*parsley.Filter, 0, len(filters))
+	for _, f := range filters {
+		serviceFilter := f.ToService()
+		res = append(res, &serviceFilter)
+	}
+	return res
+}
+
+// getPrevTask finds a mainline task's previous run that matches the given statuses.
+// Note that PreviousCompletedTask defaults to completed statuses if the array is empty.
+func getPrevTask(ctx context.Context, obj *restModel.APITask, statuses []string) (*restModel.APITask, error) {
+	tsk, err := obj.ToService()
+	if err != nil {
+		return nil, err
+	}
+
+	if tsk.IsPatchRequest() {
+		return nil, InputValidationError.Send(ctx, "cannot get previous task for patch")
+	}
+
+	prevTask, err := tsk.PreviousCompletedTask(ctx, utility.FromStringPtr(obj.ProjectId), statuses)
+	if err != nil {
+		return nil, err
+	}
+	if prevTask == nil {
+		return nil, nil
+	}
+
+	apiTask := &restModel.APITask{}
+	err = apiTask.BuildFromService(ctx, prevTask, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return apiTask, nil
+}
+
+// getNextTask finds a mainline task's next run that matches the given statuses.
+func getNextTask(ctx context.Context, obj *restModel.APITask, statuses []string) (*restModel.APITask, error) {
+	tsk, err := obj.ToService()
+	if err != nil {
+		return nil, err
+	}
+
+	if tsk.IsPatchRequest() {
+		return nil, InputValidationError.Send(ctx, "cannot get next task for patch")
+	}
+
+	nextTask, err := tsk.NextCompletedTask(ctx, utility.FromStringPtr(obj.ProjectId), statuses)
+	if err != nil {
+		return nil, err
+	}
+	if nextTask == nil {
+		return nil, nil
+	}
+
+	apiTask := &restModel.APITask{}
+	err = apiTask.BuildFromService(ctx, nextTask, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return apiTask, nil
+}
+
+// Traverse an operation's parents to see if a Waterfall field exists.
+// Return it if so, otherwise return nil without error
+func getWaterfallFromContext(ctx context.Context) (*Waterfall, bool) {
+	for fc := graphql.GetFieldContext(ctx); fc != nil; fc = fc.Parent {
+		if w, ok := fc.Result.(*Waterfall); ok {
+			return w, true
+		}
+	}
+	return nil, false
+}
+
+// setTestQuarantineState updates the quarantine state for testName on the
+// given task.
+func setTestQuarantineState(ctx context.Context, taskID, testName string, isManuallyQuarantined bool) (*restModel.APITest, error) {
+	t, err := task.FindOneId(ctx, taskID)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching task '%s': %s", taskID, err.Error()))
+	}
+	if t == nil {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("task '%s' not found", taskID))
+	}
+	if t.DisplayOnly {
+		return nil, InputValidationError.Send(ctx, "cannot modify test quarantine state on display tasks, select an execution task instead")
+	}
+	if err = data.SetTestQuarantined(ctx, t.Project, t.BuildVariant, t.DisplayName, testName, isManuallyQuarantined); err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("setting quarantine state to '%t' for test '%s' on task '%s' on build variant '%s' on project '%s': %s", isManuallyQuarantined, testName, taskID, t.BuildVariant, t.Project, err.Error()))
+	}
+	return buildQuarantineMutationResponse(ctx, t, testName, isManuallyQuarantined)
+}
+
+// setTaskQuarantineState quarantines (or unquarantines) every known test of
+// the given task in the test selection service. Display tasks are rejected.
+func setTaskQuarantineState(ctx context.Context, taskID string, isManuallyQuarantined bool) (*restModel.APITask, error) {
+	t, err := task.FindOneId(ctx, taskID)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching task '%s': %s", taskID, err.Error()))
+	}
+	if t == nil {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("task '%s' not found", taskID))
+	}
+	if t.DisplayOnly {
+		return nil, InputValidationError.Send(ctx, fmt.Sprintf("cannot modify quarantine state on display task '%s', select an execution task instead", taskID))
+	}
+	if err = data.SetTaskQuarantined(ctx, t.Project, t.BuildVariant, t.DisplayName, isManuallyQuarantined); err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("setting quarantine state to '%t' for task '%s' on build variant '%s' on project '%s': %s", isManuallyQuarantined, taskID, t.BuildVariant, t.Project, err.Error()))
+	}
+	usr := mustHaveUser(ctx)
+	grip.Info(ctx, message.Fields{
+		"message":                 "task quarantine state changed",
+		"user":                    usr.Username(),
+		"task_id":                 taskID,
+		"project":                 t.Project,
+		"build_variant":           t.BuildVariant,
+		"task_name":               t.DisplayName,
+		"is_manually_quarantined": isManuallyQuarantined,
+	})
+	apiTask := &restModel.APITask{}
+	if err = apiTask.BuildFromService(ctx, t, &restModel.APITaskArgs{}); err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("converting task '%s' to API model: %s", taskID, err.Error()))
+	}
+	return apiTask, nil
+}
+
+// setVariantQuarantineState quarantines (or unquarantines) every known test of every known task in a build variant.
+func setVariantQuarantineState(ctx context.Context, projectIdentifier, buildVariant string, isManuallyQuarantined bool) (*restModel.APIVariantQuarantineStatus, error) {
+	projectID, err := model.GetIdForProject(ctx, projectIdentifier)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching project '%s': %s", projectIdentifier, err.Error()))
+	}
+	if err = data.SetVariantQuarantined(ctx, projectID, buildVariant, isManuallyQuarantined); err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("setting quarantine state to '%t' for build variant '%s' on project '%s': %s", isManuallyQuarantined, buildVariant, projectIdentifier, err.Error()))
+	}
+	usr := mustHaveUser(ctx)
+	grip.Info(ctx, message.Fields{
+		"message":                 "build variant quarantine state changed",
+		"user":                    usr.Username(),
+		"project":                 projectID,
+		"project_identifier":      projectIdentifier,
+		"build_variant":           buildVariant,
+		"is_manually_quarantined": isManuallyQuarantined,
+	})
+	return buildVariantQuarantineStatusResponse(ctx, projectID, projectIdentifier, buildVariant)
+}
+
+func getVariantQuarantineStatusResponse(ctx context.Context, projectIdentifier, buildVariant string) (*restModel.APIVariantQuarantineStatus, error) {
+	projectID, err := model.GetIdForProject(ctx, projectIdentifier)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching project '%s': %s", projectIdentifier, err.Error()))
+	}
+	return buildVariantQuarantineStatusResponse(ctx, projectID, projectIdentifier, buildVariant)
+}
+
+func buildVariantQuarantineStatusResponse(ctx context.Context, projectID, projectIdentifier, buildVariant string) (*restModel.APIVariantQuarantineStatus, error) {
+	tasks, err := data.GetVariantQuarantineStatus(ctx, projectID, buildVariant)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting variant quarantine status for build variant '%s' on project '%s': %s", buildVariant, projectIdentifier, err.Error()))
+	}
+	apiStatus := &restModel.APIVariantQuarantineStatus{}
+	apiStatus.BuildFromService(restModel.VariantQuarantineStatusBuildArgs{
+		ProjectIdentifier: projectIdentifier,
+		BuildVariant:      buildVariant,
+		Tasks:             tasks,
+	})
+	return apiStatus, nil
+}
+
+// buildQuarantineMutationResponse returns the corresponding APITest for the
+// task with the quarantine state set to isManuallyQuarantined.
+func buildQuarantineMutationResponse(ctx context.Context, t *task.Task, testName string, isManuallyQuarantined bool) (*restModel.APITest, error) {
+	// The TestName filter field is interpreted as a regex; anchor and escape testName for an exact match.
+	taskResults, err := t.GetTestResults(ctx, evergreen.GetEnvironment(), &task.FilterOptions{TestName: "^" + regexp.QuoteMeta(testName) + "$"})
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting test results for task '%s': %s", t.Id, err.Error()))
+	}
+	if len(taskResults.Results) == 0 {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("test '%s' not found on task '%s'", testName, t.Id))
+	}
+	tr := taskResults.Results[0]
+	tr.IsManuallyQuarantined = isManuallyQuarantined
+	apiTest := &restModel.APITest{}
+	settings := evergreen.GetEnvironment().Settings()
+	apiTestArgs := &restModel.APITestArgs{
+		EvergreenBaseURL: settings.Api.URL,
+		ParsleyLogURL:    settings.Ui.ParsleyUrl,
+	}
+	if err = apiTest.BuildFromService(tr.TaskID, nil); err != nil {
+		return nil, InternalServerError.Send(ctx, err.Error())
+	}
+	if err = apiTest.BuildFromService(&tr, apiTestArgs); err != nil {
+		return nil, InternalServerError.Send(ctx, err.Error())
+	}
+	return apiTest, nil
 }

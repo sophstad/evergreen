@@ -41,6 +41,12 @@ type BucketsConfig struct {
 	LogBucketFailedTasks BucketConfig `bson:"log_bucket_failed_tasks" json:"log_bucket_failed_tasks" yaml:"log_bucket_failed_tasks"`
 	// LongRetentionProjects is the list of project IDs that require long retention.
 	LongRetentionProjects []string `bson:"long_retention_projects" json:"long_retention_projects" yaml:"long_retention_projects"`
+	// RetryFailedLogMoveLookbackDays is how many days back the hourly retry cron searches
+	// for failed tasks whose logs need moving. Defaults to 7 when unset or <= 0.
+	RetryFailedLogMoveLookbackDays int `bson:"retry_failed_log_move_lookback_days" json:"retry_failed_log_move_lookback_days" yaml:"retry_failed_log_move_lookback_days"`
+	// RetryFailedLogMoveMaxJobsPerRun caps how many move jobs the hourly retry cron enqueues
+	// per run to avoid S3 rate limiting. Newest failures are prioritized. Default 50 when unset or 0.
+	RetryFailedLogMoveMaxJobsPerRun int `bson:"retry_failed_log_move_max_jobs_per_run" json:"retry_failed_log_move_max_jobs_per_run" yaml:"retry_failed_log_move_max_jobs_per_run"`
 	// TestResultsBucket is the bucket information for test results.
 	TestResultsBucket BucketConfig `bson:"test_results_bucket" json:"test_results_bucket" yaml:"test_results_bucket"`
 	// Credentials for accessing the LogBucket.
@@ -48,12 +54,14 @@ type BucketsConfig struct {
 }
 
 var (
-	BucketsConfigLogBucketKey              = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucket")
-	BucketsConfigLogBucketLongRetentionKey = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucketLongRetention")
-	BucketsConfigLogBucketFailedTasksKey   = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucketFailedTasks")
-	BucketsConfigLongRetentionProjectsKey  = bsonutil.MustHaveTag(BucketsConfig{}, "LongRetentionProjects")
-	BucketsConfigTestResultsBucketKey      = bsonutil.MustHaveTag(BucketsConfig{}, "TestResultsBucket")
-	BucketsConfigCredentialsKey            = bsonutil.MustHaveTag(BucketsConfig{}, "Credentials")
+	BucketsConfigLogBucketKey                       = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucket")
+	BucketsConfigLogBucketLongRetentionKey          = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucketLongRetention")
+	BucketsConfigLogBucketFailedTasksKey            = bsonutil.MustHaveTag(BucketsConfig{}, "LogBucketFailedTasks")
+	BucketsConfigLongRetentionProjectsKey           = bsonutil.MustHaveTag(BucketsConfig{}, "LongRetentionProjects")
+	BucketsConfigRetryFailedLogMoveLookbackDaysKey  = bsonutil.MustHaveTag(BucketsConfig{}, "RetryFailedLogMoveLookbackDays")
+	BucketsConfigRetryFailedLogMoveMaxJobsPerRunKey = bsonutil.MustHaveTag(BucketsConfig{}, "RetryFailedLogMoveMaxJobsPerRun")
+	BucketsConfigTestResultsBucketKey               = bsonutil.MustHaveTag(BucketsConfig{}, "TestResultsBucket")
+	BucketsConfigCredentialsKey                     = bsonutil.MustHaveTag(BucketsConfig{}, "Credentials")
 )
 
 // BucketConfig represents the admin config for an individual bucket.
@@ -63,6 +71,7 @@ type BucketConfig struct {
 	DBName            string     `bson:"db_name" json:"db_name" yaml:"db_name"`
 	TestResultsPrefix string     `bson:"test_results_prefix" json:"test_results_prefix" yaml:"test_results_prefix"`
 	RoleARN           string     `bson:"role_arn" json:"role_arn" yaml:"role_arn"`
+	ExternalID        string     `bson:"external_id" json:"external_id" yaml:"external_id"`
 
 	// Lifecycle configuration fields for cost calculation
 	ExpirationDays          *int      `bson:"expiration_days,omitempty" json:"expiration_days,omitempty" yaml:"expiration_days,omitempty"`
@@ -102,12 +111,14 @@ func (c *BucketsConfig) Set(ctx context.Context) error {
 	return errors.Wrapf(
 		setConfigSection(ctx, c.SectionId(), bson.M{
 			"$set": bson.M{
-				BucketsConfigLogBucketKey:              c.LogBucket,
-				BucketsConfigLogBucketLongRetentionKey: c.LogBucketLongRetention,
-				BucketsConfigLogBucketFailedTasksKey:   c.LogBucketFailedTasks,
-				BucketsConfigLongRetentionProjectsKey:  c.LongRetentionProjects,
-				BucketsConfigTestResultsBucketKey:      c.TestResultsBucket,
-				BucketsConfigCredentialsKey:            c.Credentials,
+				BucketsConfigLogBucketKey:                       c.LogBucket,
+				BucketsConfigLogBucketLongRetentionKey:          c.LogBucketLongRetention,
+				BucketsConfigLogBucketFailedTasksKey:            c.LogBucketFailedTasks,
+				BucketsConfigLongRetentionProjectsKey:           c.LongRetentionProjects,
+				BucketsConfigRetryFailedLogMoveLookbackDaysKey:  c.RetryFailedLogMoveLookbackDays,
+				BucketsConfigRetryFailedLogMoveMaxJobsPerRunKey: c.RetryFailedLogMoveMaxJobsPerRun,
+				BucketsConfigTestResultsBucketKey:               c.TestResultsBucket,
+				BucketsConfigCredentialsKey:                     c.Credentials,
 			},
 		}),
 		"updating config section '%s'", c.SectionId(),
@@ -119,6 +130,12 @@ func (c *BucketsConfig) ValidateAndDefault() error {
 	catcher.Add(c.LogBucket.validate())
 	catcher.Add(c.LogBucketLongRetention.validate())
 	catcher.Add(c.LogBucketFailedTasks.validate())
+	if c.RetryFailedLogMoveLookbackDays < 0 {
+		catcher.Add(errors.New("retry_failed_log_move_lookback_days cannot be negative"))
+	}
+	if c.RetryFailedLogMoveMaxJobsPerRun < 0 {
+		catcher.Add(errors.New("retry_failed_log_move_max_jobs_per_run cannot be negative"))
+	}
 	return catcher.Resolve()
 }
 
@@ -129,4 +146,28 @@ func (c *BucketsConfig) GetLogBucket(projectID string) BucketConfig {
 		return c.LogBucketLongRetention
 	}
 	return c.LogBucket
+}
+
+// LogBucketExpirationDays returns the configured expiration days for the given
+// admin-managed log bucket name, and whether one was found. Log buckets store
+// lifecycle days on the admin config rather than s3_lifecycle_rules.
+func (c *BucketsConfig) LogBucketExpirationDays(bucketName string) (days int, found bool) {
+	if bucketName == "" {
+		return 0, false
+	}
+	switch bucketName {
+	case c.LogBucket.Name:
+		if c.LogBucket.ExpirationDays != nil {
+			return *c.LogBucket.ExpirationDays, true
+		}
+	case c.LogBucketLongRetention.Name:
+		if c.LogBucketLongRetention.ExpirationDays != nil {
+			return *c.LogBucketLongRetention.ExpirationDays, true
+		}
+	case c.LogBucketFailedTasks.Name:
+		if c.LogBucketFailedTasks.ExpirationDays != nil {
+			return *c.LogBucketFailedTasks.ExpirationDays, true
+		}
+	}
+	return 0, false
 }

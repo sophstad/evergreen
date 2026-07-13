@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/coreos/go-oidc"
@@ -25,6 +28,7 @@ import (
 	"github.com/evergreen-ci/utility"
 	"github.com/kanopy-platform/kanopy-oidc-lib/pkg/dex"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
@@ -36,6 +40,20 @@ var (
 		"claimed by another client",
 		"refresh token expired",
 	}
+	errInvalidOAuthToken = errors.New("invalid OAuth token")
+)
+
+const (
+	oauthCallbackPort     = "8888"
+	oauthLockWaitTimeout  = 2 * time.Minute
+	oauthLockPollInterval = 200 * time.Millisecond
+)
+
+type oauthFlow int
+
+const (
+	oauthFlowAuthCode oauthFlow = iota
+	oauthFlowDevice
 )
 
 // CreateSpawnHost will insert an intent host into the DB that will be spawned later by the runner
@@ -96,6 +114,36 @@ func (c *communicatorImpl) GetSpawnHost(ctx context.Context, hostId string) (*mo
 		return nil, errors.Wrap(err, "reading JSON response body")
 	}
 	return &spawnHostResp, nil
+}
+
+// GetProject fetches project settings by project ID from the REST API.
+func (c *communicatorImpl) GetProject(ctx context.Context, projectID string) (*model.APIProjectRef, error) {
+	info := requestInfo{
+		method: http.MethodGet,
+		path:   fmt.Sprintf("projects/%s?includeRepo=true", projectID),
+	}
+	resp, err := c.request(ctx, info, "")
+	if err != nil {
+		return nil, errors.Wrapf(err, "sending request to get project '%s'", projectID)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, util.RespError(resp, AuthError)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, util.RespError(resp, VPNError)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, util.RespErrorf(resp, "getting project '%s'", projectID)
+	}
+
+	projectResp := model.APIProjectRef{}
+	if err = utility.ReadJSON(resp.Body, &projectResp); err != nil {
+		return nil, errors.Wrap(err, "reading JSON response body")
+	}
+	return &projectResp, nil
 }
 
 // ModifySpawnHost will start a job that updates the specified user-spawned host
@@ -362,7 +410,7 @@ func (c *communicatorImpl) getUser(ctx context.Context, userID string) (*model.A
 
 	resp, err := c.request(ctx, info, nil)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error sending request to get user '%s'", userID)
+		return nil, errors.Wrapf(err, "sending request to get user '%s'", userID)
 	}
 	defer resp.Body.Close()
 
@@ -372,7 +420,7 @@ func (c *communicatorImpl) getUser(ctx context.Context, userID string) (*model.A
 
 	user := &model.APIDBUser{}
 	if err = utility.ReadJSON(resp.Body, user); err != nil {
-		return nil, errors.Wrap(err, "error reading JSON response body")
+		return nil, errors.Wrap(err, "reading JSON response body")
 	}
 
 	return user, nil
@@ -707,7 +755,7 @@ func (c *communicatorImpl) GetServiceFlags(ctx context.Context) (*model.APIServi
 
 	resp, err := c.request(ctx, info, nil)
 	if err != nil {
-		return nil, errors.Wrap(err, "error sending request to get service flags")
+		return nil, errors.Wrap(err, "sending request to get service flags")
 	}
 	defer resp.Body.Close()
 
@@ -717,7 +765,7 @@ func (c *communicatorImpl) GetServiceFlags(ctx context.Context) (*model.APIServi
 
 	flags := &model.APIServiceFlags{}
 	if err = utility.ReadJSON(resp.Body, flags); err != nil {
-		return nil, errors.Wrap(err, "error reading JSON response body")
+		return nil, errors.Wrap(err, "reading JSON response body")
 	}
 
 	return flags, nil
@@ -1217,15 +1265,15 @@ func (c *communicatorImpl) GetSubscriptions(ctx context.Context) ([]event.Subscr
 	return subs, nil
 }
 
-func (c *communicatorImpl) SendNotification(ctx context.Context, notificationType string, data any) error {
+func (c *communicatorImpl) SendSlackNotification(ctx context.Context, data *model.APISlack) error {
 	info := requestInfo{
 		method: http.MethodPost,
-		path:   "notifications/" + notificationType,
+		path:   "notifications/slack",
 	}
 
 	resp, err := c.request(ctx, info, data)
 	if err != nil {
-		return errors.Wrap(err, "sending request to send notification")
+		return errors.Wrap(err, "sending slack notification request")
 	}
 	defer resp.Body.Close()
 
@@ -1236,7 +1284,32 @@ func (c *communicatorImpl) SendNotification(ctx context.Context, notificationTyp
 		return util.RespError(resp, VPNError)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return util.RespError(resp, "sending notification")
+		return util.RespError(resp, "sending slack notification")
+	}
+
+	return nil
+}
+
+func (c *communicatorImpl) SendEmailNotification(ctx context.Context, data *model.APIEmail) error {
+	info := requestInfo{
+		method: http.MethodPost,
+		path:   "notifications/email",
+	}
+
+	resp, err := c.request(ctx, info, data)
+	if err != nil {
+		return errors.Wrap(err, "sending email notification request")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return util.RespError(resp, AuthError)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return util.RespError(resp, VPNError)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return util.RespError(resp, "sending email notification")
 	}
 
 	return nil
@@ -1364,15 +1437,12 @@ func (c *communicatorImpl) GetHostProcessOutput(ctx context.Context, hostProcess
 	return result, nil
 }
 
-func (c *communicatorImpl) GetRecentVersionsForProject(ctx context.Context, projectID, requester string, startAtOrderNum, limit int) ([]model.APIVersion, error) {
+func (c *communicatorImpl) GetRecentVersionsForProject(ctx context.Context, projectID string, requesters []string, startAtOrderNum, limit int) ([]model.APIVersion, error) {
 	info := requestInfo{
 		method: http.MethodGet,
 		path:   fmt.Sprintf("projects/%s/versions", projectID),
 	}
 	queryParams := []string{}
-	if requester != "" {
-		queryParams = append(queryParams, fmt.Sprintf("requester=%s", requester))
-	}
 	if startAtOrderNum > 0 {
 		queryParams = append(queryParams, fmt.Sprintf("start=%d", startAtOrderNum))
 	}
@@ -1383,7 +1453,10 @@ func (c *communicatorImpl) GetRecentVersionsForProject(ctx context.Context, proj
 		info.path = info.path + "?" + strings.Join(queryParams, "&")
 	}
 
-	resp, err := c.request(ctx, info, nil)
+	body := struct {
+		Requesters []string `json:"requesters"`
+	}{Requesters: requesters}
+	resp, err := c.request(ctx, info, body)
 	if err != nil {
 		return nil, errors.Wrapf(err, "sending request to get versions for project '%s'", projectID)
 	}
@@ -1656,22 +1729,25 @@ func (c *communicatorImpl) GetManifestForVersion(ctx context.Context, versionID 
 		path:   fmt.Sprintf("versions/%s/manifest", versionID),
 	}
 	resp, err := c.retryRequest(ctx, info, nil)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	// Manifests are optional for versions that don't use modules, so the route
+	// returns 404 when the version has no manifest (or doesn't exist). retryRequest
+	// surfaces non-2xx responses as an error, so the 404 must be checked before err
+	// to avoid treating a missing manifest as a failure.
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "sending request to get version manifest")
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, util.RespError(resp, AuthError)
 	}
 	if resp.StatusCode == http.StatusForbidden {
 		return nil, util.RespError(resp, VPNError)
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		// Manifests are optional for versions that don't use modules, so the
-		// route can return 404 if the version does not exist or if the version
-		// has no manifest.
-		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, util.RespError(resp, "getting version manifest")
@@ -1888,48 +1964,56 @@ func GetOAuthToken(ctx context.Context, doNotUseBrowser bool, opts ...dex.Client
 	ctx = oidc.ClientContext(ctx, httpClient)
 
 	loader := &dex.FileTokenLoader{}
-
-	opts = append(opts,
+	baseOpts := append(opts,
 		dex.WithContext(ctx),
 		dex.WithRefresh(),
 		dex.WithFallbackToStdOut(true),
-		dex.WithFlow("device"),
-		dex.WithNoBrowser(doNotUseBrowser),
+		dex.WithTokenExpiryBuffer(time.Minute),
 	)
+
+	flow := oauthFlowAuthCode
+	if doNotUseBrowser {
+		flow = oauthFlowDevice
+	} else if !callbackPortAvailable(oauthCallbackPort) {
+		grip.Notice(ctx, message.Fields{
+			"message": "OAuth callback port unavailable; using device code flow",
+			"port":    oauthCallbackPort,
+		})
+		flow = oauthFlowDevice
+	}
 
 	// The Dex client logs using logrus. The client doesn't
 	// have any way to turn off debug logs within it's API.
 	// We set the output to io.Discard to suppress debug logs.
 	logrus.SetOutput(io.Discard)
 
-	client, err := dex.NewClient(append(opts, dex.WithTokenLoader(loader))...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer client.Close()
-
-	// We delete the lock file to ensure that if the previous
-	// token acquisition attempt was interrupted, we can still
-	// acquire a new token.
-	tokenLockFilePath := client.TokenFilePath() + ".lock"
-	if delErr := os.RemoveAll(tokenLockFilePath); delErr != nil {
-		grip.Warning(errors.Wrapf(delErr, "removing OAuth token lock file at '%s'", tokenLockFilePath))
+	token, tokenPath, err := requestValidOAuthToken(ctx, baseOpts, loader, flow)
+	if err == nil {
+		return token, tokenPath, nil
 	}
 
-	// This attempt tries to get a token or refreshes using the refresh token.
-	token, err := client.Token()
-	// We have to explicitly check the expiry is valid because the OAuth
-	// library doesn't consider a token with a zero time expiry as expired.
-	if err == nil && token.Expiry.After(time.Now()) {
-		return token, client.TokenFilePath(), nil
+	if err != nil && flow == oauthFlowAuthCode && isPortBindError(err) {
+		grip.Notice(ctx, "OAuth auth-code flow failed due to a port conflict; falling back to device code flow")
+		flow = oauthFlowDevice
+		token, tokenPath, err = requestValidOAuthToken(ctx, baseOpts, loader, flow)
+		if err == nil {
+			return token, tokenPath, nil
+		}
+	}
+
+	if err != nil && isOAuthLockClaimedError(err) {
+		token, tokenPath, err = requestValidOAuthToken(ctx, baseOpts, loader, flow)
+		if err == nil {
+			return token, tokenPath, nil
+		}
 	}
 
 	shouldRetry := false
-	if token != nil && token.Expiry.Before(time.Now()) {
-		// Retry if the token is expired.
+	if errors.Is(err, errInvalidOAuthToken) {
+		shouldRetry = false
+	} else if token != nil && token.Expiry.Before(time.Now()) {
 		shouldRetry = true
 	} else if err != nil {
-		// Otherwise, check the error to see if we should retry.
 		clientErrString := strings.ToLower(err.Error())
 		for _, retryIfFound := range oauthRetryErrors {
 			if strings.Contains(clientErrString, retryIfFound) {
@@ -1940,18 +2024,164 @@ func GetOAuthToken(ctx context.Context, doNotUseBrowser bool, opts ...dex.Client
 	}
 
 	if !shouldRetry {
-		return nil, client.TokenFilePath(), err
+		return nil, tokenPath, err
 	}
 
-	// This client prevents the Dex client from using the refresh token.
-	client, err = dex.NewClient(append(opts, dex.WithTokenLoader(&tokenLoaderWithoutRefresh{loader}))...)
+	return requestValidOAuthToken(ctx, baseOpts, &tokenLoaderWithoutRefresh{loader}, flow)
+}
+
+// requestValidOAuthToken removes an invalid cached token and retries once so users can recover from a poisoned token file.
+// A poisoned token file can be caused by a fradulent zero time. The OIDC/OAuth
+// libraries treat a zero time as a valid token, which is never the case for
+// our tokens.
+// The zero time can be caused by another library running the oauth flow themselves (evergreen.py)
+// or by the dex library writing the token file with incorrect state (their
+// Close function always writes the token file, even if it's invalid).
+func requestValidOAuthToken(ctx context.Context, baseOpts []dex.ClientOption, loader dex.TokenLoader, flow oauthFlow) (*oauth2.Token, string, error) {
+	token, tokenPath, err := requestOAuthToken(ctx, baseOpts, loader, flow)
 	if err != nil {
-		return nil, client.TokenFilePath(), err
+		return token, tokenPath, err
+	}
+	if err := validateOAuthToken(token); err == nil {
+		return token, tokenPath, nil
+	}
+	if err := removeOAuthTokenFile(tokenPath); err != nil {
+		return nil, tokenPath, err
+	}
+
+	token, tokenPath, err = requestOAuthToken(ctx, baseOpts, loader, flow)
+	if err != nil {
+		return token, tokenPath, err
+	}
+	if err := validateOAuthToken(token); err != nil {
+		if removeErr := removeOAuthTokenFile(tokenPath); removeErr != nil {
+			return nil, tokenPath, removeErr
+		}
+		return token, tokenPath, err
+	}
+	return token, tokenPath, nil
+}
+
+func validateOAuthToken(token *oauth2.Token) error {
+	switch {
+	case token == nil:
+		return errors.Wrap(errInvalidOAuthToken, "OAuth token is missing")
+	case token.AccessToken == "":
+		return errors.Wrap(errInvalidOAuthToken, "OAuth token is missing an access token")
+	case token.Expiry.IsZero():
+		return errors.Wrap(errInvalidOAuthToken, "OAuth token is missing an expiry")
+	case !token.Expiry.After(time.Now()):
+		return errors.Wrapf(errInvalidOAuthToken, "OAuth token expired at %s", token.Expiry)
+	default:
+		return nil
+	}
+}
+
+func requestOAuthToken(ctx context.Context, baseOpts []dex.ClientOption, loader dex.TokenLoader, flow oauthFlow) (*oauth2.Token, string, error) {
+	opts := append(append([]dex.ClientOption{}, baseOpts...), oauthFlowOptions(flow)...)
+	opts = append(opts, dex.WithTokenLoader(loader))
+
+	client, err := dex.NewClient(opts...)
+	if err != nil {
+		return nil, "", err
 	}
 	defer client.Close()
 
-	token, err = client.Token()
-	return token, client.TokenFilePath(), err
+	tokenPath := client.TokenFilePath()
+	if err := removeInvalidOAuthTokenCacheIfUnlocked(ctx, tokenPath, oauthLockWaitTimeout); err != nil {
+		return nil, tokenPath, err
+	}
+
+	token, err := client.Token()
+	return token, tokenPath, err
+}
+
+func oauthFlowOptions(flow oauthFlow) []dex.ClientOption {
+	if flow == oauthFlowDevice {
+		return []dex.ClientOption{dex.WithFlow("device"), dex.WithNoBrowser(true)}
+	}
+	return []dex.ClientOption{dex.WithFlow("auth-code")}
+}
+
+func callbackPortAvailable(port string) bool {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		return false
+	}
+	return listener.Close() == nil
+}
+
+func isPortBindError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errString := strings.ToLower(err.Error())
+	return strings.Contains(errString, "address already in use") ||
+		strings.Contains(errString, "bind:") ||
+		strings.Contains(errString, "listen tcp")
+}
+
+func isOAuthLockClaimedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, dex.ErrLockClaimed) || strings.Contains(strings.ToLower(err.Error()), "lock claimed by process")
+}
+
+func removeInvalidOAuthTokenCacheIfUnlocked(ctx context.Context, tokenFilePath string, timeout time.Duration) error {
+	if tokenFilePath == "" {
+		return nil
+	}
+	lockPath := tokenFilePath + ".lock"
+	if err := waitForOAuthLockRelease(ctx, lockPath, timeout); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(tokenFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "reading OAuth token file at '%s'", tokenFilePath)
+	}
+	token := &oauth2.Token{}
+	if err := json.Unmarshal(data, token); err == nil && !token.Expiry.IsZero() {
+		return nil
+	}
+	return removeOAuthTokenFile(tokenFilePath)
+}
+
+func removeOAuthTokenFile(tokenFilePath string) error {
+	if tokenFilePath == "" {
+		return nil
+	}
+	if err := os.Remove(tokenFilePath); err != nil && !os.IsNotExist(err) {
+		return errors.Wrapf(err, "removing invalid OAuth token file at '%s'", tokenFilePath)
+	}
+	return nil
+}
+
+func waitForOAuthLockRelease(ctx context.Context, lockFilePath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := os.Stat(lockFilePath); os.IsNotExist(err) {
+			return nil
+		}
+		if err := removeStaleOAuthLockFile(lockFilePath); err != nil {
+			return err
+		}
+		if _, err := os.Stat(lockFilePath); os.IsNotExist(err) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(oauthLockPollInterval):
+		}
+	}
+	return errors.Errorf("timed out after %s waiting for OAuth token lock at '%s'", timeout, lockFilePath)
 }
 
 type tokenLoaderWithoutRefresh struct {
@@ -1966,4 +2196,34 @@ func (t *tokenLoaderWithoutRefresh) LoadToken(path string) (*oauth2.Token, error
 	// Clear the refresh token to prevent the Dex client from trying to use it.
 	token.RefreshToken = ""
 	return token, nil
+}
+
+// removeStaleOAuthLockFile removes the lock file only if the owning process
+// is no longer alive. This prevents concurrent CLI processes from racing to
+// refresh the same token.
+func removeStaleOAuthLockFile(lockFilePath string) error {
+	data, err := os.ReadFile(lockFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.Wrapf(err, "reading lock file '%s'", lockFilePath)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return os.Remove(lockFilePath)
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return os.Remove(lockFilePath)
+	}
+
+	// Signal 0 checks if process is alive without sending a real signal.
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return os.Remove(lockFilePath)
+	}
+
+	return nil
 }

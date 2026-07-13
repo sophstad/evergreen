@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/evergreen-ci/evergreen"
@@ -54,10 +55,10 @@ func (as *APIServer) getAuthor(ctx context.Context, data patchData, dbUser *user
 	if data.GithubAuthor != "" {
 		specifiedUser, err := user.FindByGithubName(ctx, data.GithubAuthor)
 		if err != nil {
-			return "", http.StatusInternalServerError, errors.Wrapf(err, "error looking for github author '%s'", data.GithubAuthor)
+			return "", http.StatusInternalServerError, errors.Wrapf(err, "looking for github author '%s'", data.GithubAuthor)
 		}
 		if specifiedUser != nil {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":               "overriding patch author as specified by the submitter",
 				"submitter":             dbUser.Id,
 				"new_author":            specifiedUser.Id,
@@ -66,7 +67,7 @@ func (as *APIServer) getAuthor(ctx context.Context, data patchData, dbUser *user
 			})
 			author = specifiedUser.Id
 		}
-		grip.DebugWhen(specifiedUser == nil, message.Fields{
+		grip.DebugWhen(ctx, specifiedUser == nil, message.Fields{
 			"message":         "github user not found",
 			"github_username": data.GithubAuthor,
 			"patch_id":        patchID,
@@ -74,10 +75,10 @@ func (as *APIServer) getAuthor(ctx context.Context, data patchData, dbUser *user
 	} else if data.PatchAuthor != "" {
 		specifiedUser, err := user.FindOneById(ctx, data.PatchAuthor)
 		if err != nil {
-			return "", http.StatusInternalServerError, errors.Wrapf(err, "error looking for author '%s'", data.PatchAuthor)
+			return "", http.StatusInternalServerError, errors.Wrapf(err, "looking for author '%s'", data.PatchAuthor)
 		}
 		if specifiedUser != nil {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":    "overriding patch author as specified by the submitter",
 				"submitter":  dbUser.Id,
 				"new_author": data.PatchAuthor,
@@ -85,7 +86,7 @@ func (as *APIServer) getAuthor(ctx context.Context, data patchData, dbUser *user
 			})
 			author = specifiedUser.Id
 		}
-		grip.DebugWhen(specifiedUser == nil, message.Fields{
+		grip.DebugWhen(ctx, specifiedUser == nil, message.Fields{
 			"message":  "patch user not found",
 			"username": data.PatchAuthor,
 			"patch_id": patchID,
@@ -135,11 +136,11 @@ func (as *APIServer) submitPatch(w http.ResponseWriter, r *http.Request) {
 
 	pref, err := model.FindMergedProjectRef(r.Context(), data.Project, "", true)
 	if err != nil {
-		as.LoggedError(w, r, http.StatusBadRequest, errors.Wrapf(err, "project '%s' is not specified", data.Project))
+		as.LoggedError(w, r, http.StatusBadRequest, errors.Wrapf(err, "finding project reference '%s'", data.Project))
 		return
 	}
 	if pref == nil {
-		gimlet.WriteJSONResponse(w, http.StatusNotFound,
+		gimlet.WriteJSONResponse(r.Context(), w, http.StatusNotFound,
 			gimlet.ErrorResponse{
 				StatusCode: http.StatusNotFound,
 				Message:    fmt.Sprintf("project '%s' is not found", data.Project),
@@ -167,6 +168,13 @@ func (as *APIServer) submitPatch(w http.ResponseWriter, r *http.Request) {
 	if pref.IsPatchingDisabled() || !pref.Enabled {
 		as.LoggedError(w, r, http.StatusBadRequest, errors.New("patching is disabled"))
 		return
+	}
+
+	if data.Path != "" {
+		if err := validatePatchConfigPath(data.Path); err != nil {
+			as.LoggedError(w, r, http.StatusBadRequest, err)
+			return
+		}
 	}
 
 	patchID := mgobson.NewObjectId()
@@ -216,7 +224,7 @@ func (as *APIServer) submitPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(r.Context(), message.Fields{
 		"operation":  "patch creation",
 		"message":    "creating patch",
 		"from":       "CLI",
@@ -234,7 +242,7 @@ func (as *APIServer) submitPatch(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), units.BuildTasksAndVariantsError) {
 			as.LoggedError(w, r, http.StatusBadRequest, err)
 		} else {
-			as.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "error processing patch"))
+			as.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "processing patch"))
 		}
 		return
 	}
@@ -249,7 +257,7 @@ func (as *APIServer) submitPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gimlet.WriteJSONResponse(w, http.StatusCreated, PatchAPIResponse{Patch: patchDoc})
+	gimlet.WriteJSONResponse(r.Context(), w, http.StatusCreated, PatchAPIResponse{Patch: patchDoc})
 }
 
 // Get the patch with the specified request it
@@ -274,7 +282,7 @@ func getPatchFromRequest(r *http.Request) (*patch.Patch, error) {
 func (as *APIServer) updatePatchModule(w http.ResponseWriter, r *http.Request) {
 	p, err := getPatchFromRequest(r)
 	if err != nil {
-		gimlet.WriteJSONError(w, err.Error())
+		gimlet.WriteJSONError(r.Context(), w, err.Error())
 		return
 	}
 
@@ -308,7 +316,7 @@ func (as *APIServer) updatePatchModule(w http.ResponseWriter, r *http.Request) {
 	patchFileId := mgobson.NewObjectId().Hex()
 	err = db.WriteGridFile(r.Context(), patch.GridFSPrefix, patchFileId, strings.NewReader(patchContent))
 	if err != nil {
-		as.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "failed to write patch file to db"))
+		as.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "writing patch file to db"))
 		return
 	}
 
@@ -326,7 +334,7 @@ func (as *APIServer) updatePatchModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gimlet.WriteJSON(w, "Patch module updated")
+	gimlet.WriteJSON(r.Context(), w, "Patch module updated")
 }
 
 // listPatches returns a user's "n" most recent patches.
@@ -334,7 +342,7 @@ func (as *APIServer) listPatches(w http.ResponseWriter, r *http.Request) {
 	dbUser := MustHaveUser(r)
 	n, err := util.GetIntValue(r, "n", 0)
 	if err != nil {
-		as.LoggedError(w, r, http.StatusBadRequest, errors.Wrap(err, "cannot read value n"))
+		as.LoggedError(w, r, http.StatusBadRequest, errors.Wrap(err, "reading value n"))
 		return
 	}
 	filterCommitQueue := r.FormValue("filter_commit_queue") == "true"
@@ -345,10 +353,10 @@ func (as *APIServer) listPatches(w http.ResponseWriter, r *http.Request) {
 	patches, err := patch.Find(r.Context(), query)
 	if err != nil {
 		as.LoggedError(w, r, http.StatusInternalServerError,
-			errors.Wrapf(err, "error finding patches for user %s", dbUser.Id))
+			errors.Wrapf(err, "finding patches for user '%s'", dbUser.Id))
 		return
 	}
-	gimlet.WriteJSON(w, patches)
+	gimlet.WriteJSON(r.Context(), w, patches)
 }
 
 func (as *APIServer) existingPatchRequest(w http.ResponseWriter, r *http.Request) {
@@ -390,7 +398,7 @@ func (as *APIServer) existingPatchRequest(w http.ResponseWriter, r *http.Request
 			as.LoggedError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		gimlet.WriteJSON(w, "patch updated")
+		gimlet.WriteJSON(r.Context(), w, "patch updated")
 	case "finalize":
 		if p.Activated {
 			http.Error(w, "patch is already finalized", http.StatusBadRequest)
@@ -418,12 +426,12 @@ func (as *APIServer) existingPatchRequest(w http.ResponseWriter, r *http.Request
 			p.PatchedProjectConfig = patchConfig.PatchedProjectConfig
 		}
 
-		_, err = model.FinalizePatch(ctx, p, evergreen.PatchVersionRequester)
+		_, err = model.FinalizePatch(ctx, p, evergreen.PatchVersionRequester, nil)
 		if err != nil {
 			as.LoggedError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"operation":     "patch creation",
 			"message":       "finalized patch",
 			"from":          "CLI",
@@ -434,14 +442,14 @@ func (as *APIServer) existingPatchRequest(w http.ResponseWriter, r *http.Request
 			"alias":         p.Alias,
 		})
 
-		gimlet.WriteJSON(w, "patch finalized")
+		gimlet.WriteJSON(r.Context(), w, "patch finalized")
 	case "cancel":
 		err = model.CancelPatch(ctx, p, task.AbortInfo{User: dbUser.Id})
 		if err != nil {
 			as.LoggedError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		gimlet.WriteJSON(w, "patch deleted")
+		gimlet.WriteJSON(r.Context(), w, "patch deleted")
 	default:
 		http.Error(w, fmt.Sprintf("Unrecognized action: %v", action), http.StatusBadRequest)
 	}
@@ -453,7 +461,7 @@ func (as *APIServer) summarizePatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	gimlet.WriteJSON(w, PatchAPIResponse{Patch: p})
+	gimlet.WriteJSON(r.Context(), w, PatchAPIResponse{Patch: p})
 }
 
 func (as *APIServer) listPatchModules(w http.ResponseWriter, r *http.Request) {
@@ -465,7 +473,7 @@ func (as *APIServer) listPatchModules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectName := project.Identifier // this might be the ID, so use identifier if we can
-	identifier, _ := model.GetIdentifierForProject(r.Context(), project.Identifier)
+	identifier, _ := model.GetIdentifierForProjectSecondary(r.Context(), project.Identifier)
 	if identifier != "" {
 		projectName = identifier
 	}
@@ -495,7 +503,7 @@ func (as *APIServer) listPatchModules(w http.ResponseWriter, r *http.Request) {
 	for m := range mods {
 		data.Modules = append(data.Modules, m)
 	}
-	gimlet.WriteJSON(w, &data)
+	gimlet.WriteJSON(r.Context(), w, &data)
 }
 
 func (as *APIServer) deletePatchModule(w http.ResponseWriter, r *http.Request) {
@@ -506,14 +514,14 @@ func (as *APIServer) deletePatchModule(w http.ResponseWriter, r *http.Request) {
 	}
 	moduleName := r.FormValue("module")
 	if moduleName == "" {
-		gimlet.WriteJSONError(w, "You must specify a module to delete")
+		gimlet.WriteJSONError(r.Context(), w, "You must specify a module to delete")
 		return
 	}
 
 	// don't mess with already finalized requests
 	if p.Activated {
 		response := "Can't delete module - path already finalized"
-		gimlet.WriteJSONError(w, response)
+		gimlet.WriteJSONError(r.Context(), w, response)
 		return
 	}
 
@@ -523,5 +531,16 @@ func (as *APIServer) deletePatchModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gimlet.WriteJSON(w, PatchAPIResponse{Message: "module removed from patch."})
+	gimlet.WriteJSON(r.Context(), w, PatchAPIResponse{Message: "module removed from patch."})
+}
+
+// validatePatchConfigPath rejects config paths that contain shell
+// metacharacters, directory traversal, or are absolute.
+func validatePatchConfigPath(path string) error {
+	catcher := grip.NewBasicCatcher()
+	catcher.NewWhen(filepath.IsAbs(path), "patch config path must be relative")
+	catcher.NewWhen(strings.Contains(path, ".."), "patch config path must not contain directory traversal")
+	const shellMetachars = "`$();&|!{}<>\\\n\r"
+	catcher.NewWhen(strings.ContainsAny(path, shellMetachars), "patch config path contains invalid characters")
+	return catcher.Resolve()
 }

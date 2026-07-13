@@ -22,12 +22,6 @@ type Query {
 
   # hosts
   host(hostId: String! @requireHostAccess(access: VIEW)): Host
-  hostEvents(
-    hostId: String!  @requireHostAccess(access: VIEW)
-    hostTag: String = ""
-    limit: Int = 0
-    page: Int = 0
-  ): HostEvents! @deprecated(reason: "Use host.events instead.")
   hosts(
     hostId: String = ""
     distroId: String = ""
@@ -40,9 +34,6 @@ type Query {
     limit: Int = 10
   ): HostsResponse!
   taskQueueDistros: [TaskQueueDistro!]!
-
-  # containers
-  pod(podId: String!): Pod!
   
   # patch
   patch(patchId: String! @requireProjectAccess(permission: TASKS, access: VIEW)): Patch!
@@ -68,9 +59,6 @@ type Query {
   myHosts: [Host!]!
   myVolumes: [Volume!]!
 
-  # logkeeper
-  logkeeperBuildMetadata(buildId: String!): LogkeeperBuild!
-
   # task
   task(taskId: String! @requireProjectAccess(permission: TASKS, access: VIEW), execution: Int): Task
   taskAllExecutions(taskId: String! @requireProjectAccess(permission: TASKS, access: VIEW)): [Task!]!
@@ -80,9 +68,16 @@ type Query {
     filters: [TestFilter!]!
   ): [TaskTestResultSample!]
 
+  # test selection
+  variantQuarantineStatus(
+    projectIdentifier: String! @requireProjectAccess(permission: TASKS, access: VIEW)
+    buildVariant: String!
+  ): VariantQuarantineStatus!
+
   # user
   myPublicKeys: [PublicKey!]!
-  user(userId: String): User! 
+  user(userId: String): User!
+  userLite(userId: String): UserLite!
   userConfig: UserConfig
 
   # mainline commits
@@ -95,6 +90,7 @@ type Query {
   
   # task history
   taskHistory(options: TaskHistoryOpts!): TaskHistory!
+  taskHistoryByCreateTime(options: TaskHistoryOpts!): TaskHistoryByCreateTime!
 
   # version
   hasVersion(patchId: String!): Boolean!

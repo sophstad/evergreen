@@ -44,6 +44,13 @@ type Entry struct {
 //	Value = link for the file
 type Params map[string]string
 
+// AssociatedLink represents a link related to a file besides the main artifact link.
+type AssociatedLink struct {
+	Name            string `json:"name" bson:"name"`
+	Link            string `json:"link" bson:"link"`
+	DoNotEncodeLink bool   `json:"do_not_encode_link,omitempty" bson:"do_not_encode_link,omitempty"`
+}
+
 // File is a pairing of name and link for easy storage/display
 type File struct {
 	// Name is a human-readable name for the file being linked, e.g. "Coverage Report"
@@ -60,6 +67,8 @@ type File struct {
 	AWSSecret string `json:"aws_secret,omitempty" bson:"aws_secret,omitempty"`
 	// AWSRoleARN is the role ARN with which the file was uploaded to S3.
 	AWSRoleARN string `json:"aws_role_arn,omitempty" bson:"aws_role_arn,omitempty"`
+	// AWSAccountID is the resolved account ID for key+secret uploads (empty when AWSRoleARN is set).
+	AWSAccountID string `json:"aws_account_id,omitempty" bson:"aws_account_id,omitempty"`
 	// ExternalID is the external ID with which the file was uploaded to S3.
 	ExternalID string `json:"external_id,omitempty" bson:"external_id,omitempty"`
 	// Bucket is the aws bucket in which the file is stored.
@@ -68,6 +77,16 @@ type File struct {
 	FileKey string `json:"filekey,omitempty" bson:"filekey,omitempty"`
 	// ContentType is the content type of the file.
 	ContentType string `json:"content_type" bson:"content_type"`
+	// FileSize is the size of the file in bytes.
+	FileSize int64 `json:"file_size,omitempty" bson:"file_size,omitempty"`
+	// PutRequests is the number of S3 PUT requests made to upload this file.
+	PutRequests int `json:"put_requests,omitempty" bson:"put_requests,omitempty"`
+	// PutCost is the calculated S3 PUT request cost for uploading this file.
+	PutCost float64 `json:"put_cost,omitempty" bson:"put_cost,omitempty"`
+	// AssociatedLinks is a list of links related to the file besides the main artifact link.
+	AssociatedLinks []AssociatedLink `json:"associated_links,omitempty" bson:"associated_links,omitempty"`
+	// DoNotEncodeLink indicates that the file link should not be escaped.
+	DoNotEncodeLink bool `json:"do_not_encode_link,omitempty" bson:"do_not_encode_link,omitempty"`
 }
 
 func (f *File) validate() error {
@@ -131,7 +150,7 @@ func presignFile(ctx context.Context, file File) (string, error) {
 }
 
 func GetAllArtifacts(ctx context.Context, tasks []TaskIDAndExecution) ([]File, error) {
-	artifacts, err := FindAll(ctx, ByTaskIdsAndExecutions(tasks))
+	artifacts, err := FindAllSecondary(ctx, ByTaskIdsAndExecutions(tasks))
 	if err != nil {
 		return nil, errors.Wrap(err, "finding artifact files for task")
 	}
@@ -140,7 +159,7 @@ func GetAllArtifacts(ctx context.Context, tasks []TaskIDAndExecution) ([]File, e
 		for _, t := range tasks {
 			taskIds = append(taskIds, t.TaskID)
 		}
-		artifacts, err = FindAll(ctx, ByTaskIds(taskIds))
+		artifacts, err = FindAllSecondary(ctx, ByTaskIds(taskIds))
 		if err != nil {
 			return nil, errors.Wrap(err, "finding artifact files for task without execution number")
 		}
@@ -158,11 +177,25 @@ func GetAllArtifacts(ctx context.Context, tasks []TaskIDAndExecution) ([]File, e
 // EscapeFiles escapes the base of the file link to avoid issues opening links
 // with special characters in the UI. Note that it will not escape path segments
 // other than the base (i.e. the last one).
+// Note: Links will not be escaped if the file or associated link's DoNotEncode field
+// is set to true, or if the link already appears to be escaped.
 // For example, "url.com/something+another/file#1.tar.gz" will be escaped to "url.com/something+another/file%231.tar.gz".
 func EscapeFiles(files []File) []File {
 	var escapedFiles []File
 	for _, file := range files {
-		file.Link = escapeFile(file.Link)
+		if !file.DoNotEncodeLink {
+			file.Link = escapeFile(file.Link)
+		}
+
+		escapedAssociatedLinks := make([]AssociatedLink, len(file.AssociatedLinks))
+		for i, link := range file.AssociatedLinks {
+			escapedAssociatedLinks[i] = link
+			if !link.DoNotEncodeLink {
+				escapedAssociatedLinks[i].Link = escapeFile(link.Link)
+			}
+		}
+		file.AssociatedLinks = escapedAssociatedLinks
+
 		escapedFiles = append(escapedFiles, file)
 	}
 	return escapedFiles

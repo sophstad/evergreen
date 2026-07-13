@@ -1,6 +1,7 @@
 package redactor
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -99,8 +100,42 @@ func TestRedactingSender(t *testing.T) {
 				InternalRedactions: util.NewDynamicExpansions(test.internalRedactions),
 			}
 			s := NewRedactingSender(wrappedSender, opts)
-			s.Send(message.NewDefaultMessage(level.Info, test.inputString))
+			s.Send(context.Background(), message.NewDefaultMessage(level.Info, test.inputString))
 			assert.Equal(t, test.expected, wrappedSender.GetMessage().Message.String())
 		})
 	}
+}
+
+func TestRedactingSenderPicksUpDynamicRedactions(t *testing.T) {
+	t.Run("WithoutPreloadPicksUpNewRedactions", func(t *testing.T) {
+		wrappedSender, err := send.NewInternalLogger("", send.LevelInfo{Threshold: level.Info, Default: level.Info})
+		require.NoError(t, err)
+
+		expansions := util.NewDynamicExpansions(map[string]string{})
+		s := NewRedactingSender(wrappedSender, RedactionOptions{
+			Expansions: expansions,
+		})
+
+		expansions.PutAndRedact("github_token", "ghp_secret123")
+
+		s.Send(context.Background(), message.NewDefaultMessage(level.Info, "token is ghp_secret123"))
+		assert.Equal(t, fmt.Sprintf("token is %s", fmt.Sprintf(redactedVariableTemplate, "github_token")), wrappedSender.GetMessage().Message.String())
+	})
+
+	t.Run("WithPreloadDoesNotPickUpNewRedactions", func(t *testing.T) {
+		wrappedSender, err := send.NewInternalLogger("", send.LevelInfo{Threshold: level.Info, Default: level.Info})
+		require.NoError(t, err)
+
+		expansions := util.NewDynamicExpansions(map[string]string{"existing_key": "existing_val"})
+		expansions.PutAndRedact("existing_key", "existing_val")
+		s := NewRedactingSender(wrappedSender, RedactionOptions{
+			Expansions:        expansions,
+			PreloadRedactions: true,
+		})
+
+		expansions.PutAndRedact("github_token", "ghp_secret123")
+
+		s.Send(context.Background(), message.NewDefaultMessage(level.Info, "token is ghp_secret123"))
+		assert.Equal(t, "token is ghp_secret123", wrappedSender.GetMessage().Message.String())
+	})
 }

@@ -90,6 +90,9 @@ type Communicator interface {
 	ListPatchTriggerAliases(context.Context, string) ([]string, error)
 	GetDistroByName(context.Context, string) (*restmodel.APIDistro, error)
 
+	// Get project settings by project ID
+	GetProject(context.Context, string) (*restmodel.APIProjectRef, error)
+
 	// Get parameters for project
 	GetParameters(context.Context, string) ([]model.ParameterInfo, error)
 
@@ -101,7 +104,8 @@ type Communicator interface {
 	GetSubscriptions(context.Context) ([]event.Subscription, error)
 
 	// Notifications
-	SendNotification(ctx context.Context, notificationType string, data any) error
+	SendSlackNotification(ctx context.Context, data *restmodel.APISlack) error
+	SendEmailNotification(ctx context.Context, data *restmodel.APIEmail) error
 
 	// GetManifestByTask returns the manifest corresponding to the given task
 	GetManifestByTask(ctx context.Context, taskId string) (*manifest.Manifest, error)
@@ -110,7 +114,7 @@ type Communicator interface {
 
 	// GetRecentVersionsForProject returns the most recent versions for a
 	// project.
-	GetRecentVersionsForProject(ctx context.Context, projectID, requester string, startAtOrderNum, limit int) ([]restmodel.APIVersion, error)
+	GetRecentVersionsForProject(ctx context.Context, projectID string, requesters []string, startAtOrderNum, limit int) ([]restmodel.APIVersion, error)
 
 	// GetBuildsForVersion gets all builds for a version.
 	GetBuildsForVersion(ctx context.Context, versionID string) ([]restmodel.APIBuild, error)

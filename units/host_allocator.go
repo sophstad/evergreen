@@ -12,6 +12,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/model/hoststat"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/scheduler"
 	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/amboy"
@@ -93,7 +94,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	}
 
 	if flags.HostAllocatorDisabled {
-		grip.InfoWhen(sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
+		grip.InfoWhen(ctx, sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
 			"job":     hostAllocatorJobName,
 			"message": "host allocation is disabled",
 		})
@@ -109,6 +110,10 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		j.AddError(errors.Errorf("distro '%s' not found", j.DistroID))
 		return
 	}
+	if err := applyTaskHostOverrides(distro); err != nil {
+		j.AddError(errors.Wrapf(err, "applying task host overrides to distro '%s'", j.DistroID))
+		return
+	}
 	if _, err = distro.GetResolvedHostAllocatorSettings(config); err != nil {
 		j.AddError(errors.Errorf("resolving distro '%s' host allocator settings", j.DistroID))
 		return
@@ -117,15 +122,6 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	if err = scheduler.UpdateStaticDistro(ctx, *distro); err != nil {
 		j.AddError(errors.Wrapf(err, "updating static host in distro '%s'", j.DistroID))
 		return
-	}
-
-	var containerPool *evergreen.ContainerPool
-	if distro.ContainerPool != "" {
-		containerPool = config.ContainerPools.GetContainerPool(distro.ContainerPool)
-		if containerPool == nil {
-			j.AddError(errors.Wrapf(err, "container pool not found for distro '%s'", j.DistroID))
-			return
-		}
 	}
 
 	if err = host.RemoveStaleInitializing(ctx, j.DistroID); err != nil {
@@ -151,6 +147,8 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		return
 	}
 
+	distroQueueInfo = adjustForLargeParserProjectLimit(ctx, j.DistroID, distroQueueInfo, config)
+
 	existingHosts, err := host.AllActiveHosts(ctx, j.DistroID)
 	if err != nil {
 		j.AddError(errors.Wrap(err, "finding active hosts"))
@@ -168,8 +166,6 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	hostAllocatorData := scheduler.HostAllocatorData{
 		Distro:          *distro,
 		ExistingHosts:   upHosts,
-		UsesContainers:  (containerPool != nil),
-		ContainerPool:   containerPool,
 		DistroQueueInfo: distroQueueInfo,
 	}
 
@@ -178,6 +174,11 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	if distro.SingleTaskDistro {
 		// Single tasks distros should spawn a host for each task available to run in the queue.
 		nHosts = distroQueueInfo.LengthWithDependenciesMet - len(provisioningHosts)
+		// Ensure at least MinimumHosts will be running.
+		minimumHosts := distro.HostAllocatorSettings.MinimumHosts
+		if numExisting := len(upHosts); nHosts+numExisting < minimumHosts {
+			nHosts = minimumHosts - numExisting
+		}
 	} else {
 		hostAllocator := scheduler.GetHostAllocator(config.Scheduler.HostAllocator)
 
@@ -191,7 +192,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		}
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"runner":             hostAllocatorJobName,
 		"distro":             j.DistroID,
 		"single_task_distro": distro.SingleTaskDistro,
@@ -206,7 +207,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	//////////////////////
 
 	numIntentHosts, err := host.CountIntentHosts(ctx)
-	grip.Error(message.WrapError(err, message.Fields{
+	grip.Error(ctx, message.WrapError(err, message.Fields{
 		"runner":   hostAllocatorJobName,
 		"instance": j.ID(),
 		"distro":   j.DistroID,
@@ -214,7 +215,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 	}))
 
 	if numIntentHosts > maxIntentHosts {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"runner":    hostAllocatorJobName,
 			"instance":  j.ID(),
 			"distro":    j.DistroID,
@@ -226,13 +227,13 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 
 	hostSpawningBegins := time.Now()
 	// Number of new hosts to be allocated
-	hostsSpawned, err := scheduler.SpawnHosts(ctx, *distro, nHosts, containerPool)
+	hostsSpawned, err := scheduler.CreateIntentHosts(ctx, *distro, nHosts)
 	if err != nil {
 		j.AddError(errors.Wrap(err, "spawning new hosts"))
 		return
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"runner":             hostAllocatorJobName,
 		"distro":             distro.Id,
 		"single_task_distro": distro.SingleTaskDistro,
@@ -332,7 +333,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		}
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":                            "distro-scheduler-report",
 		"job_type":                           hostAllocatorJobName,
 		"distro":                             distro.Id,
@@ -345,6 +346,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		"task_queue_length_dependencies_met": distroQueueInfo.LengthWithDependenciesMet,
 		"num_hosts_running":                  len(upHosts),
 		"num_hosts_provisioning":             len(provisioningHosts),
+		"merge_queue_tasks":                  distroQueueInfo.CountDepFilledMergeQueueTasks,
 		"overdue_tasks":                      distroQueueInfo.CountWaitOverThreshold,
 		"overdue_tasks_in_groups":            totalOverdueInTaskGroups,
 		"total_runtime":                      distroQueueInfo.ExpectedDuration.String(),
@@ -376,6 +378,7 @@ func (j *hostAllocatorJob) Run(ctx context.Context) {
 		attribute.Int(fmt.Sprintf("%s.hosts_decommissioned", hostAllocatorAttributePrefix), existingHosts.Stats().Decommissioned),
 		attribute.Int(fmt.Sprintf("%s.task_queue_length", hostAllocatorAttributePrefix), distroQueueInfo.Length),
 		attribute.Int(fmt.Sprintf("%s.overdue_tasks", hostAllocatorAttributePrefix), distroQueueInfo.CountWaitOverThreshold),
+		attribute.Int(fmt.Sprintf("%s.merge_queue_tasks", hostAllocatorAttributePrefix), distroQueueInfo.CountDepFilledMergeQueueTasks),
 		attribute.Int(fmt.Sprintf("%s.overdue_tasks_in_groups", hostAllocatorAttributePrefix), totalOverdueInTaskGroups),
 		attribute.Float64(fmt.Sprintf("%s.queue_ratio", hostAllocatorAttributePrefix), float64(noSpawnsRatio)),
 		attribute.Float64(fmt.Sprintf("%s.host_queue_ratio", hostAllocatorAttributePrefix), float64(hostQueueRatio)),
@@ -407,7 +410,7 @@ func (j *hostAllocatorJob) setTargetAndTerminate(ctx context.Context, numUpHosts
 		}
 		err := amboy.EnqueueUniqueJob(ctx, j.env.RemoteQueue(), NewHostDrawdownJob(j.env, drawdownInfo, utility.RoundPartOfMinute(1).Format(TSFormat)))
 		if err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"message":  "could not enqueue job to draw down hosts",
 				"instance": j.ID(),
 				"distro":   distro.Id,
@@ -418,6 +421,40 @@ func (j *hostAllocatorJob) setTargetAndTerminate(ctx context.Context, numUpHosts
 
 }
 
+// applyTaskHostOverrides applies the distro's overrides for task hosts.
+func applyTaskHostOverrides(d *distro.Distro) error {
+	if d.TaskHostOverrides == nil || !evergreen.IsEc2Provider(d.Provider) {
+		return nil
+	}
+
+	d.ProviderAccount = d.TaskHostOverrides.ProviderAccount
+
+	for i, doc := range d.ProviderSettingsList {
+		// Task hosts are only spawned in the default EC2 region, so only
+		// override that region's provider settings.
+		region, hasRegion := doc.Lookup("region").StringValueOK()
+		if !hasRegion || region != evergreen.DefaultEC2Region {
+			continue
+		}
+
+		var updatedSettings cloud.EC2ProviderSettings
+		if err := updatedSettings.FromDocument(doc); err != nil {
+			return errors.Wrapf(err, "reading provider settings at index %d", i)
+		}
+		updatedSettings.IAMInstanceProfileARN = d.TaskHostOverrides.IAMInstanceProfileARN
+		updatedSettings.SecurityGroupIDs = d.TaskHostOverrides.SecurityGroupIDs
+		updatedSettings.SubnetId = d.TaskHostOverrides.SubnetID
+		updatedSettings.DoNotAssignPublicIPv4Address = d.TaskHostOverrides.DoNotAssignPublicIPv4Address
+		updatedDoc, err := updatedSettings.ToDocument()
+		if err != nil {
+			return errors.Wrap(err, "overriding provider settings with task host overrides")
+		}
+
+		d.ProviderSettingsList[i] = updatedDoc
+	}
+	return nil
+}
+
 // saveHostStats saves the latest host usage stats for an EC2 distro.
 func (j *hostAllocatorJob) saveHostStats(ctx context.Context, d *distro.Distro, numUpHosts int) {
 	if !evergreen.IsEc2Provider(d.Provider) {
@@ -426,11 +463,56 @@ func (j *hostAllocatorJob) saveHostStats(ctx context.Context, d *distro.Distro, 
 
 	hs := hoststat.NewHostStat(d.Id, numUpHosts)
 	if err := hs.Insert(ctx); err != nil && !db.IsDuplicateKey(err) {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":   "could not insert latest host stat data for distro",
 			"distro":    d.Id,
 			"num_hosts": numUpHosts,
 		}))
 	}
 
+}
+
+// adjustForLargeParserProjectLimit reduces the effective queue length when
+// the max concurrent large parser project task limit is hit.
+func adjustForLargeParserProjectLimit(ctx context.Context, distroID string, info model.DistroQueueInfo, config *evergreen.Settings) model.DistroQueueInfo {
+	if info.NumQueuedLargeParserProjectTasks == 0 {
+		return info
+	}
+
+	limit := model.GetMaxConcurrentLargeParserProjTasks(config)
+	if limit <= 0 {
+		return info
+	}
+
+	currentlyRunning, err := task.CountLargeParserProjectTasks(ctx)
+	if err != nil {
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message": "could not count running large parser project tasks",
+			"runner":  hostAllocatorJobName,
+			"distro":  distroID,
+		}))
+		return info
+	}
+
+	remainingCapacity := max(0, limit-currentlyRunning)
+
+	blocked := info.NumQueuedLargeParserProjectTasks - remainingCapacity
+	if blocked <= 0 {
+		return info
+	}
+
+	info.LengthWithDependenciesMet -= blocked
+
+	grip.Info(ctx, message.Fields{
+		"message": "adjusted queue for large parser project task limit",
+		"runner":  hostAllocatorJobName,
+		"distro":  distroID,
+		"currently_running_large_parser_proj_tasks": currentlyRunning,
+		"max_large_parser_project_task_limit":       limit,
+		"remaining_capacity":                        remainingCapacity,
+		"distro_s3_tasks_in_queue":                  info.NumQueuedLargeParserProjectTasks,
+		"adjusted_length_deps_met":                  info.LengthWithDependenciesMet,
+	})
+
+	return info
 }

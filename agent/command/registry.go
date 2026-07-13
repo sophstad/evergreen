@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -27,6 +28,8 @@ func init() {
 		evergreen.AttachResultsCommandName:      attachResultsFactory,
 		evergreen.AttachXUnitResultsCommandName: xunitResultsFactory,
 		evergreen.AttachArtifactsCommandName:    attachArtifactsFactory,
+		evergreen.CacheRestoreCommandName:       cacheRestoreFactory,
+		evergreen.CacheSaveCommandName:          cacheSaveFactory,
 		evergreen.HostCreateCommandName:         createHostFactory,
 		"ec2.assume_role":                       ec2AssumeRoleFactory,
 		"host.list":                             listHostFactory,
@@ -35,7 +38,6 @@ func init() {
 		"generate.tasks":                        generateTaskFactory,
 		"git.apply_patch":                       gitApplyPatchFactory,
 		"git.get_project":                       gitFetchProjectFactory,
-		"git.push":                              gitPushFactory,
 		"github.generate_token":                 githubGenerateTokenFactory,
 		"gotest.parse_files":                    goTestFactory,
 		"keyval.inc":                            keyValIncFactory,
@@ -54,7 +56,7 @@ func init() {
 	}
 
 	for name, factory := range cmds {
-		grip.EmergencyPanic(RegisterCommand(name, factory))
+		grip.EmergencyPanic(context.Background(), RegisterCommand(name, factory))
 	}
 }
 

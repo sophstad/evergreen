@@ -26,7 +26,7 @@ type FailingTaskData struct {
 }
 
 // BbFileTicket creates a JIRA ticket for a task with the given test failures.
-func BbFileTicket(ctx context.Context, taskId string, execution int) (int, error) {
+func BbFileTicket(ctx context.Context, taskId string, execution int, username string) (int, error) {
 	// Find information about the task
 	t, err := task.FindOneIdAndExecution(ctx, taskId, execution)
 	if err != nil {
@@ -61,7 +61,7 @@ func BbFileTicket(ctx context.Context, taskId string, execution int) (int, error
 	n, err := makeJiraNotification(ctx, settings, t, jiraTicketOptions{
 		project:   bbProject.TicketCreateProject,
 		issueType: bbProject.TicketCreateIssueType,
-	})
+	}, username)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
@@ -129,7 +129,7 @@ func (o *jiraTicketOptions) validate() error {
 
 const defaultJiraIssueType = "Build Failure"
 
-func makeJiraNotification(ctx context.Context, settings *evergreen.Settings, t *task.Task, jiraOpts jiraTicketOptions) (*notification.Notification, error) {
+func makeJiraNotification(ctx context.Context, settings *evergreen.Settings, t *task.Task, jiraOpts jiraTicketOptions, username string) (*notification.Notification, error) {
 	if err := jiraOpts.validate(); err != nil {
 		return nil, errors.Wrap(err, "invalid Jira ticket options")
 	}
@@ -139,11 +139,12 @@ func makeJiraNotification(ctx context.Context, settings *evergreen.Settings, t *
 		return nil, errors.Wrap(err, "getting Jira mappings")
 	}
 	payload, err := trigger.JIRATaskPayload(ctx, trigger.JiraIssueParameters{
-		Project:  jiraOpts.project,
-		UiURL:    settings.Ui.Url,
-		UiV2URL:  settings.Ui.UIv2Url,
-		Mappings: mappings,
-		Task:     t,
+		Project:       jiraOpts.project,
+		UiURL:         settings.Ui.Url,
+		UiV2URL:       settings.Ui.UIv2Url,
+		ParsleyLogURL: settings.Ui.ParsleyUrl,
+		Mappings:      mappings,
+		Task:          t,
 	})
 	if err != nil {
 		return nil, err
@@ -159,7 +160,7 @@ func makeJiraNotification(ctx context.Context, settings *evergreen.Settings, t *
 	if err != nil {
 		return nil, err
 	}
-	n.SetTaskMetadata(t.Id, t.Execution)
+	n.SetTaskMetadata(t.Id, t.Execution, username)
 
 	err = notification.InsertMany(ctx, *n)
 	if err != nil {

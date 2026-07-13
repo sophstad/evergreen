@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model"
@@ -30,7 +31,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 
 	branch, err := validatePushEvent(event)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source": "GitHub hook",
 			"msg_id": msgID,
 			"event":  "push",
@@ -46,7 +47,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 		return errors.Wrap(err, "retrieving admin settings")
 	}
 	if settings.ServiceFlags.RepotrackerDisabled {
-		grip.InfoWhen(sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
+		grip.InfoWhen(ctx, sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  msgID,
 			"event":   "push",
@@ -58,7 +59,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 		return errors.New("repotracker is disabled")
 	}
 	if len(settings.GithubOrgs) > 0 && !utility.StringSliceContains(settings.GithubOrgs, *event.Repo.Owner.Name) {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  msgID,
 			"event":   "push",
@@ -72,7 +73,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 
 	refs, err := model.FindMergedEnabledProjectRefsByRepoAndBranch(ctx, *event.Repo.Owner.Name, *event.Repo.Name, branch)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  msgID,
 			"event":   "push",
@@ -85,7 +86,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 		return err
 	}
 	if len(refs) == 0 {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  msgID,
 			"event":   "push",
@@ -102,11 +103,21 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 	unactionable := []string{}
 	failed := []string{}
 	catcher := grip.NewSimpleCatcher()
+	ingestTime := time.Now()
 	for i := range refs {
-		if !refs[i].DoesTrackPushEvents() || !refs[i].Enabled || refs[i].IsRepotrackerDisabled() {
+		if !refs[i].Enabled || refs[i].IsRepotrackerDisabled() {
 			unactionable = append(unactionable, refs[i].Id)
 			continue
 		}
+
+		err := upsertRepositoryRevisionsFromPushEvent(ctx, refs[i].Id, event, ingestTime)
+		grip.Error(ctx, message.WrapError(err, message.Fields{
+			"message":     "upserting repository revisions for project",
+			"project":     refs[i].Id,
+			"event":       event,
+			"ingest_time": ingestTime,
+			"refs":        refs[i],
+		}))
 
 		err = trigger.TriggerDownstreamProjectsForPush(ctx, refs[i].Id, event, trigger.TriggerDownstreamVersion)
 		catcher.Wrapf(err, "triggering downstream projects for push event for project '%s'", refs[i].Id)
@@ -122,7 +133,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 		}
 	}
 
-	grip.Error(message.WrapError(catcher.Resolve(), message.Fields{
+	grip.Error(ctx, message.WrapError(catcher.Resolve(), message.Fields{
 		"source":  "GitHub hook",
 		"msg_id":  msgID,
 		"event":   "push",
@@ -137,7 +148,7 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 		},
 	}))
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"source":  "GitHub hook",
 		"msg_id":  msgID,
 		"event":   "push",
@@ -160,6 +171,20 @@ func TriggerRepotracker(ctx context.Context, q amboy.Queue, msgID string, event 
 	}
 
 	return nil
+}
+
+// upsertRepositoryRevisionsFromPushEvent allows Evergreen to track when commits
+// are pushed to a repository. The pushed time (aka ingest time) is the source of truth
+// for the commit on the Evergreen side for decisions like which module commit to use.
+func upsertRepositoryRevisionsFromPushEvent(ctx context.Context, projectID string, event *github.PushEvent, ingestTime time.Time) error {
+	catcher := grip.NewBasicCatcher()
+	for i, commit := range event.Commits {
+		if commit.GetID() == "" {
+			continue
+		}
+		catcher.Wrapf(model.UpsertRepositoryRevision(ctx, projectID, commit.GetID(), ingestTime, i), "upserting revision '%s'", commit.GetID())
+	}
+	return catcher.Resolve()
 }
 
 func validatePushEvent(event *github.PushEvent) (string, error) {

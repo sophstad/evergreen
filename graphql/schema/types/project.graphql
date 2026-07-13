@@ -109,11 +109,6 @@ input WebhookInput {
 }
 
 input BuildBaronSettingsInput {
-  bfSuggestionFeaturesURL: String
-  bfSuggestionPassword: String
-  bfSuggestionServer: String
-  bfSuggestionTimeoutSecs: Int
-  bfSuggestionUsername: String
   ticketCreateProject: String!
   ticketSearchProjects: [String!]
   ticketCreateIssueType: String
@@ -129,12 +124,6 @@ input TriggerAliasInput {
   status: String!
   taskRegex: String!
   unscheduleDownstreamVersions: Boolean
-}
-
-input ContainerResourcesInput {
-  name: String!
-  cpu: Int!
-  memoryMb: Int!
 }
 
 input PatchTriggerAliasInput {
@@ -253,11 +242,11 @@ type Project {
   branch: String!
   buildBaronSettings: BuildBaronSettings!
   commitQueue: CommitQueueParams!
-  containerSizeDefinitions: [ContainerResources!]
   deactivatePrevious: Boolean
   debugSpawnHostsDisabled: Boolean
   disabledStatsCache: Boolean
   dispatchingDisabled: Boolean
+  waterfallDisabled: Boolean
   displayName: String!
   enabled: Boolean
   externalLinks: [ExternalLink!]
@@ -290,12 +279,12 @@ type Project {
   repotrackerDisabled: Boolean
   repotrackerError: RepotrackerError
   restricted: Boolean
+  runEveryMainlineCommit: Boolean
   spawnHostScriptPath: String!
   stepbackDisabled: Boolean
   stepbackBisect: Boolean
   taskAnnotationSettings: TaskAnnotationSettings!
   testSelection: TestSelectionSettings
-  tracksPushEvents: Boolean
   triggers: [TriggerAlias!]
   versionControlEnabled: Boolean
   workstationConfig: WorkstationConfig!
@@ -349,4 +338,48 @@ type GithubAppAuth {
 type TestSelectionSettings {
   allowed: Boolean
   defaultEnabled: Boolean
+}
+
+"""
+ProjectLite replaces Project by sidestepping the APIProjectRef layer. It does not contain all Project fields at this time.
+"""
+type ProjectLite {
+  id: String!
+  admins: [String!]
+  batchTime: Int!
+  branch: String!
+  deactivatePrevious: Boolean
+  debugSpawnHostsDisabled: Boolean
+  disabledStatsCache: Boolean
+  dispatchingDisabled: Boolean
+  waterfallDisabled: Boolean
+  displayName: String!
+  enabled: Boolean
+  githubChecksEnabled: Boolean
+  githubPRTriggerAliases: [String!]
+  githubMQTriggerAliases: [String!]
+  gitTagAuthorizedTeams: [String!]
+  gitTagAuthorizedUsers: [String!]
+  gitTagVersionsEnabled: Boolean
+  hidden: Boolean
+  identifier: String!
+  isFavorite: Boolean!
+  manualPrTestingEnabled: Boolean
+  notifyOnBuildFailure: Boolean
+  oldestAllowedMergeBase: String!
+  owner: String!
+  patchingDisabled: Boolean
+  perfEnabled: Boolean
+  projectHealthView: ProjectHealthView!
+  prTestingEnabled: Boolean
+  remotePath: String!
+  repo: String!
+  repoRefId: String!
+  repotrackerDisabled: Boolean
+  restricted: Boolean
+  runEveryMainlineCommit: Boolean
+  spawnHostScriptPath: String!
+  stepbackDisabled: Boolean
+  stepbackBisect: Boolean
+  versionControlEnabled: Boolean
 }

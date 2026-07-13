@@ -19,6 +19,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/ec2mount"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/evergreen-ci/utility"
@@ -38,14 +39,6 @@ const (
 	ec2TemplateNameExists   = "InvalidLaunchTemplateName.AlreadyExistsException"
 	ec2TemplateNotFound     = "InvalidLaunchTemplateId.NotFound"
 
-	// EC2InsufficientAddressCapacity means that there are no IP addresses
-	// available to allocate.
-	EC2InsufficientAddressCapacity = "InsufficientAddressCapacity"
-	// ec2InsufficientAddressCapacity means that the account has reached its
-	// limit on the number of elastic IPs it can allocate.
-	EC2AddressLimitExceeded = "AddressLimitExceeded"
-	// ec2ResourceAlreadyAssociated means an elastic IP is already associated
-	// with another resource.
 	ec2ResourceAlreadyAssociated = "Resource.AlreadyAssociated"
 
 	r53InvalidInput       = "InvalidInput"
@@ -74,15 +67,8 @@ var (
 	commercialLinuxDistros = []string{"suse"}
 )
 
-type MountPoint struct {
-	VirtualName string `mapstructure:"virtual_name" json:"virtual_name,omitempty" bson:"virtual_name,omitempty"`
-	DeviceName  string `mapstructure:"device_name" json:"device_name,omitempty" bson:"device_name,omitempty"`
-	Size        int32  `mapstructure:"size" json:"size,omitempty" bson:"size,omitempty"`
-	Iops        int32  `mapstructure:"iops" json:"iops,omitempty" bson:"iops,omitempty"`
-	Throughput  int32  `mapstructure:"throughput" json:"throughput,omitempty" bson:"throughput,omitempty"`
-	SnapshotID  string `mapstructure:"snapshot_id" json:"snapshot_id,omitempty" bson:"snapshot_id,omitempty"`
-	VolumeType  string `mapstructure:"volume_type" json:"volume_type,omitempty" bson:"volume_type,omitempty"`
-}
+// MountPoint is an alias for the shared EC2 mount definition in model/ec2mount.
+type MountPoint = ec2mount.MountPoint
 
 var (
 	// bson fields for the EC2ProviderSettings struct
@@ -103,8 +89,7 @@ var (
 
 // AztoRegion takes an availability zone and returns the region id.
 func AztoRegion(az string) string {
-	// an amazon region is just the availability zone minus the final letter
-	return az[:len(az)-1]
+	return util.AZToRegion(az)
 }
 
 // ec2StateToEvergreenStatus returns a "universal" status code based on EC2's
@@ -125,7 +110,7 @@ func ec2StateToEvergreenStatus(ec2State *types.InstanceState) CloudStatus {
 	case types.InstanceStateNameTerminated, types.InstanceStateNameShuttingDown:
 		return StatusTerminated
 	default:
-		grip.Error(message.Fields{
+		grip.Error(context.Background(), message.Fields{
 			"message": "got an unknown EC2 state name",
 			"status":  ec2State.Name,
 		})
@@ -162,10 +147,22 @@ func makeTags(intentHost *host.Host) []host.Tag {
 	// and if that tag is passed the reaper terminates the host. This reaping occurs to
 	// ensure that any hosts that we forget about or that fail to terminate do not stay alive
 	// forever.
-	expireOn := expireInDays(evergreen.HostExpireDays)
-	if intentHost.UserHost {
-		// If this is a spawn host, use a different expiration date.
-		expireOn = expireInDays(evergreen.SpawnHostExpireDays)
+	expireOn := expireInDays(evergreen.SpawnHostExpireDays)
+
+	// If this is a task host, use a different expiration date.
+	if !intentHost.UserHost {
+		expireDays := evergreen.HostExpireDays
+		// If we're within 3 hours of midnight, add an extra day to avoid a race with
+		// the external reaper. A host created at 11:59 PM gets expire-on = tomorrow
+		// which the reaper could act on before the hourly extension job can bump the tag.
+		now := time.Now()
+		midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+		if midnight.Sub(now) <= 4*time.Hour {
+			expireDays++
+		}
+
+		expireOn = expireInDays(expireDays)
+
 	}
 
 	systemTags := []host.Tag{
@@ -179,10 +176,23 @@ func makeTags(intentHost *host.Host) []host.Tag {
 		{Key: evergreen.TagExpireOn, Value: expireOn, CanBeModified: false},
 		{Key: evergreen.TagAllowRemoteAccess, Value: "true", CanBeModified: false},
 		{Key: evergreen.TagIsDebug, Value: fmt.Sprintf("%t", intentHost.IsDebug), CanBeModified: false},
+		{Key: evergreen.TagHostName, Value: intentHost.Tag, CanBeModified: false},
 	}
 
 	if intentHost.UserHost {
 		systemTags = append(systemTags, host.Tag{Key: "mode", Value: "testing", CanBeModified: false})
+	}
+	if intentHost.SpawnOptions.SpawnedByTask {
+		systemTags = append(systemTags, host.Tag{Key: evergreen.TagProject, Value: intentHost.SpawnOptions.ProjectID, CanBeModified: false})
+		if intentHost.SpawnOptions.TaskID != "" {
+			systemTags = append(systemTags,
+				host.Tag{Key: evergreen.TagTaskID, Value: intentHost.SpawnOptions.TaskID, CanBeModified: false},
+				host.Tag{Key: evergreen.TagTaskExecution, Value: fmt.Sprintf("%d", intentHost.SpawnOptions.TaskExecutionNumber), CanBeModified: false},
+			)
+		}
+		if intentHost.SpawnOptions.BuildID != "" {
+			systemTags = append(systemTags, host.Tag{Key: evergreen.TagBuildID, Value: intentHost.SpawnOptions.BuildID, CanBeModified: false})
+		}
 	}
 
 	// Add Evergreen-generated tags to host object
@@ -214,20 +224,6 @@ func makeTagTemplate(hostTags []host.Tag) []types.LaunchTemplateTagSpecification
 	}
 
 	return tagTemplates
-}
-
-func makeTagSpecifications(hostTags []host.Tag) []types.TagSpecification {
-	tags := hostToEC2Tags(hostTags)
-	return []types.TagSpecification{
-		{
-			ResourceType: types.ResourceTypeInstance,
-			Tags:         tags,
-		},
-		{
-			ResourceType: types.ResourceTypeVolume,
-			Tags:         tags,
-		},
-	}
 }
 
 func timeTilNextEC2Payment(h *host.Host) time.Duration {
@@ -300,7 +296,7 @@ func validateUserDataSize(userData, distroID string) error {
 		return nil
 	}
 	err := errors.New("user data size limit exceeded")
-	grip.Error(message.WrapError(err, message.Fields{
+	grip.Error(context.Background(), message.WrapError(err, message.Fields{
 		"size":     len(userData),
 		"max_size": userDataSizeLimit,
 		"distro":   distroID,
@@ -333,7 +329,7 @@ func cacheAllHostData(ctx context.Context, env evergreen.Environment, client AWS
 		if h.NoExpiration {
 			// This is not a bulk operation for convenience because it's assumed
 			// that the number of unexpirable hosts is small.
-			grip.Error(message.WrapError(setHostPersistentDNSName(ctx, env, h, utility.FromStringPtr(instance.PublicIpAddress), client), message.Fields{
+			grip.Error(ctx, message.WrapError(setHostPersistentDNSName(ctx, env, h, utility.FromStringPtr(instance.PublicIpAddress), client), message.Fields{
 				"message":    "could not update host's persistent DNS name",
 				"op":         "upsert",
 				"dashboard":  "evergreen sleep schedule health",
@@ -764,6 +760,50 @@ func isEC2InstanceNotFound(err error) bool {
 		return true
 	}
 	return false
+}
+
+// terminatePreexistingInstance terminates any EC2 instances that were launched
+// by prior attempts to provision the given intent host. When the provisioning
+// job crashes between RunInstances/CreateFleet and the DB host-ID swap,
+// retrying the job creates a second instance while the first is left orphaned.
+// Calling this before each launch prevents the leak.
+func terminatePreexistingInstance(ctx context.Context, client AWSClient, intentHostID string) error {
+	// Exclude shutting-down and terminated states so a prior termination call doesn't hide a newer live instance.
+	resp, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: []types.Filter{
+			{Name: aws.String("tag:" + evergreen.TagName), Values: []string{intentHostID}},
+			{Name: aws.String("instance-state-name"), Values: []string{
+				string(types.InstanceStateNamePending),
+				string(types.InstanceStateNameRunning),
+			}},
+		},
+	})
+	if err != nil {
+		return errors.Wrapf(err, "checking for pre-existing cloud instances for host '%s'", intentHostID)
+	}
+
+	var instanceIDs []string
+	for _, reservation := range resp.Reservations {
+		for _, instance := range reservation.Instances {
+			instanceIDs = append(instanceIDs, aws.ToString(instance.InstanceId))
+		}
+	}
+	// This will noop on the first provisioning attempt since no prior instance exists.
+	if len(instanceIDs) == 0 {
+		return nil
+	}
+
+	grip.Warning(ctx, message.Fields{
+		"message":      "terminating pre-existing cloud instances from prior launch attempts",
+		"host_id":      intentHostID,
+		"instance_ids": instanceIDs,
+	})
+	if _, err = client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+		InstanceIds: instanceIDs,
+	}); err != nil {
+		return errors.Wrapf(err, "terminating pre-existing instances for host '%s'", intentHostID)
+	}
+	return nil
 }
 
 func shouldAssignPublicIPv4Address(h *host.Host, ec2Settings *EC2ProviderSettings) bool {

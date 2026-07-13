@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evergreen-ci/cocoa"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/cloud/parameterstore/fakeparameter"
@@ -24,7 +23,6 @@ import (
 	"github.com/evergreen-ci/gimlet"
 	"github.com/evergreen-ci/utility"
 	"github.com/google/go-github/v70/github"
-	adb "github.com/mongodb/anser/db"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
@@ -285,6 +283,193 @@ func TestFindMergedEnabledProjectRefsByIds(t *testing.T) {
 	assert.Len(t, mergedProjects, 1)
 	assert.Equal(t, "ident_enabled", mergedProjects[0].Id)
 }
+
+func TestFindMergedProjectRefsByIdsOrIdentifiersSecondary(t *testing.T) {
+	require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
+
+	repoRef := &RepoRef{ProjectRef{
+		Id:                  "mongodb_mci",
+		SpawnHostScriptPath: "my-path",
+	}}
+	require.NoError(t, repoRef.Replace(t.Context()))
+
+	projectRefs := []ProjectRef{
+		{
+			Id:         "ident",
+			Identifier: "first-project",
+			RepoRefId:  "mongodb_mci",
+		},
+		{
+			Id:         "ident2",
+			Identifier: "second-project",
+		},
+	}
+	for _, pRef := range projectRefs {
+		require.NoError(t, pRef.Insert(t.Context()))
+	}
+
+	t.Run("EmptyInputReturnsNil", func(t *testing.T) {
+		merged, err := FindMergedProjectRefsByIdsOrIdentifiersSecondary(t.Context())
+		assert.NoError(t, err)
+		assert.Nil(t, merged)
+	})
+
+	t.Run("MatchesByIDAndIdentifier", func(t *testing.T) {
+		merged, err := FindMergedProjectRefsByIdsOrIdentifiersSecondary(t.Context(), "ident", "second-project")
+		assert.NoError(t, err)
+		require.Len(t, merged, 2)
+
+		byID := map[string]ProjectRef{}
+		for _, pRef := range merged {
+			byID[pRef.Id] = pRef
+		}
+		require.Contains(t, byID, "ident")
+		require.Contains(t, byID, "ident2")
+		// The repo-backed project should have its repo settings merged in.
+		assert.Equal(t, "my-path", byID["ident"].SpawnHostScriptPath)
+	})
+
+	t.Run("NonexistentValueIsOmitted", func(t *testing.T) {
+		merged, err := FindMergedProjectRefsByIdsOrIdentifiersSecondary(t.Context(), "ident", "nonexistent")
+		assert.NoError(t, err)
+		require.Len(t, merged, 1)
+		assert.Equal(t, "ident", merged[0].Id)
+	})
+}
+
+func TestFindAllMergedEnabledTrackedProjectRefs(t *testing.T) {
+	t.Run("MergesSharedRepoRefAcrossMultipleProjects", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
+
+		repoRef := &RepoRef{ProjectRef{
+			Id:                  "shared_repo",
+			SpawnHostScriptPath: "shared-path",
+		}}
+		require.NoError(t, repoRef.Replace(t.Context()))
+
+		project1 := &ProjectRef{
+			Id:        "project_a",
+			Enabled:   true,
+			RepoRefId: "shared_repo",
+		}
+		project2 := &ProjectRef{
+			Id:        "project_b",
+			Enabled:   true,
+			RepoRefId: "shared_repo",
+		}
+		require.NoError(t, project1.Insert(t.Context()))
+		require.NoError(t, project2.Insert(t.Context()))
+
+		results, err := FindAllMergedEnabledTrackedProjectRefs(t.Context())
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+
+		for _, p := range results {
+			assert.Equal(t, "shared-path", p.SpawnHostScriptPath, "expected repo settings to be merged into project '%s'", p.Id)
+		}
+	})
+
+	t.Run("MissingRepoRefShouldError", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
+
+		project := &ProjectRef{
+			Id:        "orphan",
+			Enabled:   true,
+			RepoRefId: "nonexistent_repo",
+		}
+		require.NoError(t, project.Insert(t.Context()))
+
+		results, err := FindAllMergedEnabledTrackedProjectRefs(t.Context())
+		require.Error(t, err)
+		assert.Nil(t, results)
+		assert.Contains(t, err.Error(), "nonexistent_repo")
+	})
+
+	t.Run("MergesDifferentRepoRefsForDifferentProjects", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
+
+		repoRefA := &RepoRef{ProjectRef{
+			Id:                  "repo_a",
+			SpawnHostScriptPath: "path-a",
+		}}
+		repoRefB := &RepoRef{ProjectRef{
+			Id:                  "repo_b",
+			SpawnHostScriptPath: "path-b",
+		}}
+		require.NoError(t, repoRefA.Replace(t.Context()))
+		require.NoError(t, repoRefB.Replace(t.Context()))
+
+		projectA := &ProjectRef{
+			Id:        "project_a",
+			Enabled:   true,
+			RepoRefId: "repo_a",
+		}
+		projectB := &ProjectRef{
+			Id:        "project_b",
+			Enabled:   true,
+			RepoRefId: "repo_b",
+		}
+		require.NoError(t, projectA.Insert(t.Context()))
+		require.NoError(t, projectB.Insert(t.Context()))
+
+		results, err := FindAllMergedEnabledTrackedProjectRefs(t.Context())
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+
+		merged := make(map[string]string)
+		for _, p := range results {
+			merged[p.Id] = p.SpawnHostScriptPath
+		}
+		assert.Equal(t, "path-a", merged["project_a"])
+		assert.Equal(t, "path-b", merged["project_b"])
+	})
+
+	t.Run("FiltersHiddenAndDisabledProjects", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
+
+		repoRef := &RepoRef{ProjectRef{Id: "repo1"}}
+		require.NoError(t, repoRef.Replace(t.Context()))
+
+		visible := &ProjectRef{
+			Id:        "visible",
+			Enabled:   true,
+			RepoRefId: "repo1",
+		}
+		disabled := &ProjectRef{
+			Id:        "disabled",
+			Enabled:   false,
+			RepoRefId: "repo1",
+		}
+		hidden := &ProjectRef{
+			Id:        "hidden",
+			Enabled:   true,
+			Hidden:    utility.TruePtr(),
+			RepoRefId: "repo1",
+		}
+		noRepoSettings := &ProjectRef{
+			Id:      "no_repo",
+			Enabled: true,
+		}
+		require.NoError(t, visible.Insert(t.Context()))
+		require.NoError(t, disabled.Insert(t.Context()))
+		require.NoError(t, hidden.Insert(t.Context()))
+		require.NoError(t, noRepoSettings.Insert(t.Context()))
+
+		results, err := FindAllMergedEnabledTrackedProjectRefs(t.Context())
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+
+		ids := make(map[string]bool)
+		for _, p := range results {
+			ids[p.Id] = true
+		}
+		assert.True(t, ids["visible"], "enabled non-hidden project should be returned")
+		assert.True(t, ids["no_repo"], "enabled project without RepoRefId should be returned")
+		assert.False(t, ids["disabled"], "disabled project should not be returned")
+		assert.False(t, ids["hidden"], "hidden project should not be returned")
+	})
+}
+
 func TestGetNumberOfEnabledProjects(t *testing.T) {
 	require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection))
 
@@ -625,7 +810,7 @@ func TestGetActivationTimeWithCron(t *testing.T) {
 			return pRef.GetActivationTimeForTask(t.Context(), &bvtu, versionCreatedAt, now)
 		},
 		"Variant": func(versionCreatedAt time.Time, now time.Time) (time.Time, error) {
-			return pRef.GetActivationTimeForVariant(t.Context(), &bv, versionCreatedAt, now)
+			return pRef.GetActivationTimeForVariant(t.Context(), &bv, false, versionCreatedAt, now)
 		},
 	} {
 		t.Run(activationType, func(t *testing.T) {
@@ -816,7 +1001,6 @@ func TestAttachToNewRepo(t *testing.T) {
 			Enabled: utility.TruePtr(),
 		},
 		PRTestingEnabled: utility.TruePtr(),
-		TracksPushEvents: utility.TruePtr(),
 	}
 	assert.NoError(t, pRef.Insert(t.Context()))
 	repoRef := RepoRef{ProjectRef{
@@ -855,17 +1039,10 @@ func TestAttachToNewRepo(t *testing.T) {
 	assert.NotEqual(t, "myRepo", pRefFromDB.RepoRefId)
 	assert.Equal(t, "newOwner", pRefFromDB.Owner)
 	assert.Equal(t, "newRepo", pRefFromDB.Repo)
-	assert.Nil(t, pRefFromDB.TracksPushEvents)
 
 	newRepoRef, err := FindOneRepoRef(t.Context(), pRef.RepoRefId)
 	assert.NoError(t, err)
 	assert.NotNil(t, newRepoRef)
-
-	assert.True(t, newRepoRef.DoesTrackPushEvents())
-
-	mergedRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-	assert.NoError(t, err)
-	assert.True(t, mergedRef.DoesTrackPushEvents())
 
 	userFromDB, err := user.FindOneById(t.Context(), "me")
 	assert.NoError(t, err)
@@ -920,7 +1097,7 @@ func TestAttachToRepo(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection, evergreen.ScopeCollection,
+	require.NoError(t, db.ClearCollections(ProjectRefCollection, RepoRefCollection, ProjectVarsCollection, evergreen.ScopeCollection,
 		evergreen.RoleCollection, user.Collection, event.EventCollection, evergreen.ConfigCollection))
 	require.NoError(t, db.CreateCollections(evergreen.ScopeCollection))
 	settings := evergreen.Settings{
@@ -937,7 +1114,6 @@ func TestAttachToRepo(t *testing.T) {
 			Enabled: utility.TruePtr(),
 		},
 		GithubChecksEnabled: utility.TruePtr(),
-		TracksPushEvents:    utility.TruePtr(),
 		Enabled:             true,
 	}
 	assert.NoError(t, pRef.Insert(t.Context()))
@@ -966,12 +1142,10 @@ func TestAttachToRepo(t *testing.T) {
 	assert.True(t, pRefFromDB.Enabled)
 	assert.True(t, pRefFromDB.CommitQueue.IsEnabled())
 	assert.True(t, pRefFromDB.IsGithubChecksEnabled())
-	assert.Nil(t, pRefFromDB.TracksPushEvents)
 
 	repoRef, err := FindOneRepoRef(t.Context(), pRef.RepoRefId)
 	assert.NoError(t, err)
 	require.NotNil(t, repoRef)
-	assert.True(t, repoRef.DoesTrackPushEvents())
 
 	u, err = user.FindOneById(t.Context(), "me")
 	assert.NoError(t, err)
@@ -1009,6 +1183,32 @@ func TestAttachToRepo(t *testing.T) {
 	assert.False(t, pRefFromDB.CommitQueue.IsEnabled())
 	assert.False(t, pRefFromDB.IsGithubChecksEnabled())
 	assert.True(t, pRefFromDB.IsPRTestingEnabled())
+
+	repoVars, err := FindOneProjectVars(t.Context(), pRef.RepoRefId)
+	assert.NoError(t, err)
+	assert.NotNil(t, repoVars)
+
+	// Attaching a new project should recreate the vars if they don't exist.
+	require.NoError(t, db.ClearCollections(ProjectVarsCollection))
+	repoVars, err = FindOneProjectVars(t.Context(), pRef.RepoRefId)
+	assert.NoError(t, err)
+	assert.Nil(t, repoVars)
+
+	pRef = ProjectRef{
+		Id:      "myProjectMissingVars",
+		Owner:   "evergreen-ci",
+		Repo:    "evergreen",
+		Branch:  "main",
+		Admins:  []string{"me"},
+		Enabled: true,
+	}
+	assert.NoError(t, pRef.Insert(t.Context()))
+	assert.NoError(t, pRef.AttachToRepo(ctx, u))
+	assert.True(t, pRef.UseRepoSettings())
+
+	repoVars, err = FindOneProjectVars(t.Context(), pRef.RepoRefId)
+	assert.NoError(t, err)
+	assert.NotNil(t, repoVars, "project vars should be recreated for repo ref missing them")
 
 	// Try attaching with a disallowed owner.
 	pRef = ProjectRef{
@@ -1087,7 +1287,6 @@ func TestDetachFromRepo(t *testing.T) {
 			assert.True(t, pRefFromDB.IsGitTagVersionsEnabled())
 			assert.True(t, pRefFromDB.IsGithubChecksEnabled())
 			assert.Equal(t, []string{"my_trigger"}, pRefFromDB.GithubPRTriggerAliases)
-			assert.True(t, pRefFromDB.DoesTrackPushEvents())
 
 			dbUser, err = user.FindOneById(t.Context(), "me")
 			assert.NoError(t, err)
@@ -1256,7 +1455,6 @@ func TestDetachFromRepo(t *testing.T) {
 				Id:                     pRef.RepoRefId,
 				Owner:                  pRef.Owner,
 				Repo:                   pRef.Repo,
-				TracksPushEvents:       utility.TruePtr(),
 				PRTestingEnabled:       utility.TruePtr(),
 				GitTagVersionsEnabled:  utility.FalsePtr(),
 				GithubChecksEnabled:    utility.TruePtr(),
@@ -1356,25 +1554,77 @@ func TestDefaultRepoBySection(t *testing.T) {
 			assert.Empty(t, varsFromDb.PrivateVars)
 			assert.NotEmpty(t, varsFromDb.Id)
 		},
-		ProjectPageGithubAndCQSection: func(t *testing.T, id string) {
+		ProjectPagePullRequestsSection: func(t *testing.T, id string) {
 			aliases, err := FindAliasesForProjectFromDb(t.Context(), id)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Len(t, aliases, 5)
-			assert.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPageGithubAndCQSection, "me"))
-
+			require.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPagePullRequestsSection, "me"))
 			pRefFromDb, err := FindBranchProjectRef(t.Context(), id)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.NotNil(t, pRefFromDb)
+
+			// These should be cleared so we default to repo.
 			assert.Nil(t, pRefFromDb.PRTestingEnabled)
-			assert.Nil(t, pRefFromDb.GithubChecksEnabled)
-			assert.Nil(t, pRefFromDb.GitTagAuthorizedUsers)
+			assert.Nil(t, pRefFromDb.ManualPRTestingEnabled)
+
 			aliases, err = FindAliasesForProjectFromDb(t.Context(), id)
-			assert.NoError(t, err)
-			assert.Len(t, aliases, 1)
-			// assert that only patch aliases are left
-			for _, a := range aliases {
-				assert.NotContains(t, evergreen.InternalAliases, a.Alias)
-			}
+			require.NoError(t, err)
+			require.Len(t, aliases, 1)
+			assert.NotContains(t, evergreen.InternalAliases, aliases[0].Alias)
+		},
+		ProjectPageGitTagsSection: func(t *testing.T, id string) {
+			aliases, err := FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			assert.Len(t, aliases, 5)
+			require.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPageGitTagsSection, "me"))
+			pRefFromDb, err := FindBranchProjectRef(t.Context(), id)
+			require.NoError(t, err)
+			assert.NotNil(t, pRefFromDb)
+
+			// These should be cleared so we default to repo.
+			assert.Nil(t, pRefFromDb.GitTagVersionsEnabled)
+			assert.Nil(t, pRefFromDb.GitTagAuthorizedUsers)
+			assert.Nil(t, pRefFromDb.GitTagAuthorizedTeams)
+
+			aliases, err = FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			require.Len(t, aliases, 1)
+			assert.NotContains(t, evergreen.InternalAliases, aliases[0].Alias)
+		},
+		ProjectPageMergeQueueSection: func(t *testing.T, id string) {
+			aliases, err := FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			assert.Len(t, aliases, 5)
+			require.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPageMergeQueueSection, "me"))
+			pRefFromDb, err := FindBranchProjectRef(t.Context(), id)
+			require.NoError(t, err)
+			assert.NotNil(t, pRefFromDb)
+
+			// These should be cleared so we default to repo.
+			assert.False(t, pRefFromDb.CommitQueue.IsEnabled())
+			assert.Nil(t, pRefFromDb.CommitQueue.Enabled)
+
+			aliases, err = FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			require.Len(t, aliases, 1)
+			assert.NotContains(t, evergreen.InternalAliases, aliases[0].Alias)
+		},
+		ProjectPageCommitChecksSection: func(t *testing.T, id string) {
+			aliases, err := FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			assert.Len(t, aliases, 5)
+			require.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPageCommitChecksSection, "me"))
+			pRefFromDb, err := FindBranchProjectRef(t.Context(), id)
+			require.NoError(t, err)
+			assert.NotNil(t, pRefFromDb)
+
+			// These should be cleared so we default to repo.
+			assert.Nil(t, pRefFromDb.GithubChecksEnabled)
+
+			aliases, err = FindAliasesForProjectFromDb(t.Context(), id)
+			require.NoError(t, err)
+			require.Len(t, aliases, 1)
+			assert.NotContains(t, evergreen.InternalAliases, aliases[0].Alias)
 		},
 		ProjectPageNotificationsSection: func(t *testing.T, id string) {
 			assert.NoError(t, DefaultSectionToRepo(t.Context(), id, ProjectPageNotificationsSection, "me"))
@@ -2015,7 +2265,6 @@ func TestCreateNewRepoRef(t *testing.T) {
 	assert.Equal(t, "mongodb", repoRef.Owner)
 	assert.Equal(t, "mongo", repoRef.Repo)
 	assert.Empty(t, repoRef.Branch)
-	assert.True(t, repoRef.DoesTrackPushEvents())
 	assert.True(t, repoRef.IsPRTestingEnabled())
 	assert.Equal(t, "evergreen.yml", repoRef.RemotePath)
 	assert.Equal(t, "", repoRef.Identifier)
@@ -2635,481 +2884,6 @@ func TestValidatePeriodicBuildDefinition(t *testing.T) {
 			assert.Error(testCase.Validate())
 		}
 		assert.NotEmpty(testCase.ID)
-	}
-}
-
-func TestContainerSecretValidate(t *testing.T) {
-	t.Run("FailsWithInvalidSecretType", func(t *testing.T) {
-		cs := ContainerSecret{
-			Name:  "secret_name",
-			Type:  "",
-			Value: "new_value",
-		}
-		assert.Error(t, cs.Validate())
-	})
-	t.Run("FailsWithoutName", func(t *testing.T) {
-		cs := ContainerSecret{
-			Name:  "secret_name",
-			Type:  ContainerSecretPodSecret,
-			Value: "",
-		}
-		assert.Error(t, cs.Validate())
-	})
-	t.Run("FailsWithoutNewSecretValue", func(t *testing.T) {
-		cs := ContainerSecret{
-			Name:  "secret_name",
-			Type:  ContainerSecretPodSecret,
-			Value: "",
-		}
-		assert.Error(t, cs.Validate())
-	})
-}
-
-func TestValidateContainerSecrets(t *testing.T) {
-	var settings evergreen.Settings
-	settings.Providers.AWS.Pod.SecretsManager.SecretPrefix = "secret_prefix"
-	const projectID = "project_id"
-
-	t.Run("AddsNewSecretsWithoutAnyExistingSecrets", func(t *testing.T) {
-		toUpdate := []ContainerSecret{
-			{
-				Name:  "apple",
-				Value: "new_value0",
-				Type:  ContainerSecretRepoCreds,
-			},
-			{
-				Name:  "orange",
-				Value: "new_value1",
-				Type:  ContainerSecretRepoCreds,
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, nil, toUpdate)
-		require.NoError(t, err)
-
-		require.Len(t, combined, len(toUpdate))
-		for i := 0; i < len(toUpdate); i++ {
-			assert.Equal(t, toUpdate[i].Name, combined[i].Name)
-			assert.Equal(t, toUpdate[i].Type, combined[i].Type)
-			assert.Equal(t, toUpdate[i].Value, combined[i].Value)
-			assert.Zero(t, combined[i].ExternalID)
-			assert.NotZero(t, combined[i].ExternalName)
-		}
-	})
-	t.Run("IgnoresUserDefinedExternalFieldsForNewSecrets", func(t *testing.T) {
-		toUpdate := []ContainerSecret{
-			{
-				Name:         "apple",
-				ExternalName: "external_name",
-				ExternalID:   "external_id",
-				Value:        "new_value0",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, nil, toUpdate)
-		require.NoError(t, err)
-
-		require.Len(t, combined, 1)
-		assert.Equal(t, toUpdate[0].Name, combined[0].Name)
-		assert.Equal(t, toUpdate[0].Type, combined[0].Type)
-		assert.NotZero(t, combined[0].ExternalName)
-		assert.NotEqual(t, toUpdate[0].ExternalName, combined[0].ExternalName, "external name should not be settable by users and should be generated for new secrets")
-		assert.Zero(t, combined[0].ExternalID, "external ID should not be settable by users for new secrets")
-	})
-	t.Run("NoopsWithIdenticalOriginalAndUpdatedSecrets", func(t *testing.T) {
-		secrets := []ContainerSecret{
-			{
-				Name:         "apple",
-				ExternalName: "external_name0",
-				ExternalID:   "external_id0",
-				Type:         ContainerSecretRepoCreds,
-			},
-			{
-				Name:         "orange",
-				ExternalName: "external_name1",
-				ExternalID:   "external_id1",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, secrets, secrets)
-		require.NoError(t, err)
-
-		assert.Equal(t, combined, secrets)
-	})
-	t.Run("AddsNewContainerSecretsToExistingSecrets", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "apple",
-				ExternalName: "external_name0",
-				ExternalID:   "external_id0",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		toUpdate := []ContainerSecret{
-			{
-				Name:  "orange",
-				Type:  ContainerSecretRepoCreds,
-				Value: "new_value",
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		require.NoError(t, err)
-
-		require.Len(t, combined, 2)
-		assert.Equal(t, original[0], combined[0])
-		assert.Equal(t, toUpdate[0].Name, combined[1].Name)
-		assert.Equal(t, toUpdate[0].Type, combined[1].Type)
-		assert.Equal(t, toUpdate[0].Value, combined[1].Value)
-		assert.NotZero(t, combined[1].ExternalName)
-		assert.Zero(t, combined[1].ExternalID)
-	})
-	t.Run("SetsUpdatedValueForExistingSecret", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "pineapple",
-				ExternalName: "a_legit_pizza_topping",
-				ExternalID:   "external_id",
-				Type:         ContainerSecretPodSecret,
-			},
-		}
-		toUpdate := []ContainerSecret{
-			{
-				Name:  "pineapple",
-				Value: "new_value",
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		require.NoError(t, err)
-
-		require.Len(t, combined, 1)
-		assert.Equal(t, original[0].Name, combined[0].Name)
-		assert.Equal(t, original[0].ExternalName, combined[0].ExternalName)
-		assert.Equal(t, original[0].ExternalID, combined[0].ExternalID)
-		assert.Equal(t, original[0].Type, combined[0].Type)
-		assert.Equal(t, toUpdate[0].Value, combined[0].Value)
-	})
-	t.Run("CombinesExistingSecretsAndUpdatedSecrets", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "apple",
-				ExternalName: "external_name0",
-				ExternalID:   "external_id0",
-				Type:         ContainerSecretPodSecret,
-			},
-			{
-				Name:         "banana",
-				ExternalName: "external_name1",
-				ExternalID:   "external_id1",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		updated := []ContainerSecret{
-			{
-				Name:  "cherry",
-				Value: "new_value0",
-				Type:  ContainerSecretRepoCreds,
-			},
-			{
-				Name:         "banana",
-				ExternalName: "external_name1",
-				ExternalID:   "external_id1",
-				Value:        "new_value1",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, original, updated)
-		require.NoError(t, err)
-
-		require.Len(t, combined, 3)
-		assert.Equal(t, original[0], combined[0])
-		assert.Equal(t, original[1].Name, combined[1].Name)
-		assert.Equal(t, original[1].ExternalName, combined[1].ExternalName)
-		assert.Equal(t, original[1].ExternalID, combined[1].ExternalID)
-		assert.Equal(t, original[1].Type, combined[1].Type)
-		assert.Equal(t, updated[1].Value, combined[1].Value)
-		assert.Equal(t, updated[0].Name, combined[2].Name)
-		assert.NotZero(t, combined[2].ExternalName)
-		assert.Zero(t, combined[2].ExternalID)
-		assert.Equal(t, updated[0].Type, combined[2].Type)
-		assert.Equal(t, updated[0].Value, combined[2].Value)
-	})
-	t.Run("ReturnsOriginalForNoUpdatedSecrets", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "apple",
-				ExternalName: "external_name0",
-				ExternalID:   "external_id0",
-				Type:         ContainerSecretPodSecret,
-			},
-			{
-				Name:         "banana",
-				ExternalName: "external_name1",
-				ExternalID:   "external_id1",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		combined, err := ValidateContainerSecrets(&settings, projectID, original, nil)
-		assert.NoError(t, err)
-		assert.Equal(t, original, combined)
-	})
-	t.Run("ReturnsEmptyWithoutAnyExistingOrUpdatedSecrets", func(t *testing.T) {
-		secrets, err := ValidateContainerSecrets(&settings, projectID, nil, nil)
-		assert.NoError(t, err)
-		assert.Empty(t, secrets)
-	})
-	t.Run("FailsWithInvalidSecretType", func(t *testing.T) {
-		toUpdate := []ContainerSecret{
-			{
-				Name: "breadfruit",
-				Type: "a type of bread",
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, nil, toUpdate)
-		assert.Error(t, err)
-	})
-	t.Run("FailsWithDifferentTypeForExistingSecret", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalName: "external_name",
-				ExternalID:   "external_id",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		toUpdate := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalName: "external_name",
-				ExternalID:   "external_id",
-				Type:         ContainerSecretPodSecret,
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		assert.Error(t, err)
-	})
-	t.Run("FailsWithDifferentExternalNameForExistingSecret", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalID:   "external_id",
-				ExternalName: "a_starfruit",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		toUpdate := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalID:   "external_id",
-				ExternalName: "not_a_starfruit_no_more",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		assert.Error(t, err)
-	})
-	t.Run("FailsWithDifferentExternalIDForExistingSecret", func(t *testing.T) {
-		original := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalID:   "a_starfruit",
-				ExternalName: "external_name",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		toUpdate := []ContainerSecret{
-			{
-				Name:         "starfruit",
-				ExternalID:   "not_a_starfruit_no_more",
-				ExternalName: "external_name",
-				Type:         ContainerSecretRepoCreds,
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		assert.Error(t, err)
-	})
-	t.Run("FailsWithoutName", func(t *testing.T) {
-		containerSecrets := []ContainerSecret{
-			{
-				Type:  ContainerSecretPodSecret,
-				Value: "value",
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, nil, containerSecrets)
-		assert.Error(t, err)
-	})
-	t.Run("FailsWithMultiplePodSecrets", func(t *testing.T) {
-		toUpdate := []ContainerSecret{
-			{
-				Name:  "breadfruit",
-				Type:  ContainerSecretPodSecret,
-				Value: "abcde",
-			},
-			{
-				Name:  "starfruit",
-				Type:  ContainerSecretPodSecret,
-				Value: "12345",
-			},
-		}
-		_, err := ValidateContainerSecrets(&settings, projectID, nil, toUpdate)
-		assert.Error(t, err)
-
-		toUpdate = []ContainerSecret{
-			{
-				Name:  "pear",
-				Type:  ContainerSecretPodSecret,
-				Value: "abcde",
-			},
-		}
-		original := []ContainerSecret{
-			{
-				Name:  "dragonfruit",
-				Type:  ContainerSecretPodSecret,
-				Value: "abcde",
-			},
-		}
-		_, err = ValidateContainerSecrets(&settings, projectID, original, toUpdate)
-		assert.Error(t, err)
-	})
-}
-
-func TestContainerSecretCache(t *testing.T) {
-	assert.Implements(t, (*cocoa.SecretCache)(nil), ContainerSecretCache{})
-	defer func() {
-		assert.NoError(t, db.ClearCollections(ProjectRefCollection))
-	}()
-
-	for tName, tCase := range map[string]func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache){
-		"PutSucceeds": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			pRef.ContainerSecrets[0].ExternalID = ""
-			require.NoError(t, pRef.Insert(t.Context()))
-			const externalID = "external_id"
-			require.NoError(t, c.Put(ctx, cocoa.SecretCacheItem{
-				ID:   externalID,
-				Name: pRef.ContainerSecrets[0].ExternalName,
-			}))
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			require.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets))
-			original := pRef.ContainerSecrets[0]
-			updated := dbProjRef.ContainerSecrets[0]
-			assert.Equal(t, original.ExternalName, updated.ExternalName)
-			assert.Equal(t, original.Name, updated.Name)
-			assert.Equal(t, original.Type, updated.Type)
-			assert.Equal(t, externalID, updated.ExternalID)
-			for i := 1; i < len(pRef.ContainerSecrets); i++ {
-				assert.Equal(t, pRef.ContainerSecrets[i], dbProjRef.ContainerSecrets[i], "mismatched container secrets at index %d", i)
-			}
-		},
-		"PutFailsWithNonexistentProjectRef": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			assert.Error(t, c.Put(ctx, cocoa.SecretCacheItem{ID: "external_id", Name: pRef.ContainerSecrets[0].ExternalName}))
-		},
-		"PutFailsWithoutMatchingContainerSecretExternalName": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			require.NoError(t, pRef.Insert(t.Context()))
-			assert.Error(t, c.Put(ctx, cocoa.SecretCacheItem{
-				ID:   "external_id",
-				Name: "nonexistent",
-			}))
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			require.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets))
-			for i := 0; i < len(pRef.ContainerSecrets); i++ {
-				assert.Equal(t, pRef.ContainerSecrets[i], dbProjRef.ContainerSecrets[i], "mismatched container secrets at index %d", i)
-			}
-		},
-		"PutSucceedsWithContainerSecretThatAlreadyHasSameExternalIDAlreadySet": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			pRef.ContainerSecrets[0].ExternalID = "external_id"
-			require.NoError(t, pRef.Insert(t.Context()))
-			require.NoError(t, c.Put(ctx, cocoa.SecretCacheItem{
-				ID:   pRef.ContainerSecrets[0].ExternalID,
-				Name: pRef.ContainerSecrets[0].ExternalName,
-			}))
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			require.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets))
-			for i := 0; i < len(pRef.ContainerSecrets); i++ {
-				assert.Equal(t, pRef.ContainerSecrets[i], dbProjRef.ContainerSecrets[i], "mismatched container secrets at index %d", i)
-			}
-		},
-		"PutFailsWithContainerSecretThatHasDifferentExternalIDAlreadySet": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			const externalID = "external_id"
-			pRef.ContainerSecrets[0].ExternalID = "something_else"
-			require.NoError(t, pRef.Insert(t.Context()))
-			require.Error(t, c.Put(ctx, cocoa.SecretCacheItem{
-				ID:   externalID,
-				Name: pRef.ContainerSecrets[0].ExternalName,
-			}))
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			require.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets))
-			for i := 0; i < len(pRef.ContainerSecrets); i++ {
-				assert.Equal(t, pRef.ContainerSecrets[i], dbProjRef.ContainerSecrets[i], "mismatched container secrets at index %d", i)
-			}
-		},
-		"DeleteSucceeds": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			require.NoError(t, pRef.Insert(t.Context()))
-			require.NoError(t, c.Delete(ctx, pRef.ContainerSecrets[1].ExternalID))
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			require.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets)-1)
-			assert.Equal(t, dbProjRef.ContainerSecrets[0], pRef.ContainerSecrets[0])
-		},
-		"DeleteNoopsWithNonexistentProjectRef": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			assert.NoError(t, c.Delete(ctx, "external_id"), "should not for nonexistent project ref")
-			assert.True(t, adb.ResultsNotFound(db.FindOneQ(t.Context(), ProjectRefCollection, db.Query(bson.M{}), &pRef)))
-		},
-		"DeleteNoopsWithoutMatchingContainerSecretExternalID": func(ctx context.Context, t *testing.T, pRef ProjectRef, c ContainerSecretCache) {
-			require.NoError(t, pRef.Insert(t.Context()))
-			assert.NoError(t, c.Delete(ctx, "nonexistent"), "should not error for nonexistent container secret")
-
-			dbProjRef, err := FindMergedProjectRef(t.Context(), pRef.Id, "", false)
-			require.NoError(t, err)
-			require.NotZero(t, dbProjRef)
-			assert.Len(t, dbProjRef.ContainerSecrets, len(pRef.ContainerSecrets))
-		},
-	} {
-		t.Run(tName, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			require.NoError(t, db.ClearCollections(ProjectRefCollection))
-			pRef := ProjectRef{
-				Id:         "project_id",
-				Identifier: "identifier",
-				ContainerSecrets: []ContainerSecret{
-					{
-						Name:       "banana",
-						Type:       ContainerSecretRepoCreds,
-						ExternalID: "external_id0",
-					},
-					{
-						Name:       "cherry",
-						Type:       ContainerSecretRepoCreds,
-						ExternalID: "external_id1",
-					},
-					{
-						Name:       "banerry",
-						Type:       ContainerSecretRepoCreds,
-						ExternalID: "external_id2",
-					},
-				},
-			}
-			for i := 0; i < len(pRef.ContainerSecrets); i++ {
-				pRef.ContainerSecrets[i].ExternalName = makeRepoCredsContainerSecretName(evergreen.SecretsManagerConfig{
-					SecretPrefix: "prefix",
-				}, pRef.Id, pRef.ContainerSecrets[i].Name)
-			}
-
-			tCase(ctx, t, pRef, ContainerSecretCache{})
-		})
 	}
 }
 
@@ -3764,24 +3538,10 @@ func TestMergeWithProjectConfig(t *testing.T) {
 					{Command: "overridden"},
 				},
 			},
-			ContainerSizeDefinitions: []ContainerResources{
-				{
-					Name:     "small",
-					CPU:      1,
-					MemoryMB: 200,
-				},
-				{
-					Name:     "large",
-					CPU:      2,
-					MemoryMB: 400,
-				},
-			},
 			BuildBaronSettings: &evergreen.BuildBaronSettings{
-				TicketCreateProject:     "BFG",
-				TicketCreateIssueType:   "Bug",
-				TicketSearchProjects:    []string{"BF", "BFG"},
-				BFSuggestionServer:      "https://evergreen.mongodb.com",
-				BFSuggestionTimeoutSecs: 10,
+				TicketCreateProject:   "BFG",
+				TicketCreateIssueType: "Bug",
+				TicketSearchProjects:  []string{"BF", "BFG"},
 			},
 			GithubPRTriggerAliases: []string{"one", "two"},
 			GithubMQTriggerAliases: []string{"three", "four"},
@@ -3799,28 +3559,15 @@ func TestMergeWithProjectConfig(t *testing.T) {
 	assert.True(t, *projectRef.WorkstationConfig.GitClone)
 	assert.Equal(t, "expeliarmus", projectRef.WorkstationConfig.SetupCommands[0].Command)
 
-	assert.Equal(t, "https://evergreen.mongodb.com", projectRef.BuildBaronSettings.BFSuggestionServer)
-	assert.Equal(t, 10, projectRef.BuildBaronSettings.BFSuggestionTimeoutSecs)
 	assert.Equal(t, "EVG", projectRef.BuildBaronSettings.TicketCreateProject)
 	assert.Equal(t, "Bug", projectRef.BuildBaronSettings.TicketCreateIssueType)
 	assert.Equal(t, []string{"BF", "BFG"}, projectRef.BuildBaronSettings.TicketSearchProjects)
 	assert.Equal(t, []string{"one", "two"}, projectRef.GithubPRTriggerAliases)
 	assert.Equal(t, []string{"three", "four"}, projectRef.GithubMQTriggerAliases)
 	assert.Equal(t, "p1", projectRef.PeriodicBuilds[0].ID)
-	assert.Equal(t, 1, projectRef.ContainerSizeDefinitions[0].CPU)
-	assert.Equal(t, 2, projectRef.ContainerSizeDefinitions[1].CPU)
-
-	projectRef.ContainerSizeDefinitions = []ContainerResources{
-		{
-			Name:     "xlarge",
-			CPU:      4,
-			MemoryMB: 800,
-		},
-	}
 	err = projectRef.MergeWithProjectConfig(t.Context(), "version1")
 	assert.NoError(t, err)
 	require.NotNil(t, projectRef)
-	assert.Equal(t, 4, projectRef.ContainerSizeDefinitions[0].CPU)
 }
 
 func TestSaveProjectPageForSection(t *testing.T) {
@@ -4091,40 +3838,6 @@ func TestSetRepotrackerError(t *testing.T) {
 	})
 }
 
-func TestSetContainerSecrets(t *testing.T) {
-	require.NoError(t, db.ClearCollections(ProjectRefCollection))
-	defer func() {
-		assert.NoError(t, db.ClearCollections(ProjectRefCollection))
-	}()
-	pRef := ProjectRef{
-		Id:               "id",
-		Identifier:       "identifier",
-		ContainerSecrets: []ContainerSecret{{Name: "secret"}},
-	}
-	require.NoError(t, pRef.Insert(t.Context()))
-	t.Run("OverwritesContainerSecrets", func(t *testing.T) {
-		secrets := []ContainerSecret{{
-			Name:         "new_secret",
-			Type:         ContainerSecretPodSecret,
-			ExternalName: "external_name",
-			ExternalID:   "external_id",
-		}}
-		require.NoError(t, pRef.SetContainerSecrets(t.Context(), secrets))
-		dbProjRef, err := FindBranchProjectRef(t.Context(), pRef.Identifier)
-		require.NoError(t, err)
-		require.NotZero(t, dbProjRef)
-		require.NotZero(t, dbProjRef.ContainerSecrets)
-		assert.Equal(t, secrets, dbProjRef.ContainerSecrets)
-	})
-	t.Run("ClearsContainerSecrets", func(t *testing.T) {
-		require.NoError(t, pRef.SetContainerSecrets(t.Context(), nil))
-		dbProjRef, err := FindBranchProjectRef(t.Context(), pRef.Identifier)
-		require.NoError(t, err)
-		require.NotZero(t, dbProjRef)
-		assert.Empty(t, dbProjRef.RepotrackerError)
-	})
-}
-
 func TestGetActivationTimeForVariant(t *testing.T) {
 	assert := assert.New(t)
 	require.NoError(t, db.ClearCollections(ProjectRefCollection, VersionCollection))
@@ -4140,7 +3853,7 @@ func TestGetActivationTimeForVariant(t *testing.T) {
 
 	// Set based on last activation time when no version is found
 	versionCreatedAt := time.Now().Add(-1 * time.Minute)
-	activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &BuildVariant{Name: "bv"}, versionCreatedAt, time.Now())
+	activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &BuildVariant{Name: "bv"}, false, versionCreatedAt, time.Now())
 	assert.NoError(err)
 	assert.Equal(activationTime, versionCreatedAt)
 
@@ -4162,10 +3875,86 @@ func TestGetActivationTimeForVariant(t *testing.T) {
 	}
 	assert.NoError(version.Insert(t.Context()))
 
-	activationTime, err = projectRef.GetActivationTimeForVariant(t.Context(), &BuildVariant{Name: "bv"}, versionCreatedAt, time.Now())
+	activationTime, err = projectRef.GetActivationTimeForVariant(t.Context(), &BuildVariant{Name: "bv"}, false, versionCreatedAt, time.Now())
 	assert.NoError(err)
-	assert.NotZero(activationTime)
+	assert.False(utility.IsZeroTime(activationTime))
 	assert.Equal(activationTime, versionCreatedAt)
+}
+
+func TestGetActivationTimeWithPathFiltering(t *testing.T) {
+	setup := func(t *testing.T) (*ProjectRef, time.Time) {
+		require.NoError(t, db.ClearCollections(ProjectRefCollection, VersionCollection))
+		projectRef := &ProjectRef{
+			Owner:      "mongodb",
+			Repo:       "mci",
+			Branch:     "main",
+			Enabled:    true,
+			Id:         "ident",
+			Identifier: "identifier",
+		}
+		require.NoError(t, projectRef.Insert(t.Context()))
+		versionCreatedAt := time.Now().Add(-1 * time.Minute)
+		return projectRef, versionCreatedAt
+	}
+
+	t.Run("PathFilteredNoCronBatchtimeActivation", func(t *testing.T) {
+		projectRef, _ := setup(t)
+		// If the variant paths are filtered and no cron/batchtime/activation is set, the activation time should be zero
+		activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &BuildVariant{Name: "bv"}, true, time.Now(), time.Now())
+		assert.NoError(t, err)
+		assert.True(t, utility.IsZeroTime(activationTime))
+	})
+
+	t.Run("PathFilteredWithCron", func(t *testing.T) {
+		projectRef, versionCreatedAt := setup(t)
+		// If the variant paths are filtered but cron is set, the activation time should be non-zero
+		bv := BuildVariant{
+			Name:          "bv",
+			CronBatchTime: "@daily",
+		}
+		activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, true, versionCreatedAt, time.Now())
+		assert.NoError(t, err)
+		assert.False(t, utility.IsZeroTime(activationTime))
+	})
+
+	t.Run("PathFilteredWithBatchtime", func(t *testing.T) {
+		projectRef, versionCreatedAt := setup(t)
+		// If the variant paths are filtered but batchtime is set, the activation time should be non-zero
+		bv := BuildVariant{
+			Name:      "bv",
+			BatchTime: utility.ToIntPtr(10),
+		}
+		activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, true, versionCreatedAt, time.Now())
+		assert.NoError(t, err)
+		assert.False(t, utility.IsZeroTime(activationTime))
+	})
+
+	t.Run("PathFilteredWithActivate", func(t *testing.T) {
+		projectRef, versionCreatedAt := setup(t)
+		// If the variant paths are filtered but activate is set, the activation time should be non-zero
+		bv := BuildVariant{
+			Name:     "bv",
+			Activate: utility.TruePtr(),
+		}
+		activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, true, versionCreatedAt, time.Now())
+		assert.NoError(t, err)
+		assert.False(t, utility.IsZeroTime(activationTime))
+	})
+
+	t.Run("PathFilteredWithBatchtimeAndActivate", func(t *testing.T) {
+		projectRef, versionCreatedAt := setup(t)
+		// If the variant has both batchtime and activate set, the activation time should be non-zero
+		bv := BuildVariant{
+			Name:      "bv",
+			BatchTime: utility.ToIntPtr(10),
+			Activate:  utility.TruePtr(),
+		}
+		activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, true, versionCreatedAt, time.Now())
+		assert.NoError(t, err)
+		assert.False(t, utility.IsZeroTime(activationTime))
+		// When activate is true, the activation time should be the version creation time
+		assert.Equal(t, versionCreatedAt, activationTime)
+	})
 }
 
 func TestActivationTimeWithDuplicate(t *testing.T) {
@@ -4209,7 +3998,7 @@ func TestActivationTimeWithDuplicate(t *testing.T) {
 		CronBatchTime: "0 0 * * *", // midnight every day
 	}
 
-	activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, versionCreateTime, now)
+	activationTime, err := projectRef.GetActivationTimeForVariant(t.Context(), &bv, false, versionCreateTime, now)
 	require.NoError(t, err)
 
 	// get the previous version to check the activation time

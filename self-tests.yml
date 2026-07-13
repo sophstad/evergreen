@@ -167,6 +167,17 @@ variables:
           bucket: evg-bucket-evergreen
           permissions: public-read
           preserve_path: true
+      - command: s3.put
+        params:
+          role_arn: ${client_assume_role_arn}
+          local_files_include_filter_prefix: evergreen/clients
+          local_files_include_filter: "*_*/evergreen*"
+          remote_file: evergreen/clients/latest${environment-suffix}/
+          content_type: binary/octet-stream
+          bucket: evg-bucket-evergreen
+          permissions: public-read
+          preserve_path: true
+          patchable: false
 
 #######################################
 #              Functions              #
@@ -185,20 +196,49 @@ functions:
         directory: evergreen
         token: ${github_token}
         shallow_clone: true
+    - command: cache.restore
+      type: setup
+      params:
+        name: go-modules
+        role_arn: ${assume_role_arn}
+        bucket: mciuploads
+        remote_path: evergreen/self-tests/go-mod-cache
+        key_files:
+          - evergreen/go.mod
+          - evergreen/go.sum
+        key_expansions:
+          - ${distro_arch}
     - command: shell.exec
       type: setup
       params:
         working_dir: evergreen
-        include_expansions_in_env: ["GOROOT", "github_token"]
+        include_expansions_in_env:
+          ["GOROOT", "github_token", "go_modules_cache_hit"]
         shell: bash
         script: |
-          # Downloading modules is flaky in the ubuntu1604-arm64 distros, because the TCP connection is sometimes reset
-          # by the peer for unknown reasons (this does not happen in other distros). Retry the module download multiple
-          # times to reduce the flakiness.
-          for i in {1..5}; do
-            make mod-tidy
-            [[ $? -eq 0 ]] && break;
-          done
+          # On a cache miss, download the modules into the module cache so cache.save can upload it below. Downloading
+          # modules is flaky in the ubuntu1604-arm64 distros, because the TCP connection is sometimes reset by the peer
+          # for unknown reasons (this does not happen in other distros). Retry the module download multiple times to
+          # reduce the flakiness.
+          if [ "$go_modules_cache_hit" != "true" ]; then
+            for i in {1..5}; do
+              make mod-download && break
+            done
+          fi
+    - command: cache.save
+      type: setup
+      params:
+        name: go-modules
+        role_arn: ${assume_role_arn}
+        bucket: mciuploads
+        remote_path: evergreen/self-tests/go-mod-cache
+        key_files:
+          - evergreen/go.mod
+          - evergreen/go.sum
+        key_expansions:
+          - ${distro_arch}
+        paths:
+          - evergreen/bin/.mod-cache
 
   assume-role:
     command: ec2.assume_role
@@ -434,13 +474,6 @@ functions:
           rm evergreen/bin/output.*
           rm evergreen/bin/jstests/*.xml
 
-  write-downstream-expansions-for-pine:
-    - command: shell.exec
-      params:
-        script: |
-          touch downstream_expansions_pine.yaml
-          echo "pine_repo_name: evergreen" | tee downstream_expansions_pine.yaml
-
 #######################################
 #                Tasks                #
 #######################################
@@ -448,9 +481,6 @@ functions:
 tasks:
   - <<: *run-smoke-test
     name: test-smoke-internal-host
-    tags: ["smoke"]
-  - <<: *run-smoke-test
-    name: test-smoke-internal-container
     tags: ["smoke"]
   - <<: *run-smoke-test
     name: test-smoke-internal-endpoint
@@ -524,6 +554,9 @@ tasks:
   - <<: *run-go-test-suite
     tags: ["nodb", "test"]
     name: test-cloud-userdata
+  - <<: *run-go-test-suite
+    tags: ["nodb", "test"]
+    name: test-ratelimit
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-scheduler
@@ -548,7 +581,7 @@ tasks:
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-validator
-  - <<: *run-go-test-suite-with-mongodb
+  - <<: *run-go-test-suite-with-mongodb-and-git
     tags: ["db", "test"]
     name: test-model
   - <<: *run-go-test-suite-with-mongodb
@@ -563,6 +596,12 @@ tasks:
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-model-build
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["db", "test"]
+    name: test-model-ec2mount
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["db", "test"]
+    name: test-model-ec2settings
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-model-event
@@ -583,13 +622,7 @@ tasks:
     name: test-model-patch
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
-    name: test-model-pod
-  - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test"]
-    name: test-model-pod-definition
-  - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test"]
-    name: test-model-pod-dispatcher
+    name: test-model-s3usage
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-model-taskstats
@@ -784,12 +817,6 @@ tasks:
           permissions: public-read
           display_name: swagger.sum (latest)
           patchable: false
-  - name: write-downstream-expansions-for-pine
-    commands:
-      - func: write-downstream-expansions-for-pine
-      - command: downstream_expansions.set
-        params:
-          file: downstream_expansions_pine.yaml
   - name: generate-graphql-merged-schema
     commands:
       - func: get-project-and-modules
@@ -798,8 +825,7 @@ tasks:
           working_dir: evergreen
           shell: bash
           script: |
-            cat graphql/schema/types/*.graphql \
-            graphql/schema/*.graphql > docs/merged-schema.graphql
+            find graphql/schema -name "*.graphql" | xargs cat > docs/merged-schema.graphql
       - command: s3.put
         params:
           role_arn: ${assume_role_arn}
@@ -835,6 +861,9 @@ tasks:
     name: build-linux-staging_amd64
     tags: ["build-staging"]
   - <<: *build-and-push-client
+    name: build-linux-staging_arm64
+    tags: ["build-staging"]
+  - <<: *build-and-push-client
     name: build-windows-staging_amd64
     tags: ["build-staging"]
 
@@ -861,6 +890,8 @@ buildvariants:
       - "*.sh"
       - "*.diff"
       - "*.patch"
+      - "go.mod"
+      - "go.sum"
     run_on:
       - ubuntu2204-small
       - ubuntu2204-large
@@ -873,13 +904,13 @@ buildvariants:
       mongodb_url: https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-8.0.0.tgz
       mongosh_url: https://downloads.mongodb.com/compass/mongosh-2.0.2-linux-x64.tgz
       notary_client_url: https://macos-notary-1628249594.s3.amazonaws.com/releases/client/v3.1.2/linux_amd64.zip
+      test_timeout: 15m
     tasks:
       - name: ".smoke"
       - name: ".test"
       - name: ".linter"
       - name: test-cloud
       - name: generate-api-docs
-      - name: write-downstream-expansions-for-pine
       - name: generate-graphql-merged-schema
 
   - name: race-detector
@@ -896,21 +927,6 @@ buildvariants:
       test_timeout: 15m
     tasks:
       - name: ".test"
-
-  - name: ubuntu2004-container
-    display_name: Ubuntu 20.04 (Container)
-    run_on:
-      - evg-container
-    expansions:
-      goos: linux
-      goarch: amd64
-      IS_DOCKER: true
-      GOROOT: /usr/local/go
-      mongodb_url: https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-8.0.0.tgz
-      mongosh_url: https://downloads.mongodb.com/compass/mongosh-2.0.2-linux-x64.tgz
-      decompress: tar zxvf
-    tasks:
-      - name: ".smoke"
 
   - name: test-config-validation
     display_name: Validate External Configs
@@ -1031,14 +1047,3 @@ buildvariants:
       - name: build-and-push-darwin-unsigned
         execution_tasks:
           - ".build-unsigned"
-
-containers:
-  - name: evg-container
-    working_dir: /
-    image: ${container_image}
-    resources:
-      cpu: 4096
-      memory_mb: 8192
-    system:
-      cpu_architecture: x86_64
-      operating_system: linux

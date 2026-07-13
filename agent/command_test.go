@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -301,4 +302,85 @@ functions:
 	err := s.a.runCommandsInBlock(s.ctx, s.tc, cmdBlock)
 	s.Error(err)
 	s.True(s.mockCommunicator.TaskShouldRetryOnFail)
+}
+
+func (s *CommandSuite) TestRetryOnFailureDisabledForMergeQueue() {
+	projYml := `
+functions:
+  should_retry:
+    command: shell.exec
+    retry_on_failure: true
+    params:
+      script: exit 1
+`
+	s.setUpConfigAndProject(projYml)
+	s.tc.taskConfig.Task.Requester = evergreen.GithubMergeRequester
+
+	func1 := model.PluginCommandConf{
+		Function:    "should_retry",
+		DisplayName: "function",
+		Vars:        map[string]string{"key1": "newValue1", "key2": "newValue2", "key3": "newValue3"},
+	}
+
+	cmdBlock := commandBlock{
+		commands:    &model.YAMLCommandSet{SingleCommand: &func1},
+		canFailTask: true,
+	}
+	err := s.a.runCommandsInBlock(s.ctx, s.tc, cmdBlock)
+	s.Error(err)
+	s.False(s.mockCommunicator.TaskShouldRetryOnFail)
+}
+
+func (s *CommandSuite) TestBackgroundCommandFailureFailsCommandBlock() {
+	projYml := `
+functions:
+  trivial:
+    command: shell.exec
+    params:
+      script: echo hi
+`
+	s.setUpConfigAndProject(projYml)
+
+	// Wire and pre-load the channel that setupTask normally creates in production.
+	s.tc.taskConfig.BackgroundCommandFailureEnabled = true
+	s.tc.backgroundFailures = make(chan error, 10)
+	s.tc.taskConfig.BackgroundFailures = s.tc.backgroundFailures
+	s.tc.backgroundFailures <- errors.New("background command (PID 99999) exited with code 1")
+
+	func1 := model.PluginCommandConf{
+		Function:    "trivial",
+		DisplayName: "function",
+	}
+
+	cmdBlock := commandBlock{
+		commands: &model.YAMLCommandSet{SingleCommand: &func1},
+	}
+	err := s.a.runCommandsInBlock(s.ctx, s.tc, cmdBlock)
+	s.Require().Error(err, "drain should convert background failure into a command block error")
+	s.Contains(err.Error(), "background command failed")
+	s.Empty(s.tc.backgroundFailures, "drain should have consumed the pre-loaded failure")
+}
+
+func (s *CommandSuite) TestBackgroundCommandFailureIgnoredWhenFlagDisabled() {
+	projYml := `
+functions:
+  trivial:
+    command: shell.exec
+    params:
+      script: echo hi
+`
+	s.setUpConfigAndProject(projYml)
+
+	// Flag is false (default) — backgroundFailures channel is nil, matching production behavior from setupTask.
+	// The drain should be a no-op and the task should not fail.
+	func1 := model.PluginCommandConf{
+		Function:    "trivial",
+		DisplayName: "function",
+	}
+
+	cmdBlock := commandBlock{
+		commands: &model.YAMLCommandSet{SingleCommand: &func1},
+	}
+	err := s.a.runCommandsInBlock(s.ctx, s.tc, cmdBlock)
+	s.NoError(err, "background failure should be ignored when flag is disabled")
 }

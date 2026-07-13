@@ -11,6 +11,7 @@ Project Commands are the fundamental units of functionality in an Evergreen task
   timeout_secs: 10 ## optional
   retry_on_failure: true ## optional
   failure_metadata_tags: ["tag0", "tag1"] ## optional
+  variants: ["ubuntu1604", "rhel70"] ## optional
   params:
     script: echo "my script"
 ```
@@ -27,6 +28,8 @@ Explanation:
   automatic restart will process after the command has failed and the task has completed its subsequent post task commands.
 - `failure_metadata_tags`: an optional set of tags to attribute to the command if it fails. If these are set and the
   command fails, the tags will appear in the task details returned from the REST API.
+- `variants`: an optional list of build variants to run this command configuration on. If it is empty, it will run on all defined
+  variants.
 - `params`: values for the pre defined set of parameters the command can take. Available parameters vary per command.
 
 ## archive.targz_extract
@@ -70,6 +73,8 @@ Parameters:
 - `exclude_files`: a list of filename
   [blobs](https://golang.org/pkg/path/filepath/#Match) to exclude from the
   source directory.
+- `verbose`: when set to `true`, logs each file individually as it is added to
+  the archive. Defaults to `false`.
 
 **Important note about directories**: When specifying directories in the
 `include` list, different patterns have different behaviors:
@@ -139,6 +144,8 @@ Parameters:
 - `exclude_files`: a list of filename
   [blobs](https://golang.org/pkg/path/filepath/#Match) to exclude from the
   source directory.
+- `verbose`: when set to `true`, logs each file individually as it is added to
+  the archive. Defaults to `false`.
 
 **Important note about directories**: When specifying directories in the
 `include` list, different patterns have different behaviors:
@@ -189,6 +196,8 @@ Parameters:
 - `exclude_files`: a list of filename
   [blobs](https://golang.org/pkg/path/filepath/#Match) to exclude from the
   source directory.
+- `verbose`: when set to `true`, logs each file individually as it is added to
+  the archive. Defaults to `false`.
 
 **Important note about directories**: When specifying directories in the
 `include` list, different patterns have different behaviors:
@@ -203,10 +212,9 @@ Use `*` for non-recursive matching and `**` for recursive descent. `archive.zip_
 ## attach.artifacts
 
 This command allows users to add files to the "Files" section of the
-task page without using the `s3.put` command. Suppose you uploaded a
-file to <https://example.com/this-is-my-file> in your task. For
-instance, you might be using boto in a Python script. You can then add a
-link to the Files element on the task page by:
+task page without using the `s3.put` command. This is useful when you've
+uploaded files to a remote location (e.g. using boto in a Python script)
+and want to link them in the Evergreen UI.
 
 ```yaml
 - command: attach.artifacts
@@ -215,19 +223,7 @@ link to the Files element on the task page by:
       - example.json
 ```
 
-```json
-[
-  {
-    "name": "my-file",
-    "link": "https://example.com/this-is-my-file",
-    "visibility": "public"
-  }
-]
-```
-
-An additional "ignore_for_fetch" parameter controls whether the file
-will be downloaded when spawning a host from the spawn link on a test
-page.
+Parameters:
 
 - `files`: an array of gitignore file globs. All files that are
   matched - ones that would be ignored by gitignore - are included.
@@ -237,7 +233,51 @@ page.
   indicates to treat the files array as a list of exact filenames to
   match, rather than an array of gitignore file globs.
 - `optional`: default false; if set to true, will not error if the
-  file(s) specified are not found
+  file(s) specified are not found.
+
+Each file should be JSON and contain an array of artifact objects:
+
+```json
+[
+  {
+    "name": "my-file",
+    "link": "https://example.com/this-is-my-file",
+    "visibility": "public"
+  },
+  {
+    "name": "my-file-with-params",
+    "link": "https://example.com/this-is-my-file?task=123&build=456",
+    "visibility": "public",
+    "do_not_encode_link": true,
+    "associated_links": [
+      {
+        "name": "Documentation",
+        "link": "https://example.com/docs"
+      },
+      {
+        "name": "Raw Data",
+        "link": "https://example.com/data?format=json&id=123",
+        "do_not_encode_link": true
+      }
+    ]
+  }
+]
+```
+
+Fields:
+
+- `name`: the display name for the artifact in the Evergreen UI.
+- `link`: the URL to the artifact.
+- `visibility`: the visibility level for the artifact. Can be "public" or "private".
+- `do_not_encode_link`: optional boolean, defaults to false. Set to true to
+  prevent Evergreen from URL-encoding the link. This is useful when your URL
+  contains query parameters (e.g. `?task=123&build=456`) that should not be escaped.
+- `ignore_for_fetch`: optional boolean, defaults to false. If set to true, the
+  file will not be downloaded when spawning a host from the spawn link on a test page.
+- `associated_links`: optional array of related links to be displayed alongside the main artifact in the UI. Each link object contains:
+  - `name`: the display name for the associated link.
+  - `link`: the URL for the associated link.
+  - `do_not_encode_link`: optional boolean, defaults to false. Set to true to prevent URL-encoding the link.
 
 ## attach.results
 
@@ -340,6 +380,155 @@ Parameters:
   supplied to collect results from multiple files.
 - `files`: a list .xml files to parse and upload. Filepath globs can
   also be supplied to collect results from multiple files.
+
+## cache.restore
+
+`cache.restore` downloads and extracts a previously saved build cache from S3.
+It is typically used with [`cache.save`](#cachesave) to avoid recomputing
+expensive build artifacts (dependency downloads, compiled toolchains, etc.)
+across runs: run `cache.restore` first to fetch the cache, then `cache.save`
+later in the same task to populate it on a miss.
+
+The command computes a cache key as a SHA-256 over the contents of each
+`key_files` entry followed by each `key_expansions` value, then looks for
+`<bucket>/<remote_path>/<sha256_hex>/<name>.tgz`. If the object exists, it is
+extracted into the [task's working directory](./Best-Practices.md#task-directory)
+and the expansion `<name>_cache_hit` is set to `"true"`. If it does not exist
+(or is empty), the command succeeds and sets `<name>_cache_hit` to `""`; a cache
+miss is never an error.
+
+```yaml
+- command: cache.restore
+  params:
+    name: go-modules
+    role_arn: ${role_arn}
+    bucket: my-cache-bucket
+    remote_path: my-project/caches
+    key_files:
+      - go.sum
+    key_expansions:
+      - ${distro_arch}
+```
+
+Parameters:
+
+- `name`: cache identifier, matching `[a-zA-Z0-9-]+`. It names the local tarball
+  (`<name>.tgz`) and the cache-hit expansion (`<name>_cache_hit`).
+- `bucket`: the S3 bucket holding the cache.
+- `remote_path`: the S3 key prefix under which caches are stored. Multiple
+  caches can share one `remote_path`; the cache key directory and `<name>.tgz`
+  filename keep them distinct.
+- `key_files`: optional list of file paths whose contents are folded into the
+  cache key, relative to the working directory.
+- `key_expansions`: required list (at least one entry) of string values folded
+  into the cache key. To pin a static cache that only busts when you rename it,
+  pass a stable value such as `${project_id}`.
+- `aws_key`, `aws_secret`, `aws_session_token`, `role_arn`, `region`:
+  S3 credentials and region, with the same semantics as [`s3.put`](#s3put).
+  Use either `role_arn` (recommended) or `aws_key` + `aws_secret`.
+- `preserve_symlinks`: optional boolean (default `false`). When `true`, symlinks
+  are restored as symlinks (preserving their targets) instead of being
+  dereferenced into regular files, which is required for tools like NPM that
+  expect `node_modules` symlinks. This value is folded into the cache key, so it
+  must match the `cache.save` that produced the cache, and symlink-aware caches
+  never reuse older dereferenced ones.
+
+The cache key is order-sensitive and contains nothing implicit: the OS,
+architecture, and distro are folded in only if you add them to `key_expansions`.
+For architecture-scoped caches (compiled toolchains, build artifacts, etc.), use
+`${distro_arch}`, which resolves to `<GOOS>_<GOARCH>` (e.g. `linux_amd64`); use
+`${distro_id}` instead if a cache must be pinned to an exact distro. The
+`<name>_cache_hit` expansion
+converts dashes in `name` to underscores so it is a usable shell variable (for
+example, `name: mise-and-go` sets `mise_and_go_cache_hit`).
+
+See [`cache.save`](#cachesave) for an end-to-end restore/install/save example.
+
+## cache.save
+
+`cache.save` bundles paths into a tar.gz archive and uploads it to S3 so a
+later run can restore them with [`cache.restore`](#cacherestore). It is
+typically run after [`cache.restore`](#cacherestore) in the same task: the
+restore fetches an existing cache, and the save populates it when the restore
+missed. It recomputes the cache key from the same `key_files` and
+`key_expansions`, so the two commands resolve to the same S3 object without
+sharing hidden state.
+
+If the `<name>_cache_hit` expansion is `"true"` (set by a preceding
+`cache.restore` hit), `cache.save` does nothing and succeeds. Otherwise it
+creates `<name>.tgz` from `paths` and uploads it with skip-existing semantics:
+if another task already saved an object at the same key, the upload is skipped
+and the command still succeeds.
+
+```yaml
+- command: cache.save
+  params:
+    name: go-modules
+    role_arn: ${role_arn}
+    bucket: my-cache-bucket
+    remote_path: my-project/caches
+    key_files:
+      - go.sum
+    key_expansions:
+      - ${distro_arch}
+    paths:
+      - .cache/go-mod
+```
+
+Parameters:
+
+- `name`, `bucket`, `remote_path`, `key_files`, `key_expansions`, and the S3
+  credential parameters are identical to [`cache.restore`](#cacherestore) and
+  must match so the key resolves to the same object.
+- `paths`: required list (at least one entry) of file or directory paths,
+  relative to the working directory, to bundle into the tarball.
+- `preserve_symlinks`: optional boolean (default `false`). When `true`, symlinks
+  are archived as symlinks (preserving their targets) instead of being
+  dereferenced into regular files, which is required for tools like NPM that
+  expect `node_modules` symlinks. This value is folded into the cache key, so it
+  must match the `cache.restore` that reads the cache.
+
+A realistic restore-then-save flow wraps both commands in a function so they
+share parameters, using the cache-hit expansion to skip the expensive install
+step on a hit:
+
+```yaml
+functions:
+  go-mod-cache:
+    - command: cache.restore
+      params:
+        name: go-modules
+        role_arn: ${role_arn}
+        bucket: my-cache-bucket
+        remote_path: my-project/caches
+        key_files: [go.sum]
+        key_expansions: ["${distro_arch}"]
+
+tasks:
+  - name: build
+    commands:
+      - func: go-mod-cache
+      - command: subprocess.exec
+        params:
+          binary: bash
+          include_expansions_in_env:
+            - go_modules_cache_hit
+          args:
+            - "-c"
+            - |
+              if [ "${go_modules_cache_hit}" != "true" ]; then
+                go mod download
+              fi
+      - command: cache.save
+        params:
+          name: go-modules
+          role_arn: ${role_arn}
+          bucket: my-cache-bucket
+          remote_path: my-project/caches
+          key_files: [go.sum]
+          key_expansions: ["${distro_arch}"]
+          paths: [.cache/go-mod]
+```
 
 ## downstream_expansions.set
 
@@ -648,6 +837,10 @@ Notes:
 - The command does not give any feedback (via logs or the UI) what
   tasks were generated so using [s3.put](#s3put) after the command to upload
   the JSON file used is recommended for debuggability.
+- If a task `T` has a dependency on the generator task (i.e. a task that calls
+  `generate.tasks`), by default all the tasks generated by `generate.tasks` will
+  also be added as dependencies to `T`. You can disable this behavior using
+  [`omit_generated_tasks`](Project-Configuration-Files#task-dependencies)).
 
 ```yaml
 - command: generate.tasks
@@ -792,7 +985,7 @@ The hash used for a module during cloning is determined by the following hierarc
 
 > **This command will only work if an app ID and key are saved in your project settings. You can follow [the instructions here](Github-Integrations#dynamic-github-access-tokens) to set it up.**
 
-The github.generate_token command will use the github app saved in your [project settings](Github-Integrations#dynamic-github-access-tokens) to dynamically generate a short lived github access token. If you run into any issues, please see the [FAQ](../FAQ.md#dynamic-github-access-tokens).
+The github.generate_token command will use the github app saved in your [project settings](Github-Integrations#dynamic-github-access-tokens) to dynamically generate a short lived github access token. If you run into any issues, please see the [FAQ](../FAQ/Dynamic-Github-Tokens-FAQ#dynamic-github-access-tokens).
 
 Parameters:
 
@@ -1139,7 +1332,7 @@ Parameters:
 
 This command traces artifact releases with the Papertrail service. It is owned
 by the Release Infrastructure team, and you may receive assistance with it in
-`#ask-devprod-release-tools`.
+[#ask-devprod](https://mongodb.enterprise.slack.com/archives/C69UXN1CP).
 
 ```yaml
 - command: papertrail.trace
@@ -1149,9 +1342,9 @@ by the Release Infrastructure team, and you may receive assistance with it in
     product: mongosh
     version: 1.0.0
     filenames:
-        - mongosh-linux-amd64.tar.gz
-        - mongosh-linux-arm64.tar.gz
-        - *.zip
+      - mongosh-linux-amd64.tar.gz
+      - mongosh-linux-arm64.tar.gz
+      - *.zip
 ```
 
 Parameters:
@@ -1180,6 +1373,9 @@ Parameters:
 ## s3.get
 
 `s3.get` downloads a file from Amazon s3.
+
+> See also [`cache.restore`](#cacherestore) / [`cache.save`](#cachesave) for
+> S3-backed caching of build artifacts keyed by file contents and expansions.
 
 ```yaml
 # Temporary credentials:
@@ -1247,12 +1443,17 @@ Parameters:
 - `require_checksum_sha256`: optional base64-encoded sha256 checksum
   to verify the downloaded file against. If the checksum does not match,
   the command will fail.
+- `version_id`: optional S3 object version ID. When set, the download
+  will fetch this specific version of the object rather than the latest version.
 - `optional`: boolean: if set, won't error if the file isn't found or there's an error with downloading.
 
 ## s3.put
 
 This command uploads a file to Amazon s3, for use in later tasks or
 distribution. Refer to [Task Artifacts Data Retention Policy](../Reference/Limits#task_artifacts_data_retention_policy) for details on the lifecycle of files uploaded via this command. **Files uploaded with this command will also be viewable within the Parsley log viewer if the `content_type` is set to `text/plain`, `application/json` or `text/csv`.**
+
+> See also [`cache.restore`](#cacherestore) / [`cache.save`](#cachesave) for
+> S3-backed caching of build artifacts keyed by file contents and expansions.
 
 ```yaml
 # Temporary credentials:
@@ -1303,6 +1504,19 @@ distribution. Refer to [Task Artifacts Data Retention Policy](../Reference/Limit
     remote_file: mongodb-mongo-master/${build_variant}/${revision}/binaries/mongo-${build_id}.${ext|tgz}
     bucket: mciuploads
     region: us-east-1
+# Upload with associated links:
+- command: s3.put
+  params:
+    role_arn: ${role_arn}
+    local_file: coverage/report.html
+    remote_file: mongodb-mongo-master/${build_variant}/${revision}/coverage/report.html
+    bucket: mciuploads
+    region: us-east-1
+    permissions: private
+    visibility: signed
+    content_type: text/html
+    display_name: Coverage Report
+    associated_links_file: coverage/links.json
 ```
 
 Parameters:
@@ -1365,6 +1579,21 @@ Parameters:
   of putting all the files into the same folder
 - `upload_checksum_sha256`: defaults to false. If set to true, the command will
   tell AWS to include the sha256 checksum of the file as metadata on the uploaded object.
+- `associated_links_file`: the name of a JSON file containing additional links to be displayed alongside the artifact in the UI. The file should contain an array of objects, each with `name` and `link` fields. Example file content:
+
+  ```json
+  [
+    {
+      "name": "Documentation",
+      "link": "https://example.com/docs"
+    },
+    {
+      "name": "Coverage Report",
+      "link": "https://example.com/${task_id}/coverage?format=html&view=summary",
+      "do_not_encode_link": true
+    }
+  ]
+  ```
 
 ## s3.put with multiple files
 
@@ -1477,18 +1706,24 @@ Parameters:
 - `background`: if set to true, the script runs in the background
   instead of the foreground. `shell.exec` starts the script but
   does not wait for the script to exit before running the next command.
-  If the background script exits with an error while the
-  task is still running, the task will continue running.
+  If the background script exits with a non-zero exit code while the
+  task is still running, the failure is logged to the task log
+  (visible in Parsley) and the task is marked as failed. This behavior
+  can be opted out of with `continue_on_err: true`. Note: processes
+  that exit with code 9 (SIGKILL) or 15 (SIGTERM) are excluded from
+  this behavior, as these codes typically indicate the process was
+  terminated by the agent during task cleanup, though user processes
+  may exit with these codes for unrelated reasons.
 - `silent`: if set to true, does not log any shell output during
   execution; useful to avoid leaking sensitive info. Note that you should
   not pass secrets as command-line arguments but instead as environment
   variables or from a file, as Evergreen runs `ps` periodically, which
   will log command-line arguments.
 - `continue_on_err`: by default, a task will fail if the script returns
-  a non-zero exit code; for scripts that set `background`, the task will
-  fail only if the script fails to start. If `continue_on_err`
-  is true and the script fails, it will be ignored and task
-  execution will continue.
+  a non-zero exit code. For scripts that set `background`, the task will
+  also fail if the background script exits abnormally while running.
+  If `continue_on_err` is true, the failure is still logged to the task
+  log but task execution will continue.
 - `system_log`: if set to true, the script's output will be written to
   the task's system logs, instead of inline with logs from the test
   execution.
@@ -1545,8 +1780,14 @@ Parameters:
 - `background`: if set to true, the process runs in the background
   instead of the foreground. `subprocess.exec` starts the process but
   does not wait for the process to exit before running the next command.
-  If the background process exits with an error while the
-  task is still running, the task will continue running.
+  If the background process exits with a non-zero exit code while the
+  task is still running, the failure is logged to the task log
+  (visible in Parsley) and the task is marked as failed. This behavior
+  can be opted out of with `continue_on_err: true`. Note: processes
+  that exit with code 9 (SIGKILL) or 15 (SIGTERM) are excluded from
+  this behavior, as these codes typically indicate the process was
+  terminated by the agent during task cleanup, though user processes
+  may exit with these codes for unrelated reasons.
 - `silent`: do not log output of command. Note that you should
   not pass secrets as command-line arguments but instead as environment
   variables or from a file, as Evergreen runs `ps` periodically, which
@@ -1558,10 +1799,10 @@ Parameters:
 - `redirect_standard_error_to_output`: if true, redirect standard
   error to standard output
 - `continue_on_err`: by default, a task will fail if the command returns
-  a non-zero exit code; for command that set `background`, the task will
-  fail only if the command fails to start. If `continue_on_err`
-  is true and the command fails, it will be ignored and task
-  execution will continue.
+  a non-zero exit code. For commands that set `background`, the task will
+  also fail if the background command exits abnormally while running.
+  If `continue_on_err` is true, the failure is still logged to the task
+  log but task execution will continue.
 - `add_expansions_to_env`: when true, add all expansions to the
   command's environment. In case of conflicting environment variables
   defined by `env` or `include_expansions_in_env`, this has higher
@@ -1599,7 +1840,10 @@ This command allows a task to get a recommended list of tests from the [test sel
 service](https://wiki.corp.mongodb.com/spaces/DBDEVPROD/pages/385846915/Test+Selection+Services). The command will
 populate an output JSON file, which your task can use to decide which tests should run.
 
-This command can only be used if [the test selection feature is enabled by the project](Project-and-Distro-Settings#test-selection-settings).
+This command can only request selected tests if [the test selection feature is enabled by the
+project](Project-and-Distro-Settings#test-selection-settings) and the task is running in a patch. On mainline commits and
+other non-patch versions, the command writes an empty test list to the output file, so no tests are excluded, even if the
+version page shows that test selection is enabled.
 
 ```yaml
 - command: test_selection.get

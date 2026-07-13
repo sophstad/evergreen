@@ -20,9 +20,19 @@
             "childPatches": [
               {
                 "id": "5e4ff3abe3c3317e352062e4",
-                "projectID": "spruce"
+                "projectMetadata": {
+                  "id": "spruce"
+                }
               }
-            ]
+            ],
+            "version": {
+              "id": "5e4ff3abe3c3317e352062e1",
+              "childVersions": [
+                {
+                  "id": "5e4ff3abe3c3317e352062e4"
+                }
+              ]
+            }
           }
         }
       }

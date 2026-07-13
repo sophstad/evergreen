@@ -18,9 +18,8 @@ import (
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/pail"
 	"github.com/evergreen-ci/utility"
-	goparquet "github.com/fraugster/parquet-go"
-	"github.com/fraugster/parquet-go/floor"
 	"github.com/mongodb/grip/sometimes"
+	"github.com/parquet-go/parquet-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,10 +103,32 @@ func TestSendTestResults(t *testing.T) {
 		for testName, testCase := range map[string]func(ctx context.Context, t *testing.T, comm *client.Mock){
 			"Succeeds": func(ctx context.Context, t *testing.T, comm *client.Mock) {
 				t.Run("PassingResults", func(t *testing.T) {
+					conf.Task.TaskOutputInfo = &task.TaskOutput{
+						TestResults: task.TestResultOutput{
+							Version: task.TestResultServiceEvergreen,
+							BucketConfig: evergreen.BucketConfig{
+								Type:              evergreen.BucketTypeLocal,
+								TestResultsPrefix: "test-results",
+								Name:              t.TempDir(),
+							},
+						},
+					}
+					conf.TestResultsCreatedAt = time.Time{}
 					require.NoError(t, sendTestResults(ctx, comm, logger, conf, results))
 					assert.False(t, comm.ResultsFailed)
 				})
 				t.Run("FailingResults", func(t *testing.T) {
+					conf.Task.TaskOutputInfo = &task.TaskOutput{
+						TestResults: task.TestResultOutput{
+							Version: task.TestResultServiceEvergreen,
+							BucketConfig: evergreen.BucketConfig{
+								Type:              evergreen.BucketTypeLocal,
+								TestResultsPrefix: "test-results",
+								Name:              t.TempDir(),
+							},
+						},
+					}
+					conf.TestResultsCreatedAt = time.Time{}
 					results[0].Status = evergreen.TestFailedStatus
 					require.NoError(t, sendTestResults(ctx, comm, logger, conf, results))
 					assert.True(t, comm.ResultsFailed)
@@ -115,6 +136,17 @@ func TestSendTestResults(t *testing.T) {
 				})
 			},
 			"SucceedsNoDisplayTestName": func(ctx context.Context, t *testing.T, comm *client.Mock) {
+				conf.Task.TaskOutputInfo = &task.TaskOutput{
+					TestResults: task.TestResultOutput{
+						Version: task.TestResultServiceEvergreen,
+						BucketConfig: evergreen.BucketConfig{
+							Type:              evergreen.BucketTypeLocal,
+							TestResultsPrefix: "test-results",
+							Name:              t.TempDir(),
+						},
+					},
+				}
+				conf.TestResultsCreatedAt = time.Time{}
 				displayTestName := results[0].DisplayTestName
 				results[0].DisplayTestName = ""
 				require.NoError(t, sendTestResults(ctx, comm, logger, conf, results))
@@ -194,9 +226,7 @@ func saveTestResults(t *testing.T, ctx context.Context, testBucket pail.Bucket, 
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, w.Close()) }()
 
-	pw := floor.NewWriter(goparquet.NewFileWriter(w, goparquet.WithSchemaDefinition(task.ParquetTestResultsSchemaDef)))
-	require.NoError(t, pw.Write(savedParquet))
-	require.NoError(t, pw.Close())
+	require.NoError(t, parquet.Write(w, []testresult.ParquetTestResults{savedParquet}))
 	require.NoError(t, db.Insert(ctx, testresult.Collection, tr))
 	require.NoError(t, svc.AppendTestResultMetadata(resultTestutil.MakeAppendTestResultMetadataReq(ctx, savedResults, tr.ID)))
 	return savedResults

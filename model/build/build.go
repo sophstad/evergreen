@@ -187,16 +187,6 @@ func (b *Build) SetAllTasksBlocked(ctx context.Context, blocked bool) error {
 	)
 }
 
-// SetTasksCache updates one build with the given id
-// to contain the given task caches.
-func SetTasksCache(ctx context.Context, buildId string, tasks []TaskCache) error {
-	return UpdateOne(
-		ctx,
-		bson.M{IdKey: buildId},
-		bson.M{"$set": bson.M{TasksKey: tasks}},
-	)
-}
-
 func (b *Build) UpdateGithubCheckStatus(ctx context.Context, status string) error {
 	if b.GithubCheckStatus == status {
 		return nil
@@ -358,7 +348,7 @@ func (b *Build) GetPRNotificationDescription(tasks []task.Task) string {
 		}
 	}
 
-	grip.ErrorWhen(other > 0, message.Fields{
+	grip.ErrorWhen(context.Background(), other > 0, message.Fields{
 		"source":   "status updates",
 		"message":  "unknown task status",
 		"build_id": b.Id,

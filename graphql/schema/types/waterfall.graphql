@@ -24,7 +24,6 @@ type WaterfallTask {
   displayName: String!
   displayStatusCache: String!
   execution: Int!
-  status: String!
 }
 
 type WaterfallBuild {
@@ -34,18 +33,6 @@ type WaterfallBuild {
   displayName: String!
   version: String!
   tasks: [WaterfallTask!]!
-}
-
-type WaterfallBuildVariant {
-  id: String!
-  builds: [WaterfallBuild!]!
-  displayName: String!
-  version: String!
-}
-
-type WaterfallVersion {
-  inactiveVersions: [Version!]
-  version: Version
 }
 
 type WaterfallPagination {

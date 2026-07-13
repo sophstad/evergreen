@@ -3,12 +3,15 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/evergreen-ci/evergreen"
@@ -63,7 +66,7 @@ tasks:
     status: "failed"
     patch_optional: true
 `
-			p, err := createIntermediateProject([]byte(simple), false)
+			p, err := createIntermediateProject([]byte(simple), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(p.Tasks[2].DependsOn[0].TaskSelector.Name, ShouldEqual, "compile")
@@ -80,7 +83,7 @@ tasks:
 - name: task1
   depends_on: task0
 `
-			p, err := createIntermediateProject([]byte(single), false)
+			p, err := createIntermediateProject([]byte(single), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(p.Tasks[2].DependsOn[0].TaskSelector.Name, ShouldEqual, "task0")
@@ -92,7 +95,7 @@ tasks:
 - name: "compile"
   depends_on: ""
 `
-				p, err := createIntermediateProject([]byte(nameless), false)
+				p, err := createIntermediateProject([]byte(nameless), false, nil)
 				So(p, ShouldBeNil)
 				So(err, ShouldNotBeNil)
 			})
@@ -104,7 +107,7 @@ tasks:
   - name: "task1"
   - status: "failed" #this has no task attached
 `
-				p, err := createIntermediateProject([]byte(nameless), false)
+				p, err := createIntermediateProject([]byte(nameless), false, nil)
 				So(p, ShouldBeNil)
 				So(err, ShouldNotBeNil)
 			})
@@ -113,7 +116,7 @@ tasks:
 tasks:
 - name: "compile"
 `
-				p, err := createIntermediateProject([]byte(nameless), false)
+				p, err := createIntermediateProject([]byte(nameless), false, nil)
 				So(p, ShouldNotBeNil)
 				So(err, ShouldBeNil)
 			})
@@ -142,7 +145,7 @@ buildvariants:
     stepback: false
     priority: 77
 `
-			p, err := createIntermediateProject([]byte(simple), false)
+			p, err := createIntermediateProject([]byte(simple), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			bv := p.BuildVariants[0]
@@ -166,7 +169,7 @@ buildvariants:
   - name: "t2"
     depends_on: "t3"
 `
-			p, err := createIntermediateProject([]byte(simple), false)
+			p, err := createIntermediateProject([]byte(simple), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			bv := p.BuildVariants[0]
@@ -184,7 +187,7 @@ buildvariants:
   tasks:
     name: "t1"
 `
-			p, err := createIntermediateProject([]byte(simple), false)
+			p, err := createIntermediateProject([]byte(simple), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(len(p.BuildVariants), ShouldEqual, 2)
@@ -208,7 +211,7 @@ buildvariants:
   run_on: "distro1"
   tasks: "*"
 `
-			p, err := createIntermediateProject([]byte(single), false)
+			p, err := createIntermediateProject([]byte(single), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(len(p.Ignore), ShouldEqual, 1)
@@ -229,7 +232,7 @@ buildvariants:
   - name: "t1"
     run_on: "test"
 `
-			p, err := createIntermediateProject([]byte(single), false)
+			p, err := createIntermediateProject([]byte(single), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(p.BuildVariants[0].Tasks[0].RunOn[0], ShouldEqual, "test")
@@ -244,7 +247,7 @@ buildvariants:
     run_on: "test"
     distros: "asdasdasd"
 `
-			p, err := createIntermediateProject([]byte(single), false)
+			p, err := createIntermediateProject([]byte(single), false, nil)
 			So(p, ShouldBeNil)
 			So(err, ShouldNotBeNil)
 		})
@@ -256,7 +259,7 @@ buildvariants:
   - name: "t1"
     commit_queue_merge: true
 `
-			p, err := createIntermediateProject([]byte(single), false)
+			p, err := createIntermediateProject([]byte(single), false, nil)
 			So(p, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			bv := p.BuildVariants[0]
@@ -279,7 +282,7 @@ buildvariants:
   - name: "t1"
     activate: true
 `
-	p, err := createIntermediateProject([]byte(yml), false)
+	p, err := createIntermediateProject([]byte(yml), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p)
 	bv := p.BuildVariants[0]
@@ -291,7 +294,8 @@ func TestTranslateTasks(t *testing.T) {
 	parserProject := &ParserProject{
 		BuildVariants: []parserBV{
 			{
-				Name: "bv0",
+				Name:            "bv0",
+				ExecTimeoutSecs: 50,
 				Tasks: parserBVTaskUnits{
 					{
 						Name:            "my_task",
@@ -414,7 +418,7 @@ func TestTranslateTasks(t *testing.T) {
 		Tasks: []parserTask{
 			{Name: "my_task", PatchOnly: utility.TruePtr(), ExecTimeoutSecs: 15},
 			{Name: "your_task", GitTagOnly: utility.FalsePtr(), Stepback: utility.TruePtr(), RunOn: []string{"a different distro"}},
-			{Name: "tg_task", PatchOnly: utility.TruePtr(), RunOn: []string{"a different distro"}},
+			{Name: "tg_task", PatchOnly: utility.TruePtr(), RunOn: []string{"a different distro"}, ExecTimeoutSecs: 10},
 			{Name: "a_task_with_no_special_configuration"},
 			{Name: "a_task_with_build_variant_task_configuration"},
 			{Name: "a_task_with_allowed_requesters", AllowedRequesters: []evergreen.UserRequester{evergreen.AdHocUserRequester}},
@@ -424,7 +428,7 @@ func TestTranslateTasks(t *testing.T) {
 			Tasks: []string{"tg_task"},
 		}},
 	}
-	out, err := TranslateProject(parserProject)
+	out, err := TranslateProject(t.Context(), parserProject)
 	assert.NoError(t, err)
 	assert.NotNil(t, out)
 	require.Len(t, out.Tasks, 6)
@@ -440,10 +444,13 @@ func TestTranslateTasks(t *testing.T) {
 	require.Len(t, out.BuildVariants[0].Tasks, 3)
 	assert.Equal(t, "my_task", out.BuildVariants[0].Tasks[0].Name)
 	assert.True(t, utility.FromBoolPtr(out.BuildVariants[0].Tasks[0].PatchOnly))
+	assert.Equal(t, 30, out.BuildVariants[0].Tasks[0].ExecTimeoutSecs)
 	assert.Equal(t, "your_task", out.BuildVariants[0].Tasks[1].Name)
 	assert.True(t, utility.FromBoolPtr(out.BuildVariants[0].Tasks[1].GitTagOnly))
+	assert.Equal(t, 50, out.BuildVariants[0].Tasks[1].ExecTimeoutSecs)
 	assert.True(t, utility.FromBoolPtr(out.BuildVariants[0].Tasks[1].Stepback))
 	assert.Contains(t, out.BuildVariants[0].Tasks[1].RunOn, "a different distro")
+	assert.Equal(t, 20, out.BuildVariants[0].Tasks[2].ExecTimeoutSecs)
 
 	assert.Equal(t, "my_tg", out.BuildVariants[0].Tasks[2].Name)
 	bvt := out.FindTaskForVariant("my_tg", "bv0")
@@ -457,6 +464,7 @@ func TestTranslateTasks(t *testing.T) {
 
 	bvt = out.FindTaskForVariant("tg_task", "bv0")
 	assert.Equal(t, "my_tg", bvt.Name, "task within a task group retains its task group name in resulting build variant task unit")
+	assert.Equal(t, 20, bvt.ExecTimeoutSecs, "task group in build variant task list with exec_timeout_secs should take precedence over task definition's exec_timeout_secs")
 	assert.NotNil(t, bvt)
 	assert.True(t, utility.FromBoolPtr(bvt.PatchOnly))
 	assert.Contains(t, bvt.RunOn, "my_distro")
@@ -549,7 +557,7 @@ func TestTranslateDependsOn(t *testing.T) {
 						Name: "t2", Variant: &variantSelector{StringSelector: "v1"}}}},
 				},
 			}
-			out, err := TranslateProject(pp)
+			out, err := TranslateProject(t.Context(), pp)
 			So(out, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			deps := out.Tasks[2].DependsOn
@@ -573,7 +581,7 @@ func TestTranslateDependsOn(t *testing.T) {
 						Name: ".a !.b", Variant: &variantSelector{StringSelector: ".cool"}}}},
 				},
 			}
-			out, err := TranslateProject(pp)
+			out, err := TranslateProject(t.Context(), pp)
 			So(out, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(out.Tasks[1].DependsOn[0].Name, ShouldEqual, "*")
@@ -602,7 +610,7 @@ func TestTranslateDependsOn(t *testing.T) {
 				}},
 			}
 
-			out, err := TranslateProject(pp)
+			out, err := TranslateProject(t.Context(), pp)
 			So(out, ShouldNotBeNil)
 			So(err, ShouldNotBeNil)
 			So(len(strings.Split(err.Error(), "\n")), ShouldEqual, 6)
@@ -628,7 +636,7 @@ func TestTranslateBuildVariants(t *testing.T) {
 				},
 			}}
 
-			out, err := TranslateProject(pp)
+			out, err := TranslateProject(t.Context(), pp)
 			So(out, ShouldNotBeNil)
 			So(err, ShouldBeNil)
 			So(len(out.BuildVariants), ShouldEqual, 1)
@@ -743,7 +751,11 @@ func parserTaskSelectorTaskEval(tse *taskSelectorEvaluator, tsge *tagSelectorEva
 	Convey(fmt.Sprintf("tasks [%v] should evaluate to [%v]",
 		strings.Join(names, ", "), strings.Join(exp, ", ")), func() {
 		pbv := parserBV{Name: "build-variant-wow", Tasks: tasks}
-		taskUnit, unmatchedSelectors, unmatchedCriteria, errs := evaluateBVTasks(tse, tsge, vse, pbv, taskDefs)
+		tasksByName := map[string]parserTask{}
+		for _, t := range taskDefs {
+			tasksByName[t.Name] = t
+		}
+		taskUnit, unmatchedSelectors, unmatchedCriteria, errs := evaluateBVTasks(tse, tsge, vse, pbv, tasksByName)
 		if expected != nil {
 			So(errs, ShouldBeNil)
 		} else {
@@ -884,6 +896,55 @@ buildvariants:
 	assert.Len(proj.BuildVariants[0].Tasks, 2)
 }
 
+func TestLocalModuleIncludesWithMainlineVersionID(t *testing.T) {
+	// ReferencePatchID set to a mainline version ID (not a BSON ObjectId) must not
+	// trigger a patch DB lookup; LocalModuleIncludes already on opts should be used.
+	yml := `
+modules:
+- name: "something_different"
+  repo: "evergreen"
+  owner: "evergreen-ci"
+  prefix: "src/third_party"
+  branch: "master"
+include:
+- filename: "include.yml"
+  module: "something_different"
+buildvariants:
+- name: "v1"
+  modules:
+  - something_different
+  tasks:
+  - name: "t1"
+tasks:
+- name: t1
+- name: t2
+`
+
+	opts := &GetProjectOpts{
+		ReferencePatchID: "sys_perf_54af8bc8daef529a87f01dba8dcc3a484ca910a3",
+		LocalModuleIncludes: []patch.LocalModuleInclude{
+			{
+				Module:   "something_different",
+				FileName: "include.yml",
+				FileContent: []byte(`
+buildvariants:
+- name: "v1"
+  tasks:
+  - name: "t2"
+`),
+			},
+		},
+	}
+
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(yml), opts, "id", proj)
+	require.NoError(t, err)
+	require.NotNil(t, proj)
+	require.Len(t, proj.BuildVariants, 1)
+	require.Len(t, proj.BuildVariants[0].Tasks, 2)
+	assert.Equal(t, "t2", proj.BuildVariants[0].Tasks[1].Name)
+}
+
 func TestParseModule(t *testing.T) {
 	assert := assert.New(t)
 	yml := `
@@ -968,7 +1029,7 @@ tasks:
 - name: execTask3
 - name: execTask4
 `
-	p, err := createIntermediateProject([]byte(yml), false)
+	p, err := createIntermediateProject([]byte(yml), false, nil)
 
 	// check that display tasks in bv1 parsed correctly
 	assert.NoError(err)
@@ -997,7 +1058,7 @@ parameters:
 - key: buggy
   value: driver
 `
-	p, err := createIntermediateProject([]byte(yml), false)
+	p, err := createIntermediateProject([]byte(yml), false, nil)
 	assert.NoError(t, err)
 	require.Len(t, p.Parameters, 2)
 	assert.Equal(t, "iter_count", p.Parameters[0].Key)
@@ -1005,49 +1066,6 @@ parameters:
 	assert.Equal(t, "you know it", p.Parameters[0].Description)
 	assert.Equal(t, "buggy", p.Parameters[1].Key)
 	assert.Equal(t, "driver", p.Parameters[1].Value)
-}
-
-func TestContainerParsing(t *testing.T) {
-	yml := `
-containers:
-- name: "container_1"
-  working_dir: "/workdir"
-  image: "demo/image:latest"
-  resources:
-    cpu: 1
-    memory_mb: 200
-  system:
-    cpu_architecture: "arm64"
-    operating_system: "windows"
-    windows_version: "2019"
-- name: "container_2"
-  working_dir: "/otherdir"
-  image: "sample/image:latest"
-  size: "XL"
-  system:
-    cpu_architecture: "x86_64"
-    operating_system: "linux"
-`
-	p := &Project{}
-	ctx := context.Background()
-	_, err := LoadProjectInto(ctx, []byte(yml), nil, "id", p)
-	assert.NoError(t, err)
-	require.Len(t, p.Containers, 2)
-	assert.Equal(t, "container_1", p.Containers[0].Name)
-	assert.Equal(t, "/workdir", p.Containers[0].WorkingDir)
-	assert.Equal(t, "demo/image:latest", p.Containers[0].Image)
-	assert.Equal(t, 1, p.Containers[0].Resources.CPU)
-	assert.Equal(t, 200, p.Containers[0].Resources.MemoryMB)
-	assert.Equal(t, "arm64", string(p.Containers[0].System.CPUArchitecture))
-	assert.Equal(t, "windows", string(p.Containers[0].System.OperatingSystem))
-	assert.Equal(t, "2019", string(p.Containers[0].System.WindowsVersion))
-
-	assert.Equal(t, "container_2", p.Containers[1].Name)
-	assert.Equal(t, "/otherdir", p.Containers[1].WorkingDir)
-	assert.Equal(t, "sample/image:latest", p.Containers[1].Image)
-	assert.Equal(t, "XL", p.Containers[1].Size)
-	assert.Equal(t, "linux", string(p.Containers[1].System.OperatingSystem))
-	assert.Equal(t, "x86_64", string(p.Containers[1].System.CPUArchitecture))
 }
 
 func TestDisplayTaskValidation(t *testing.T) {
@@ -1349,7 +1367,7 @@ tasks:
 - name: execTask4
   tags: [ "even" ]
 `
-	pp, err := createIntermediateProject([]byte(tagYml), false)
+	pp, err := createIntermediateProject([]byte(tagYml), false, nil)
 	assert.NotNil(pp)
 	assert.NoError(err)
 	require.Len(pp.BuildVariants[0].DisplayTasks, 2)
@@ -1358,7 +1376,7 @@ tasks:
 	assert.Len(pp.BuildVariants[0].DisplayTasks[1].ExecutionTasks, 1)
 	assert.Equal(".even", pp.BuildVariants[0].DisplayTasks[1].ExecutionTasks[0])
 
-	proj, err := TranslateProject(pp)
+	proj, err := TranslateProject(t.Context(), pp)
 	assert.NotNil(proj)
 	assert.NoError(err)
 	// assert parser project hasn't changed
@@ -2137,7 +2155,7 @@ buildvariants:
 }
 
 func checkProjectPersists(ctx context.Context, t *testing.T, env evergreen.Environment, yml []byte, ppStorageMethod evergreen.ParserProjectStorageMethod) {
-	pp, err := createIntermediateProject(yml, false)
+	pp, err := createIntermediateProject(yml, false, nil)
 	assert.NoError(t, err)
 	pp.Id = "my-project"
 	pp.Identifier = utility.ToStringPtr("old-project-identifier")
@@ -2160,7 +2178,7 @@ func checkProjectPersists(ctx context.Context, t *testing.T, env evergreen.Envir
 	assert.True(t, bytes.Equal(newYaml, yamlToCompare))
 
 	// ensure that updating with the re-parsed project doesn't error
-	pp, err = createIntermediateProject(newYaml, false)
+	pp, err = createIntermediateProject(newYaml, false, nil)
 	assert.NoError(t, err)
 	pp.Id = "my-project"
 	pp.Identifier = utility.ToStringPtr("new-project-identifier")
@@ -2187,7 +2205,7 @@ func TestParserProjectRoundtrip(t *testing.T) {
 	yml, err := os.ReadFile(filepath)
 	assert.NoError(t, err)
 
-	original, err := createIntermediateProject(yml, false)
+	original, err := createIntermediateProject(yml, false, nil)
 	assert.NoError(t, err)
 
 	// to and from yaml
@@ -2234,11 +2252,6 @@ func TestMergeUnorderedUnique(t *testing.T) {
 				Name: "my_module",
 			},
 		},
-		Containers: []Container{
-			{
-				Name: "container1",
-			},
-		},
 		Functions: map[string]*YAMLCommandSet{
 			"func1": {
 				SingleCommand: &PluginCommandConf{
@@ -2280,11 +2293,6 @@ func TestMergeUnorderedUnique(t *testing.T) {
 				Name: "add_my_module",
 			},
 		},
-		Containers: []Container{
-			{
-				Name: "container2",
-			},
-		},
 		Functions: map[string]*YAMLCommandSet{
 			"add_func1": {
 				SingleCommand: &PluginCommandConf{
@@ -2310,7 +2318,6 @@ func TestMergeUnorderedUnique(t *testing.T) {
 	assert.Len(t, main.Parameters, 2)
 	assert.Len(t, main.Modules, 2)
 	assert.Len(t, main.Functions, 4)
-	assert.Len(t, main.Containers, 2)
 }
 
 func TestMergeUnorderedUniqueFail(t *testing.T) {
@@ -2335,11 +2342,6 @@ func TestMergeUnorderedUniqueFail(t *testing.T) {
 		Modules: []Module{
 			{
 				Name: "my_module",
-			},
-		},
-		Containers: []Container{
-			{
-				Name: "my_container",
 			},
 		},
 		Functions: map[string]*YAMLCommandSet{
@@ -2383,11 +2385,6 @@ func TestMergeUnorderedUniqueFail(t *testing.T) {
 				Name: "my_module",
 			},
 		},
-		Containers: []Container{
-			{
-				Name: "my_container",
-			},
-		},
 		Functions: map[string]*YAMLCommandSet{
 			"func1": {
 				SingleCommand: &PluginCommandConf{
@@ -2414,7 +2411,6 @@ func TestMergeUnorderedUniqueFail(t *testing.T) {
 	assert.Contains(t, err.Error(), "module 'my_module' has been declared already")
 	assert.Contains(t, err.Error(), "function 'func1' has been declared already")
 	assert.Contains(t, err.Error(), "function 'func2' has been declared already")
-	assert.Contains(t, err.Error(), "container 'my_container' has been declared already")
 }
 
 func TestMergeUnordered(t *testing.T) {
@@ -2833,10 +2829,10 @@ ignore:
   - ".github/*"
 `
 
-	p1, err := createIntermediateProject([]byte(mainYaml), false)
+	p1, err := createIntermediateProject([]byte(mainYaml), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p1)
-	p2, err := createIntermediateProject([]byte(smallYaml), false)
+	p2, err := createIntermediateProject([]byte(smallYaml), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p2)
 	err = p1.mergeMultipleParserProjects(p2)
@@ -2882,13 +2878,13 @@ buildvariants:
       - name: task3
 `
 
-	p1, err := createIntermediateProject([]byte(mainYaml), false)
+	p1, err := createIntermediateProject([]byte(mainYaml), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p1)
-	p2, err := createIntermediateProject([]byte(succeed), false)
+	p2, err := createIntermediateProject([]byte(succeed), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p2)
-	p3, err := createIntermediateProject([]byte(fail), false)
+	p3, err := createIntermediateProject([]byte(fail), false, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p3)
 	err = p1.mergeMultipleParserProjects(p2)
@@ -3170,4 +3166,954 @@ func TestCapParserPriorities(t *testing.T) {
 		assert.Equal(t, int64(MaxConfigSetPriority), p.BuildVariants[1].Tasks[0].Priority)
 		assert.Equal(t, int64(MaxConfigSetPriority-5), p.BuildVariants[2].Tasks[0].Priority)
 	})
+}
+
+func TestSetupParallelGitIncludeDirs(t *testing.T) {
+	settings := testutil.TestConfig()
+	testutil.ConfigureIntegrationTest(t, settings)
+
+	for tName, tCase := range map[string]func(t *testing.T, modules ModuleList, includes []parserInclude, opts *GetProjectOpts){
+		"SucceedsWithGitRestoredIncludeFilesFromRepoAndModules": func(t *testing.T, modules ModuleList, includes []parserInclude, opts *GetProjectOpts) {
+			numWorkers := len(includes)
+			dirs, err := setupParallelGitIncludeDirs(t.Context(), modules, includes, numWorkers, opts)
+			assert.NoError(t, err)
+			require.NotZero(t, dirs)
+			defer func() {
+				assert.NoError(t, dirs.cleanup())
+			}()
+
+			assert.Len(t, dirs.clonesForOwnerRepo, len(dirs.worktreesForOwnerRepo), "each git clone should have one set of worktrees")
+			for _, dir := range dirs.clonesForOwnerRepo {
+				assert.True(t, utility.FileExists(dir))
+			}
+			for _, worktreeDirs := range dirs.worktreesForOwnerRepo {
+				assert.Len(t, worktreeDirs, numWorkers)
+				for _, worktreeDir := range worktreeDirs {
+					assert.True(t, utility.FileExists(worktreeDir))
+				}
+			}
+
+			for _, include := range includes {
+				var owner, repo, revision string
+				if include.Module == "" {
+					owner = opts.Ref.Owner
+					repo = opts.Ref.Repo
+					revision = opts.Revision
+				} else {
+					mod, err := GetModuleByName(modules, include.Module)
+					require.NoError(t, err)
+					owner = mod.Owner
+					repo = mod.Repo
+					revision, err = getRevisionForRemoteModule(t.Context(), *mod, include.Module, *opts)
+					require.NoError(t, err)
+				}
+
+				worktreeDir := dirs.getWorktreeForOwnerRepoWorker(owner, repo, 0)
+
+				fileContent, err := thirdparty.GetGitHubFileFromGit(t.Context(), owner, repo, revision, include.FileName, worktreeDir)
+				require.NoError(t, err)
+				require.NotEmpty(t, fileContent)
+
+				comparisonFile, err := thirdparty.GetGithubFile(t.Context(), owner, repo, include.FileName, revision, nil)
+				require.NoError(t, err)
+				require.NotZero(t, comparisonFile)
+				comparisonFileContent, err := base64.StdEncoding.DecodeString(*comparisonFile.Content)
+				require.NoError(t, err)
+				assert.Equal(t, comparisonFileContent, fileContent, "git restored file for include should exactly match file retrieved from GitHub API")
+			}
+		},
+		"SucceedsWithFewerWorkersThanIncludeFiles": func(t *testing.T, modules ModuleList, includes []parserInclude, opts *GetProjectOpts) {
+			const numWorkers = 1
+			dirs, err := setupParallelGitIncludeDirs(t.Context(), modules, includes, numWorkers, opts)
+			assert.NoError(t, err)
+			require.NotZero(t, dirs)
+
+			assert.Len(t, dirs.clonesForOwnerRepo, len(dirs.worktreesForOwnerRepo), "each git clone should have one set of worktrees")
+			for _, dir := range dirs.clonesForOwnerRepo {
+				assert.True(t, utility.FileExists(dir))
+			}
+			for _, worktreeDirs := range dirs.worktreesForOwnerRepo {
+				assert.Len(t, worktreeDirs, numWorkers)
+				for _, worktreeDir := range worktreeDirs {
+					assert.True(t, utility.FileExists(worktreeDir))
+				}
+			}
+		},
+		"NoopsIfReadingFromLocal": func(t *testing.T, modules ModuleList, includes []parserInclude, opts *GetProjectOpts) {
+			opts.ReadFileFrom = ReadFromLocal
+			dirs, err := setupParallelGitIncludeDirs(t.Context(), modules, includes, 1, opts)
+			require.NoError(t, err)
+			assert.Zero(t, dirs)
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			modules := ModuleList{
+				{
+					Name:   "sample",
+					Owner:  "evergreen-ci",
+					Repo:   "sample",
+					Branch: "main",
+				},
+				{
+					Name:   "commit-queue-sandbox",
+					Owner:  "evergreen-ci",
+					Repo:   "commit-queue-sandbox",
+					Branch: "main",
+				},
+				{
+					Name:   "merge-queue-sandbox",
+					Owner:  "evergreen-ci",
+					Repo:   "github-merge-queue-sandbox",
+					Branch: "main",
+				},
+			}
+			includes := []parserInclude{
+				{
+					FileName: "config_test/evg_settings.yml",
+				},
+				{
+					FileName: "config_test/evg_settings_with_3rd_party_defaults.yml",
+				},
+				{
+					FileName: "evergreen.yml",
+					Module:   "sample",
+				},
+				{
+					FileName: "evergreen.yml",
+					Module:   "commit-queue-sandbox",
+				},
+				{
+					FileName: "commit-queue-include-yaml.yaml",
+					Module:   "merge-queue-sandbox",
+				},
+			}
+			opts := &GetProjectOpts{
+				Ref: &ProjectRef{
+					Id:         "evergreen",
+					Identifier: "evergreen",
+					Owner:      "evergreen-ci",
+					Repo:       "evergreen",
+					Branch:     "main",
+					RemotePath: "self-tests.yml",
+				},
+				ReadFileFrom: ReadFromGithub,
+				Revision:     "0503cb25b87dee6a09a74c42c99e314d55edf36b",
+			}
+			tCase(t, modules, includes, opts)
+		})
+	}
+}
+
+func TestClearParamsYAML(t *testing.T) {
+	paramsYAML := "binary: make\nargs:\n- test\n"
+
+	pp := &ParserProject{
+		Pre: &YAMLCommandSet{
+			SingleCommand: &PluginCommandConf{
+				Command:    "shell.exec",
+				ParamsYAML: paramsYAML,
+			},
+		},
+		Post: &YAMLCommandSet{
+			MultiCommand: []PluginCommandConf{
+				{Command: "s3.put", ParamsYAML: paramsYAML},
+			},
+		},
+		Functions: map[string]*YAMLCommandSet{
+			"run-make": {
+				SingleCommand: &PluginCommandConf{
+					Command:    "subprocess.exec",
+					ParamsYAML: paramsYAML,
+				},
+			},
+			"multi-func": {
+				MultiCommand: []PluginCommandConf{
+					{Command: "shell.exec", ParamsYAML: paramsYAML},
+					{Command: "s3.put", ParamsYAML: paramsYAML},
+				},
+			},
+		},
+		Tasks: []parserTask{
+			{
+				Name: "my-task",
+				Commands: []PluginCommandConf{
+					{Command: "shell.exec", ParamsYAML: paramsYAML},
+				},
+			},
+		},
+		TaskGroups: []parserTaskGroup{
+			{
+				Name: "my-group",
+				SetupGroup: &YAMLCommandSet{
+					SingleCommand: &PluginCommandConf{
+						Command:    "shell.exec",
+						ParamsYAML: paramsYAML,
+					},
+				},
+				SetupTask: &YAMLCommandSet{
+					MultiCommand: []PluginCommandConf{
+						{Command: "shell.exec", ParamsYAML: paramsYAML},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, pp.ClearParamsYAML())
+
+	t.Run("ParamsYAMLIsCleared", func(t *testing.T) {
+		assert.Empty(t, pp.Pre.SingleCommand.ParamsYAML)
+		assert.Empty(t, pp.Post.MultiCommand[0].ParamsYAML)
+		assert.Empty(t, pp.Functions["run-make"].SingleCommand.ParamsYAML)
+		assert.Empty(t, pp.Functions["multi-func"].MultiCommand[0].ParamsYAML)
+		assert.Empty(t, pp.Functions["multi-func"].MultiCommand[1].ParamsYAML)
+		assert.Empty(t, pp.Tasks[0].Commands[0].ParamsYAML)
+		assert.Empty(t, pp.TaskGroups[0].SetupGroup.SingleCommand.ParamsYAML)
+		assert.Empty(t, pp.TaskGroups[0].SetupTask.MultiCommand[0].ParamsYAML)
+	})
+
+	t.Run("MarshaledYAMLDoesNotContainParamsYAML", func(t *testing.T) {
+		out, err := yaml.Marshal(pp)
+		require.NoError(t, err)
+		assert.NotContains(t, string(out), "params_yaml")
+		assert.Contains(t, string(out), "params")
+	})
+}
+
+func TestWithinFileAnchorStillWorks(t *testing.T) {
+	// Verify that standard within-file YAML anchors and aliases are resolved correctly
+	// after the switch to yaml.Node-based decoding.
+	yml := `
+tasks:
+- name: task1
+  commands: &common-commands
+  - command: shell.exec
+    params:
+      script: echo hello
+- name: task2
+  commands: *common-commands
+`
+	p, err := createIntermediateProject([]byte(yml), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.Len(t, p.Tasks, 2)
+
+	require.NotNil(t, p.Tasks[0].Commands)
+	require.Len(t, p.Tasks[0].Commands, 1)
+	assert.Equal(t, "shell.exec", p.Tasks[0].Commands[0].Command)
+
+	// The alias *common-commands must resolve to the same value as the anchor.
+	require.NotNil(t, p.Tasks[1].Commands)
+	require.Len(t, p.Tasks[1].Commands, 1)
+	assert.Equal(t, "shell.exec", p.Tasks[1].Commands[0].Command)
+}
+
+func TestVariantSelectorMatrixFormParsedCorrectly(t *testing.T) {
+	// The variantSelector UnmarshalYAML tries string parsing first, then falls back to
+	// matrixDefinition (map[string]parserStringSlice). Verify the fallback path fires
+	// correctly under yaml.Node-based decoding.
+	yml := `
+tasks:
+- name: task1
+  depends_on:
+  - name: upstream
+    variant:
+      os: linux
+      arch: amd64
+`
+	p, err := createIntermediateProject([]byte(yml), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.Len(t, p.Tasks, 1)
+
+	deps := p.Tasks[0].DependsOn
+	require.Len(t, deps, 1)
+	require.NotNil(t, deps[0].TaskSelector.Variant)
+
+	vs := deps[0].TaskSelector.Variant
+	assert.Empty(t, vs.StringSelector, "string selector should be empty for matrix form")
+	assert.Equal(t, parserStringSlice{"linux"}, vs.MatrixSelector["os"])
+	assert.Equal(t, parserStringSlice{"amd64"}, vs.MatrixSelector["arch"])
+}
+
+// moduleIncludeOpts builds GetProjectOpts that serves include files from
+// inline bytes, bypassing GitHub and git.
+func moduleIncludeOpts(includes ...patch.LocalModuleInclude) *GetProjectOpts {
+	return &GetProjectOpts{LocalModuleIncludes: includes}
+}
+
+// anchorModuleIncludeOpts is like moduleIncludeOpts but also enables cross-file
+// YAML anchor support, which is required for cross-file alias tests.
+func anchorModuleIncludeOpts(includes ...patch.LocalModuleInclude) *GetProjectOpts {
+	opts := moduleIncludeOpts(includes...)
+	opts.EnableYAMLAnchors = true
+	return opts
+}
+
+// mainYAMLWithModuleIncludes builds a minimal main YAML that declares one
+// module (named "m") and includes each filename under that module.
+func mainYAMLWithModuleIncludes(mainBody string, filenames ...string) string {
+	header := `
+modules:
+- name: m
+  repo: test
+  owner: test
+  branch: main
+include:
+`
+	for _, fn := range filenames {
+		header += "- filename: " + fn + "\n  module: m\n"
+	}
+	return header + mainBody
+}
+
+// moduleInclude builds a LocalModuleInclude with module "m".
+func moduleInclude(filename, content string) patch.LocalModuleInclude {
+	return patch.LocalModuleInclude{Module: "m", FileName: filename, FileContent: []byte(content)}
+}
+
+// TestCollectAnchors verifies that collectAnchors walks a Node tree and
+// returns all anchor definitions in encounter order, skipping alias nodes.
+func TestCollectAnchors(t *testing.T) {
+	yml := `
+a: &first
+  x: 1
+b:
+  - &second
+    y: 2
+  - *first
+`
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(yml), &node))
+
+	entries := collectAnchors(&node)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "first", entries[0].name)
+	assert.Equal(t, "second", entries[1].name)
+}
+
+// TestBuildAnchorPreambleProducesValidYAML verifies that buildAnchorPreamble
+// produces YAML that re-defines all accumulated anchors so the parser can
+// resolve aliases in subsequent files.
+func TestBuildAnchorPreambleProducesValidYAML(t *testing.T) {
+	// Parse a document that defines two anchors.
+	src := `
+steps:
+  - &step-a
+    command: shell.exec
+  - &step-b
+    command: git.get_project
+`
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(src), &node))
+	anchors := collectAnchors(&node)
+	require.Len(t, anchors, 2)
+
+	preamble, err := buildAnchorPreamble(&anchors)
+	require.NoError(t, err)
+	require.NotEmpty(t, preamble)
+
+	// The preamble must parse cleanly and define both anchors.
+	var preambleNode yaml.Node
+	require.NoError(t, yaml.Unmarshal(preamble, &preambleNode))
+
+	// Prepend preamble to a snippet that uses the anchors as aliases.
+	snippet := `
+tasks:
+  - name: my-task
+    commands:
+      - *step-a
+      - *step-b
+`
+	combined := append(preamble, []byte(snippet)...)
+	var combinedNode yaml.Node
+	require.NoError(t, yaml.Unmarshal(combined, &combinedNode), "combined preamble+snippet should parse without unknown-anchor errors")
+}
+
+// TestBasicCrossFileAnchor verifies that an anchor defined in the main project
+// file can be used as an alias in an include file.
+func TestBasicCrossFileAnchor(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- name: main-task
+  commands:
+  - &common-step
+    command: shell.exec
+    params:
+      script: ./common.sh
+`, "include.yml")
+
+	includeYAML := `
+tasks:
+- name: include-task
+  commands:
+  - *common-step
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML)), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+
+	require.Contains(t, tasksByName, "include-task")
+	require.Len(t, tasksByName["include-task"].Commands, 1)
+	assert.Equal(t, "shell.exec", tasksByName["include-task"].Commands[0].Command)
+	assert.Equal(t, "./common.sh", tasksByName["include-task"].Commands[0].Params["script"])
+}
+
+// TestAnchorInEarlierInclude verifies that an anchor defined in include file N
+// can be used as an alias in include file N+1.
+func TestAnchorInEarlierInclude(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes("", "first.yml", "second.yml")
+
+	firstYAML := `
+tasks:
+- name: first-task
+  commands:
+  - &shared-cmd
+    command: shell.exec
+    params:
+      script: ./shared.sh
+`
+	secondYAML := `
+tasks:
+- name: second-task
+  commands:
+  - *shared-cmd
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(
+			moduleInclude("first.yml", firstYAML),
+			moduleInclude("second.yml", secondYAML),
+		), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+
+	require.Contains(t, tasksByName, "second-task")
+	require.Len(t, tasksByName["second-task"].Commands, 1)
+	assert.Equal(t, "shell.exec", tasksByName["second-task"].Commands[0].Command)
+	assert.Equal(t, "./shared.sh", tasksByName["second-task"].Commands[0].Params["script"])
+}
+
+// TestAnchorInLaterIncludeFileShouldError verifies that an alias in include
+// file N that references an anchor defined only in include file N+1 causes an
+// error, since the anchor is not yet accumulated in the registry when N is
+// processed.
+func TestAnchorInLaterIncludeFileShouldError(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes("", "first.yml", "second.yml")
+
+	firstYAML := `
+tasks:
+- name: first-task
+  commands:
+  - *future-anchor
+`
+	secondYAML := `
+tasks:
+- name: second-task
+  commands:
+  - &future-anchor
+    command: shell.exec
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(
+			moduleInclude("first.yml", firstYAML),
+			moduleInclude("second.yml", secondYAML),
+		), "proj", proj)
+	assert.Error(t, err, "alias referencing a later-defined anchor should fail")
+}
+
+// TestDuplicateAnchorNameAcrossFilesLastWriteWins verifies three things:
+//  1. first.yml uses its own definition A when it references *shared-step.
+//  2. second.yml redefines &shared-step (definition B) and its own *shared-step
+//     use resolves to definition B, not definition A from the preamble.
+//  3. third.yml, which has no anchor definition of its own, also sees definition B.
+func TestDuplicateAnchorNameAcrossFilesLastWriteWins(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes("", "first.yml", "second.yml", "third.yml")
+
+	// first.yml: defines &shared-step as shell.exec and immediately uses it.
+	firstYAML := `
+tasks:
+- name: first-task
+  commands:
+  - &shared-step
+    command: shell.exec
+  - *shared-step
+`
+	// second.yml: redefines &shared-step as git.get_project and uses it too.
+	secondYAML := `
+tasks:
+- name: second-task
+  commands:
+  - &shared-step
+    command: git.get_project
+  - *shared-step
+`
+	// third.yml: no anchor definition, just uses *shared-step — should see definition B.
+	thirdYAML := `
+tasks:
+- name: third-task
+  commands:
+  - *shared-step
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(
+			moduleInclude("first.yml", firstYAML),
+			moduleInclude("second.yml", secondYAML),
+			moduleInclude("third.yml", thirdYAML),
+		), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+
+	// first-task: both commands come from definition A (shell.exec).
+	require.Contains(t, tasksByName, "first-task")
+	require.Len(t, tasksByName["first-task"].Commands, 2)
+	assert.Equal(t, "shell.exec", tasksByName["first-task"].Commands[0].Command)
+	assert.Equal(t, "shell.exec", tasksByName["first-task"].Commands[1].Command)
+
+	// second-task: both commands come from definition B (git.get_project).
+	require.Contains(t, tasksByName, "second-task")
+	require.Len(t, tasksByName["second-task"].Commands, 2)
+	assert.Equal(t, "git.get_project", tasksByName["second-task"].Commands[0].Command)
+	assert.Equal(t, "git.get_project", tasksByName["second-task"].Commands[1].Command)
+
+	// third-task: sees definition B from the registry.
+	require.Contains(t, tasksByName, "third-task")
+	require.Len(t, tasksByName["third-task"].Commands, 1)
+	assert.Equal(t, "git.get_project", tasksByName["third-task"].Commands[0].Command)
+}
+
+// TestAnchorWithNestedAlias verifies that a file can use an alias from an
+// earlier file within an anchor it defines, and a subsequent file can use that
+// anchor as an alias. This exercises the preamble-within-preamble ordering.
+func TestAnchorWithNestedAlias(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes("", "first.yml", "second.yml", "third.yml")
+
+	// first.yml defines &setup-cmd.
+	firstYAML := `
+tasks:
+- name: first-task
+  commands:
+  - &setup-cmd
+    command: shell.exec
+    params:
+      script: ./setup.sh
+`
+	// second.yml uses *setup-cmd (from first) and also defines &cleanup-cmd.
+	secondYAML := `
+tasks:
+- name: second-task
+  commands:
+  - *setup-cmd
+  - &cleanup-cmd
+    command: shell.exec
+    params:
+      script: ./cleanup.sh
+`
+	// third.yml uses *cleanup-cmd (defined in second.yml, which itself used an alias to first.yml).
+	thirdYAML := `
+tasks:
+- name: third-task
+  commands:
+  - *cleanup-cmd
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(
+			moduleInclude("first.yml", firstYAML),
+			moduleInclude("second.yml", secondYAML),
+			moduleInclude("third.yml", thirdYAML),
+		), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+	require.Contains(t, tasksByName, "third-task")
+	require.Len(t, tasksByName["third-task"].Commands, 1)
+	assert.Equal(t, "shell.exec", tasksByName["third-task"].Commands[0].Command)
+	assert.Equal(t, "./cleanup.sh", tasksByName["third-task"].Commands[0].Params["script"])
+}
+
+// TestPreambleKeyStrippedFromParserProject verifies that the _evg_anchors key
+// Evergreen injects does not appear anywhere in the parsed struct.
+func TestPreambleKeyStrippedFromParserProject(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- name: main-task
+  commands:
+  - &step
+    command: shell.exec
+`, "include.yml")
+
+	includeYAML := `
+tasks:
+- name: include-task
+  commands:
+  - *step
+`
+	proj := &Project{}
+	pp, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML)), "proj", proj)
+	require.NoError(t, err)
+
+	// Marshal the parser project back to YAML and confirm _evg_anchors is absent.
+	ppBytes, err := yaml.Marshal(pp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(ppBytes), evgAnchorsKey)
+}
+
+// TestStrictModeWithCrossFileAnchor verifies that cross-file anchor resolution
+// works correctly when unmarshalStrict is true, and that the injected
+// _evg_anchors key does not trigger an unknown-field error.
+func TestStrictModeWithCrossFileAnchor(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- name: main-task
+  commands:
+  - &step
+    command: shell.exec
+    params:
+      script: ./common.sh
+`, "include.yml")
+
+	includeYAML := `
+tasks:
+- name: include-task
+  commands:
+  - *step
+`
+	proj := &Project{}
+	opts := anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML))
+	opts.UnmarshalStrict = true
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML), opts, "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+	require.Contains(t, tasksByName, "include-task")
+	require.Len(t, tasksByName["include-task"].Commands, 1)
+	assert.Equal(t, "shell.exec", tasksByName["include-task"].Commands[0].Command)
+}
+
+// TestNoAnchorsInIncludeFiles verifies that projects without anchors produce
+// identical output before and after the Stage 2 changes (no regression).
+func TestNoAnchorsInIncludeFiles(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- name: main-task
+  commands:
+  - command: shell.exec
+`, "include.yml")
+
+	includeYAML := `
+tasks:
+- name: include-task
+  commands:
+  - command: git.get_project
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML)), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+	assert.Contains(t, tasksByName, "main-task")
+	assert.Contains(t, tasksByName, "include-task")
+}
+
+// TestAnchorOnComplexType verifies that an anchor on a full task definition
+// can be expanded as an alias in a build variant's task list in an include file.
+func TestAnchorOnComplexType(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- &task-template
+  name: templated-task
+  commands:
+  - command: shell.exec
+    params:
+      script: ./run.sh
+`, "include.yml")
+
+	// Include file uses *task-template to add the task to a build variant.
+	includeYAML := `
+buildvariants:
+- name: linux
+  display_name: Linux
+  run_on:
+  - rhel80-small
+  tasks:
+  - name: templated-task
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML)), "proj", proj)
+	require.NoError(t, err)
+
+	require.Len(t, proj.BuildVariants, 1)
+	assert.Equal(t, "linux", proj.BuildVariants[0].Name)
+	require.Len(t, proj.BuildVariants[0].Tasks, 1)
+	assert.Equal(t, "templated-task", proj.BuildVariants[0].Tasks[0].Name)
+}
+
+// TestComplexAnchorAliasExpansion verifies that an alias (*anchor) referencing
+// a multi-field command defined in an earlier file fully expands all fields in
+// the consuming include file.
+func TestComplexAnchorAliasExpansion(t *testing.T) {
+	mainYAML := mainYAMLWithModuleIncludes(`
+tasks:
+- name: base-task
+  commands:
+  - &full-command
+    command: shell.exec
+    params:
+      script: ./run.sh
+      working_dir: src
+`, "include.yml")
+
+	includeYAML := `
+tasks:
+- name: derived-task
+  commands:
+  - *full-command
+`
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(mainYAML),
+		anchorModuleIncludeOpts(moduleInclude("include.yml", includeYAML)), "proj", proj)
+	require.NoError(t, err)
+
+	tasksByName := map[string]ProjectTask{}
+	for _, task := range proj.Tasks {
+		tasksByName[task.Name] = task
+	}
+	require.Contains(t, tasksByName, "derived-task")
+	require.Len(t, tasksByName["derived-task"].Commands, 1)
+	cmd := tasksByName["derived-task"].Commands[0]
+	assert.Equal(t, "shell.exec", cmd.Command)
+	assert.Equal(t, "./run.sh", cmd.Params["script"])
+	assert.Equal(t, "src", cmd.Params["working_dir"])
+}
+
+const cacheTestYML = `
+buildvariants:
+- name: bv1
+  run_on: d
+  tasks:
+  - name: t1
+tasks:
+- name: t1
+`
+
+const cacheTestYMLChanged = `
+buildvariants:
+- name: bv1
+  run_on: d
+  tasks:
+  - name: t1
+  - name: t2
+tasks:
+- name: t1
+- name: t2
+`
+
+// cacheTestMutationYML has two build variants whose display names sort in reverse of file order and
+// a module, so a test can reproduce the two real file-path mutations of a cached project:
+// NewTaskIdConfigForRepotrackerVersion's sort.Stable(BuildVariants) and the push-trigger Modules[i].Ref write.
+const cacheTestMutationYML = `
+modules:
+- name: m1
+  repo: git@github.com:foo/bar.git
+  branch: main
+buildvariants:
+- name: bvz
+  display_name: z
+  run_on: d
+  tasks:
+  - name: t1
+- name: bva
+  display_name: a
+  run_on: d
+  tasks:
+  - name: t1
+tasks:
+- name: t1
+`
+
+// loadProjectIntoCached mirrors what GetProjectFromFile does: it flips the internal cacheEnabled
+// flag so LoadProjectInto routes the translate step through the content-hash cache.
+func loadProjectIntoCached(t *testing.T, yml, projectID string) *Project {
+	proj := &Project{}
+	_, err := LoadProjectInto(t.Context(), []byte(yml), &GetProjectOpts{cacheEnabled: true}, projectID, proj)
+	require.NoError(t, err)
+	return proj
+}
+
+func TestLoadProjectIntoTranslationCache(t *testing.T) {
+	t.Run("FlagOffTranslatesEveryCallAndCachesNothing", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		proj := &Project{}
+		_, err := LoadProjectInto(t.Context(), []byte(cacheTestYML), nil, "id", proj)
+		require.NoError(t, err)
+		_, err = LoadProjectInto(t.Context(), []byte(cacheTestYML), nil, "id", proj)
+		require.NoError(t, err)
+		assert.Equal(t, 0, getTranslationCache().Len(), "cache stays empty when the flag is off")
+	})
+
+	t.Run("FlagOnSecondCallWithUnchangedContentIsCacheHit", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		first := loadProjectIntoCached(t, cacheTestYML, "id")
+		require.Len(t, first.Tasks, 1)
+		assert.Equal(t, 1, getTranslationCache().Len())
+
+		second := loadProjectIntoCached(t, cacheTestYML, "id")
+		assert.Equal(t, 1, getTranslationCache().Len(), "identical content reuses the single entry")
+		assert.Equal(t, first.Tasks, second.Tasks)
+	})
+
+	t.Run("DifferentProjectIDDoesNotCollideOnIdenticalContent", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		loadProjectIntoCached(t, cacheTestYML, "project_a")
+		loadProjectIntoCached(t, cacheTestYML, "project_b")
+		assert.Equal(t, 2, getTranslationCache().Len(), "same content under different projects gets distinct keys")
+	})
+
+	t.Run("ChangedContentIsAMissWithNoInvalidation", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		before := loadProjectIntoCached(t, cacheTestYML, "id")
+		require.Len(t, before.Tasks, 1)
+
+		after := loadProjectIntoCached(t, cacheTestYMLChanged, "id")
+		require.Len(t, after.Tasks, 2, "changed content is recomputed and reflects the new config")
+		assert.Equal(t, 2, getTranslationCache().Len(), "the changed content added a new entry; the old one was never invalidated")
+	})
+
+	t.Run("ConcurrentIdenticalLoadsCoalesce", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		const goroutines = 20
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				proj := &Project{}
+				_, err := LoadProjectInto(t.Context(), []byte(cacheTestYML), &GetProjectOpts{cacheEnabled: true}, "id", proj)
+				assert.NoError(t, err)
+			}()
+		}
+		wg.Wait()
+		assert.Equal(t, 1, getTranslationCache().Len(), "concurrent identical loads produce a single cached entry")
+	})
+
+	t.Run("MutatingReturnedProjectDoesNotCorruptCachedEntry", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		const multiVariantYML = `
+buildvariants:
+- name: a
+  run_on: d
+  tasks:
+  - name: t1
+- name: b
+  run_on: d
+  tasks:
+  - name: t1
+tasks:
+- name: t1
+`
+		first := loadProjectIntoCached(t, multiVariantYML, "id")
+		require.Len(t, first.BuildVariants, 2)
+
+		// Mimic NewTaskIdConfigForRepotrackerVersion, which reorders BuildVariants in place.
+		first.BuildVariants[0], first.BuildVariants[1] = first.BuildVariants[1], first.BuildVariants[0]
+		first.BuildVariants = first.BuildVariants[:1]
+
+		second := loadProjectIntoCached(t, multiVariantYML, "id")
+		require.Len(t, second.BuildVariants, 2, "cache hit still returns all variants; the earlier truncation did not reach the cached entry")
+		assert.Equal(t, "a", second.BuildVariants[0].Name, "cache hit preserves original order despite the earlier in-place swap")
+	})
+
+	t.Run("HottestKeyTracksTheMostReusedConfig", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		// "hot" is loaded three times (two hits); "cold" is loaded twice (one hit).
+		loadProjectIntoCached(t, cacheTestYML, "hot")
+		loadProjectIntoCached(t, cacheTestYML, "hot")
+		loadProjectIntoCached(t, cacheTestYML, "hot")
+		loadProjectIntoCached(t, cacheTestYML, "cold")
+		loadProjectIntoCached(t, cacheTestYML, "cold")
+
+		key, hits := hottestTranslationKey()
+		sha, err := parserProjectContentSHA(mustLoadIntermediate(t, cacheTestYML))
+		require.NoError(t, err)
+		assert.Equal(t, contentTranslationKey(sha, "hot"), key)
+		assert.Equal(t, int64(2), hits)
+	})
+
+	t.Run("ReturnedCopyIsolatesCallerMutationsFromCache", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		first := loadProjectIntoCached(t, cacheTestMutationYML, "id")
+		require.Len(t, first.BuildVariants, 2)
+		require.Len(t, first.Modules, 1)
+		originalOrder := []string{first.BuildVariants[0].Name, first.BuildVariants[1].Name}
+		originalRef := first.Modules[0].Ref
+
+		// Reproduce the two real file-path mutations on the returned project: the repotracker path
+		// reorders BuildVariants via sort.Stable, and the push-trigger path overwrites Modules[i].Ref.
+		sort.Stable(first.BuildVariants)
+		require.NotEqual(t, originalOrder, []string{first.BuildVariants[0].Name, first.BuildVariants[1].Name}, "sort must actually reorder for this test to be meaningful")
+		first.Modules[0].Ref = "mutated-ref"
+
+		second := loadProjectIntoCached(t, cacheTestMutationYML, "id")
+		assert.Equal(t, originalOrder, []string{second.BuildVariants[0].Name, second.BuildVariants[1].Name}, "cached entry keeps original variant order despite the first caller's sort")
+		assert.Equal(t, originalRef, second.Modules[0].Ref, "cached entry's module ref is not corrupted by the first caller's write")
+	})
+
+	t.Run("ConcurrentCallersMutateReturnedCopiesRaceFree", func(t *testing.T) {
+		t.Cleanup(resetTranslationCacheForTesting)
+		// Warm the cache so every goroutine takes a hit and each gets its own copy.
+		loadProjectIntoCached(t, cacheTestMutationYML, "id")
+
+		const goroutines = 20
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				proj := &Project{}
+				_, err := LoadProjectInto(t.Context(), []byte(cacheTestMutationYML), &GetProjectOpts{cacheEnabled: true}, "id", proj)
+				assert.NoError(t, err)
+				// If the copies shared backing arrays, concurrent sorts would trip the race detector.
+				sort.Stable(proj.BuildVariants)
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+// mustLoadIntermediate returns the merged intermediate project for yml, matching what LoadProjectInto
+// hashes for the cache key.
+func mustLoadIntermediate(t *testing.T, yml string) *ParserProject {
+	proj := &Project{}
+	pp, err := LoadProjectInto(t.Context(), []byte(yml), nil, "id", proj)
+	require.NoError(t, err)
+	return pp
 }

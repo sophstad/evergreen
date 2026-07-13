@@ -7,9 +7,13 @@ import (
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/evergreen-ci/evergreen/util"
 	"github.com/evergreen-ci/pail"
+	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/anser/bsonutil"
 	adb "github.com/mongodb/anser/db"
+	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -35,6 +39,7 @@ var (
 	FilterPrefixKey            = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "FilterPrefix")
 	BucketTypeKey              = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "BucketType")
 	RegionKey                  = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "Region")
+	AWSAccountIDKey            = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "AWSAccountID")
 	AdminBucketCategoryKey     = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "AdminBucketCategory")
 	ProjectAssociationsKey     = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "ProjectAssociations")
 	RuleIDKey                  = bsonutil.MustHaveTag(S3LifecycleRuleDoc{}, "RuleID")
@@ -49,9 +54,10 @@ var (
 
 // BucketInfo contains information needed to fetch lifecycle rules for a bucket.
 type BucketInfo struct {
-	Name    string
-	Region  string
-	RoleARN *string
+	Name       string
+	Region     string
+	RoleARN    *string
+	ExternalID *string
 }
 
 // DiscoverAdminManagedBuckets returns information about admin-managed buckets from BucketsConfig.
@@ -81,6 +87,11 @@ func DiscoverAdminManagedBuckets(ctx context.Context, settings *evergreen.Settin
 			info.RoleARN = &arn
 		}
 
+		if bucket.ExternalID != "" {
+			extID := bucket.ExternalID
+			info.ExternalID = &extID
+		}
+
 		buckets[bucket.Name] = info
 	}
 
@@ -89,6 +100,110 @@ func DiscoverAdminManagedBuckets(ctx context.Context, settings *evergreen.Settin
 	}
 
 	return buckets, nil
+}
+
+// S3LifecycleClient fetches lifecycle configurations for an S3 bucket.
+type S3LifecycleClient interface {
+	GetBucketLifecycleConfiguration(ctx context.Context, bucket, region string, roleARN *string, externalID *string) ([]pail.LifecycleRule, error)
+}
+
+// DiscoverAndCacheProjectBucket checks if we have lifecycle rules cached for a bucket and fetches them if not.
+// It returns true if rules were successfully cached (discovery succeeded), false if already cached, if the
+// bucket's account is in accountsWithoutLifecycleRules, or if discovery failed.
+// This is best-effort - errors are logged but not returned to avoid failing file uploads.
+func DiscoverAndCacheProjectBucket(ctx context.Context, bucketName, region string, roleARN *string, externalID *string, projectID string, accountsWithoutLifecycleRules []string, client S3LifecycleClient) bool {
+	// Derive the AWS account ID from the role ARN so we can check it against the skip list.
+	var awsAccountID string
+	if roleARN != nil {
+		if id, ok := util.AWSAccountIDFromIAMARN(*roleARN); ok {
+			awsAccountID = id
+		}
+	}
+
+	if awsAccountID != "" && evergreen.IsAccountWithoutLifecycleRules(awsAccountID, accountsWithoutLifecycleRules) {
+		grip.Info(ctx, message.Fields{
+			"message":    "skipping lifecycle rule discovery for bucket in account without lifecycle rules access",
+			"bucket":     bucketName,
+			"account_id": awsAccountID,
+			"project":    projectID,
+		})
+		return false
+	}
+
+	existingRules, err := FindAllRulesForBucket(ctx, bucketName)
+	if err != nil {
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message": "error checking for existing bucket lifecycle rules",
+			"bucket":  bucketName,
+		}))
+		return false
+	}
+
+	if len(existingRules) > 0 {
+		return false
+	}
+
+	grip.Info(ctx, message.Fields{
+		"message": "discovering lifecycle rules for new bucket",
+		"bucket":  bucketName,
+		"project": projectID,
+	})
+
+	awsRules, err := client.GetBucketLifecycleConfiguration(ctx, bucketName, region, roleARN, externalID)
+	if err != nil {
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
+			"message": "failed to discover bucket lifecycle rules",
+			"bucket":  bucketName,
+			"project": projectID,
+		}))
+		return false
+	}
+
+	for _, awsRule := range awsRules {
+		doc := &S3LifecycleRuleDoc{
+			BucketName:              bucketName,
+			FilterPrefix:            awsRule.Prefix,
+			BucketType:              BucketTypeUserSpecified,
+			Region:                  region,
+			AWSAccountID:            awsAccountID,
+			RuleID:                  awsRule.ID,
+			RuleStatus:              awsRule.Status,
+			ExpirationDays:          utility.ConvertInt32PtrToIntPtr(awsRule.ExpirationDays),
+			TransitionToIADays:      utility.ConvertInt32PtrToIntPtr(awsRule.TransitionToIADays),
+			TransitionToGlacierDays: utility.ConvertInt32PtrToIntPtr(awsRule.TransitionToGlacierDays),
+			Transitions:             convertPailTransitions(awsRule.Transitions),
+			ProjectAssociations:     []string{projectID},
+			LastSyncedAt:            time.Now(),
+		}
+
+		if err := doc.Upsert(ctx); err != nil {
+			grip.Warning(ctx, message.WrapError(err, message.Fields{
+				"message": "failed to cache lifecycle rule",
+				"bucket":  bucketName,
+				"prefix":  awsRule.Prefix,
+			}))
+		}
+	}
+
+	grip.Info(ctx, message.Fields{
+		"message":     "successfully cached lifecycle rules for bucket",
+		"bucket":      bucketName,
+		"rules_count": len(awsRules),
+		"project":     projectID,
+	})
+	return true
+}
+
+// convertPailTransitions converts pail.Transition to s3lifecycle.Transition.
+func convertPailTransitions(pailTransitions []pail.Transition) []Transition {
+	transitions := make([]Transition, 0, len(pailTransitions))
+	for _, pt := range pailTransitions {
+		transitions = append(transitions, Transition{
+			Days:         pt.Days,
+			StorageClass: pt.StorageClass,
+		})
+	}
+	return transitions
 }
 
 // S3LifecycleRuleDoc represents a single S3 lifecycle rule for a bucket+prefix combination.
@@ -100,6 +215,9 @@ type S3LifecycleRuleDoc struct {
 	FilterPrefix string `bson:"filter_prefix" json:"filter_prefix"` // Empty string applies to all objects (default rule)
 	BucketType   string `bson:"bucket_type" json:"bucket_type"`
 	Region       string `bson:"region" json:"region"`
+	// AWSAccountID is the 12-digit AWS account ID that owns this bucket, derived from the IAM role ARN used
+	// during discovery. Empty for buckets that use key+secret authentication.
+	AWSAccountID string `bson:"aws_account_id,omitempty" json:"aws_account_id,omitempty"`
 
 	AdminBucketCategory string   `bson:"admin_bucket_category,omitempty" json:"admin_bucket_category,omitempty"`
 	ProjectAssociations []string `bson:"project_associations" json:"project_associations"`
@@ -138,6 +256,7 @@ func (s *S3LifecycleRuleDoc) Upsert(ctx context.Context) error {
 		FilterPrefixKey:            s.FilterPrefix,
 		BucketTypeKey:              s.BucketType,
 		RegionKey:                  s.Region,
+		AWSAccountIDKey:            s.AWSAccountID,
 		AdminBucketCategoryKey:     s.AdminBucketCategory,
 		ProjectAssociationsKey:     s.ProjectAssociations,
 		RuleIDKey:                  s.RuleID,
@@ -180,31 +299,6 @@ func FindByBucketAndPrefix(ctx context.Context, bucketName, filterPrefix string)
 	return doc, errors.Wrapf(err, "finding lifecycle rule for bucket '%s' prefix '%s'", bucketName, filterPrefix)
 }
 
-// FindMatchingRuleForFileKey finds the most specific enabled lifecycle rule using longest-prefix matching.
-// Tries progressively shorter prefixes until a match is found (O(depth) indexed queries).
-func FindMatchingRuleForFileKey(ctx context.Context, bucketName, fileKey string) (*S3LifecycleRuleDoc, error) {
-	if bucketName == "" {
-		return nil, errors.New("bucket name cannot be empty")
-	}
-	if fileKey == "" {
-		return nil, errors.New("file key cannot be empty")
-	}
-
-	prefixes := pail.ExtractPrefixHierarchy(fileKey)
-
-	for _, prefix := range prefixes {
-		doc, err := FindByBucketAndPrefix(ctx, bucketName, prefix)
-		if err != nil {
-			return nil, err
-		}
-		if doc != nil && doc.RuleStatus == "Enabled" {
-			return doc, nil
-		}
-	}
-
-	return nil, nil
-}
-
 // FindAllRulesForBucket retrieves all lifecycle rules for the specified bucket.
 func FindAllRulesForBucket(ctx context.Context, bucketName string) ([]S3LifecycleRuleDoc, error) {
 	if bucketName == "" {
@@ -212,6 +306,11 @@ func FindAllRulesForBucket(ctx context.Context, bucketName string) ([]S3Lifecycl
 	}
 
 	return findS3LifecycleRules(ctx, bson.M{BucketNameKey: bucketName})
+}
+
+// FindAllRules retrieves all S3 lifecycle rules across all buckets.
+func FindAllRules(ctx context.Context) ([]S3LifecycleRuleDoc, error) {
+	return findS3LifecycleRules(ctx, bson.M{})
 }
 
 // FindDistinctBucketNames returns all unique bucket names for the given bucket type.
@@ -261,14 +360,6 @@ func Remove(ctx context.Context, bucketName, filterPrefix string) error {
 	)
 }
 
-// RemoveAll removes all documents from the collection. Use with caution.
-func RemoveAll(ctx context.Context) error {
-	return errors.Wrap(
-		db.RemoveAll(ctx, Collection, bson.M{}),
-		"removing all lifecycle rule documents",
-	)
-}
-
 // UpdateSyncError updates the sync error field. Pass an empty string to clear the error.
 func UpdateSyncError(ctx context.Context, bucketName, filterPrefix, syncError string) error {
 	if bucketName == "" {
@@ -291,4 +382,22 @@ func UpdateSyncError(ctx context.Context, bucketName, filterPrefix, syncError st
 		"updating sync error for bucket '%s' prefix '%s'",
 		bucketName, filterPrefix,
 	)
+}
+
+// BuildPailRulesByBucket converts a slice of S3LifecycleRuleDocs into a map of bucket name
+// to pail.LifecycleRule, converting the type once at setup rather than on every per-file lookup.
+func BuildPailRulesByBucket(rules []S3LifecycleRuleDoc) map[string][]pail.LifecycleRule {
+	byBucket := map[string][]pail.LifecycleRule{}
+	for _, rule := range rules {
+		var expDays *int32
+		if rule.ExpirationDays != nil {
+			expDays = utility.ToInt32Ptr(int32(*rule.ExpirationDays))
+		}
+		byBucket[rule.BucketName] = append(byBucket[rule.BucketName], pail.LifecycleRule{
+			Prefix:         rule.FilterPrefix,
+			Status:         rule.RuleStatus,
+			ExpirationDays: expDays,
+		})
+	}
+	return byBucket
 }

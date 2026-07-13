@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -185,7 +186,7 @@ func TestFindTaskGroupForTask(t *testing.T) {
 			{Name: "tg3", Tasks: []string{"tg3t1", "tg3t2"}},
 		},
 	}
-	p, err := TranslateProject(parserProject)
+	p, err := TranslateProject(t.Context(), parserProject)
 	require.NoError(t, err)
 	assert.NotNil(t, p)
 
@@ -379,6 +380,7 @@ func TestPopulateExpansions(t *testing.T) {
 		Id: "h",
 		Distro: distro.Distro{
 			Id:      "d1",
+			Arch:    "linux_amd64",
 			WorkDir: "/home/evg",
 			Expansions: []distro.Expansion{
 				{
@@ -424,13 +426,14 @@ func TestPopulateExpansions(t *testing.T) {
 
 	expansions, err := PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 26)
+	require.Len(map[string]string(expansions), 28)
 	assert.Equal("0", expansions.Get("execution"))
 	assert.Equal("v1", expansions.Get("version_id"))
 	assert.Equal("t1", expansions.Get("task_id"))
 	assert.Equal("magical task", expansions.Get("task_name"))
 	assert.Equal("b1", expansions.Get("build_id"))
 	assert.Equal("magic", expansions.Get("build_variant"))
+	assert.Equal("false", expansions.Get("is_test_selection_enabled"))
 	assert.Equal("0ed7cbd33263043fa95aadb3f6068ef8d076854a", expansions.Get("revision"))
 	assert.Equal("0ed7cbd33263043fa95aadb3f6068ef8d076854a", expansions.Get("github_commit"))
 	assert.Equal("mci-favorite", expansions.Get("project"))
@@ -442,6 +445,7 @@ func TestPopulateExpansions(t *testing.T) {
 	assert.Equal("somebody", expansions.Get("author"))
 	assert.Equal("somebody@somewhere.com", expansions.Get("author_email"))
 	assert.Equal("d1", expansions.Get("distro_id"))
+	assert.Equal("linux_amd64", expansions.Get("distro_arch"))
 	assert.Equal("release", expansions.Get("triggered_by_git_tag"))
 	assert.True(expansions.Exists("created_at"))
 	assert.Equal("42", expansions.Get("revision_order_id"))
@@ -450,6 +454,7 @@ func TestPopulateExpansions(t *testing.T) {
 	assert.Equal("github_tag", expansions.Get("requester"))
 	assert.False(expansions.Exists("github_pr_number"))
 	assert.False(expansions.Exists("github_author"))
+	taskDoc.TestSelectionEnabled = true
 
 	require.NoError(VersionUpdateOne(t.Context(), bson.M{VersionIdKey: v.Id}, bson.M{
 		"$set": bson.M{VersionRequesterKey: evergreen.PatchVersionRequester},
@@ -461,7 +466,8 @@ func TestPopulateExpansions(t *testing.T) {
 
 	expansions, err = PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 26)
+	require.Len(map[string]string(expansions), 28)
+	assert.Equal("true", expansions.Get("is_test_selection_enabled"))
 	assert.Equal("true", expansions.Get("is_patch"))
 	assert.Equal("patch", expansions.Get("requester"))
 	assert.Equal("my_repo", expansions.Get("github_repo"))
@@ -487,7 +493,7 @@ func TestPopulateExpansions(t *testing.T) {
 	require.NoError(p.Insert(t.Context()))
 	expansions, err = PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 28)
+	require.Len(map[string]string(expansions), 30)
 	assert.Equal("true", expansions.Get("is_patch"))
 	assert.Equal("true", expansions.Get("is_commit_queue"))
 	assert.Equal("github_merge_queue", expansions.Get("requester"))
@@ -505,7 +511,7 @@ func TestPopulateExpansions(t *testing.T) {
 	require.NoError(p.Insert(t.Context()))
 	expansions, err = PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 30)
+	require.Len(map[string]string(expansions), 32)
 	assert.Equal("true", expansions.Get("is_patch"))
 	assert.Equal("github_pr", expansions.Get("requester"))
 	assert.False(expansions.Exists("is_commit_queue"))
@@ -534,7 +540,7 @@ func TestPopulateExpansions(t *testing.T) {
 
 	expansions, err = PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 30)
+	require.Len(map[string]string(expansions), 32)
 	assert.Equal("github_pr", expansions.Get("requester"))
 	assert.Equal("true", expansions.Get("is_patch"))
 	assert.Equal("my_repo", expansions.Get("github_repo"))
@@ -563,7 +569,7 @@ func TestPopulateExpansions(t *testing.T) {
 	taskDoc.TriggerType = ProjectTriggerLevelTask
 	expansions, err = PopulateExpansions(t.Context(), taskDoc, &h, "")
 	require.NoError(err)
-	require.Len(map[string]string(expansions), 39)
+	require.Len(map[string]string(expansions), 41)
 	assert.Equal(taskDoc.TriggerID, expansions.Get("trigger_event_identifier"))
 	assert.Equal(taskDoc.TriggerType, expansions.Get("trigger_event_type"))
 	assert.Equal(upstreamTask.Revision, expansions.Get("trigger_revision"))
@@ -621,6 +627,9 @@ func TestPopulateExpansionsChildPatch(t *testing.T) {
 	require.NoError(childVersion.Insert(t.Context()))
 	childPatch := &patch.Patch{
 		Version: childVersion.Id,
+		Triggers: patch.TriggerInfo{
+			ParentAsModule: "parentModule",
+		},
 	}
 	require.NoError(childPatch.Insert(t.Context()))
 
@@ -639,9 +648,7 @@ func TestPopulateExpansionsChildPatch(t *testing.T) {
 	require.NoError(err)
 
 	assert.Equal(childVersion.ParentPatchID, expansions.Get("parent_patch_id"))
-	assert.Equal(parentRef.Owner, expansions.Get("parent_github_org"))
-	assert.Equal(parentRef.Repo, expansions.Get("parent_github_repo"))
-	assert.Equal(parentRef.Branch, expansions.Get("parent_github_branch"))
+	assert.Equal(childPatch.Triggers.ParentAsModule, expansions.Get("parent_project_module"))
 }
 
 type projectSuite struct {
@@ -886,7 +893,7 @@ func (s *projectSuite) SetupTest() {
 
 func (s *projectSuite) TestAliasResolution() {
 	// test that .* on variants and tasks selects everything
-	pairs, err := s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[0]}, evergreen.PatchVersionRequester)
+	pairs, err := s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[0]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 11)
 	pairStrs := make([]string, len(pairs.ExecTasks))
@@ -908,7 +915,7 @@ func (s *projectSuite) TestAliasResolution() {
 	s.Equal("bv_1/memes", pairs.DisplayTasks[0].String())
 
 	// test that the .*_2 regex on variants selects just bv_2
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[1]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[1]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 5)
 	for _, pair := range pairs.ExecTasks {
@@ -917,7 +924,7 @@ func (s *projectSuite) TestAliasResolution() {
 	s.Empty(pairs.DisplayTasks)
 
 	// test that the .*_2 regex on tasks selects just the _2 tasks
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[2]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[2]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 4)
 	for _, pair := range pairs.ExecTasks {
@@ -926,7 +933,7 @@ func (s *projectSuite) TestAliasResolution() {
 	s.Empty(pairs.DisplayTasks)
 
 	// test that the 'a' tag only selects 'a' tasks
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[3]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[3]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 4)
 	for _, pair := range pairs.ExecTasks {
@@ -935,7 +942,7 @@ func (s *projectSuite) TestAliasResolution() {
 	s.Empty(pairs.DisplayTasks)
 
 	// test that the .*_2 regex selects the union of both
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[4]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[4]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 4)
 	for _, pair := range pairs.ExecTasks {
@@ -944,19 +951,19 @@ func (s *projectSuite) TestAliasResolution() {
 	s.Empty(pairs.DisplayTasks)
 
 	// test for display tasks
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[5]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[5]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Empty(pairs.ExecTasks)
 	s.Require().Len(pairs.DisplayTasks, 1)
 	s.Equal("bv_1/memes", pairs.DisplayTasks[0].String())
 
 	// test for alias including a task belong to a disabled variant
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[6]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[6]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Empty(pairs.ExecTasks)
 	s.Empty(pairs.DisplayTasks)
 
-	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[8]}, evergreen.PatchVersionRequester)
+	pairs, err = s.project.BuildProjectTVPairsWithAlias([]ProjectAlias{s.aliases[8]}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Require().Len(pairs.ExecTasks, 2)
 	s.Equal("bv_2/a_task_1", pairs.ExecTasks[0].String())
@@ -1068,7 +1075,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		Tasks:         []string{"all"},
 	}
 
-	bvs, tasks, variantTasks := s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks := s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.ElementsMatch([]string{"bv_1", "bv_2"}, bvs)
 	s.Len(tasks, 7)
@@ -1115,7 +1122,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:         []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Len(tasks, 7)
 	s.Len(variantTasks, 2)
@@ -1126,7 +1133,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:         []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1148,7 +1155,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:    []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1170,7 +1177,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:    []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1192,7 +1199,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:         []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "aTags", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "aTags", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1216,7 +1223,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		Tasks:         []string{".a", ".1"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 1)
 	s.Contains(bvs, "bv_2")
 	s.Len(tasks, 3)
@@ -1239,7 +1246,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		Tasks:         []string{".a", ".1", "b_task_2"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1266,7 +1273,7 @@ func (s *projectSuite) TestResolvePatchVTs() {
 		RegexTasks:    []string{"_1$"},
 	}
 
-	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true)
+	bvs, tasks, variantTasks = s.project.ResolvePatchVTs(s.T().Context(), &patchDoc, patchDoc.GetRequester(), "", true, "")
 	s.Len(bvs, 2)
 	s.Contains(bvs, "bv_1")
 	s.Contains(bvs, "bv_2")
@@ -1544,7 +1551,7 @@ tasks:
   depends_on:
     - name: dist-test
 `
-	intermediate, err := createIntermediateProject([]byte(projYml), false)
+	intermediate, err := createIntermediateProject([]byte(projYml), false, nil)
 	s.NoError(err)
 	marshaled, err := yaml.Marshal(intermediate)
 	s.NoError(err)
@@ -2047,6 +2054,13 @@ func TestModuleList(t *testing.T) {
 	assert.False(projModules.IsIdentical(manifest4))
 }
 
+func TestIsWikiRepo(t *testing.T) {
+	assert.True(t, IsWikiRepo("mongo.wiki"))
+	assert.True(t, IsWikiRepo("mongo.wiki.git"))
+	assert.False(t, IsWikiRepo("mongo"))
+	assert.False(t, IsWikiRepo("wiki"))
+}
+
 func TestInjectTaskGroupInfo(t *testing.T) {
 	tg := TaskGroup{
 		Name:     "group-one",
@@ -2509,6 +2523,58 @@ func TestSkipOnNonGitTagBuild(t *testing.T) {
 	t.Run("ReturnsFalseWithAllowedRequesterAndGitTagOnly", func(t *testing.T) {
 		bvt := BuildVariantTaskUnit{GitTagOnly: utility.TruePtr(), AllowedRequesters: []evergreen.UserRequester{evergreen.AdHocUserRequester}}
 		assert.False(t, bvt.SkipOnNonGitTagBuild())
+	})
+}
+
+func TestSkipOnBranch(t *testing.T) {
+	t.Run("ReturnsFalseWithNoFilters", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{}
+		assert.False(t, bvt.skipOnBranch("master"))
+	})
+	t.Run("ReturnsFalseWithEmptyBranch", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"^master$"}}
+		assert.False(t, bvt.skipOnBranch(""))
+	})
+	t.Run("AllowedBranchesMatchReturnsNotSkipped", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"^master$"}}
+		assert.False(t, bvt.skipOnBranch("master"))
+	})
+	t.Run("AllowedBranchesNoMatchReturnsSkipped", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"^master$"}}
+		assert.True(t, bvt.skipOnBranch("v20260415"))
+	})
+	t.Run("AllowedBranchesPartialMatchWorks", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"master"}}
+		assert.False(t, bvt.skipOnBranch("my-master-branch"))
+	})
+	t.Run("AllowedBranchesMultiplePatternsAnyMatch", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"^master$", "^main$"}}
+		assert.False(t, bvt.skipOnBranch("main"))
+		assert.True(t, bvt.skipOnBranch("release"))
+	})
+	t.Run("IgnoredBranchesMatchReturnsSkipped", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{IgnoredBranches: []string{`^v\d+`}}
+		assert.True(t, bvt.skipOnBranch("v20260415"))
+	})
+	t.Run("IgnoredBranchesNoMatchReturnsNotSkipped", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{IgnoredBranches: []string{`^v\d+`}}
+		assert.False(t, bvt.skipOnBranch("master"))
+	})
+	t.Run("AllowedBranchesTakesPrecedenceOverIgnored", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{
+			AllowedBranches: []string{"^master$"},
+			IgnoredBranches: []string{".*"},
+		}
+		assert.False(t, bvt.skipOnBranch("master"))
+		assert.True(t, bvt.skipOnBranch("release"))
+	})
+	t.Run("InvalidRegexIsSkipped", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{AllowedBranches: []string{"[invalid"}}
+		assert.True(t, bvt.skipOnBranch("master"))
+	})
+	t.Run("InvalidRegexInIgnoredDoesNotSkip", func(t *testing.T) {
+		bvt := BuildVariantTaskUnit{IgnoredBranches: []string{"[invalid"}}
+		assert.False(t, bvt.skipOnBranch("master"))
 	})
 }
 
@@ -2975,7 +3041,7 @@ patch_aliases:
 	s.NotNil(pc)
 
 	alias := pc.PatchAliases[0]
-	pairs, err := p.BuildProjectTVPairsWithAlias([]ProjectAlias{alias}, evergreen.PatchVersionRequester)
+	pairs, err := p.BuildProjectTVPairsWithAlias([]ProjectAlias{alias}, evergreen.PatchVersionRequester, "")
 	s.NoError(err)
 	s.Len(pairs.ExecTasks, 1)
 	pairStrs := make([]string, len(pairs.ExecTasks))
@@ -3057,5 +3123,93 @@ func (s *projectSuite) TestBuildVariantPathsMatchAny() {
 			files = []string{"server/conf/conf-test-e2e.properties"}
 			So(bv.ChangedFilesMatchPaths(files), ShouldBeTrue)
 		})
+	})
+}
+
+func TestFindProjectTaskWithCache(t *testing.T) {
+	project := &Project{
+		Tasks: []ProjectTask{
+			{Name: "task1"},
+			{Name: "task2"},
+			{Name: "task3"},
+		},
+	}
+
+	// Without cache (fallback)
+	task := project.FindProjectTask("task2")
+	assert.NotNil(t, task)
+	assert.Equal(t, "task2", task.Name)
+
+	// With cache
+	project.buildTaskCache()
+	task = project.FindProjectTask("task2")
+	assert.NotNil(t, task)
+	assert.Equal(t, "task2", task.Name)
+
+	// Not found
+	task = project.FindProjectTask("nonexistent")
+	assert.Nil(t, task)
+
+	// Test first task
+	task = project.FindProjectTask("task1")
+	assert.NotNil(t, task)
+	assert.Equal(t, "task1", task.Name)
+
+	// Test last task
+	task = project.FindProjectTask("task3")
+	assert.NotNil(t, task)
+	assert.Equal(t, "task3", task.Name)
+}
+
+func BenchmarkFindProjectTask(b *testing.B) {
+	// Create project with many tasks
+	project := &Project{}
+	for i := 0; i < 5000; i++ {
+		project.Tasks = append(project.Tasks, ProjectTask{
+			Name: fmt.Sprintf("task%d", i),
+		})
+	}
+
+	b.Run("WithoutCache", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = project.FindProjectTask("task4999")
+		}
+	})
+
+	b.Run("WithCache", func(b *testing.B) {
+		project.buildTaskCache()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = project.FindProjectTask("task4999")
+		}
+	})
+}
+
+func TestVerifyCheckRunLimit(t *testing.T) {
+	const settingsLimit = 5
+
+	t.Run("WithAppAuthBelowLimitShouldNotError", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(settingsLimit-1, settingsLimit, true))
+	})
+	t.Run("WithAppAuthAtLimitShouldNotError", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(settingsLimit, settingsLimit, true))
+	})
+	t.Run("WithAppAuthAboveLimitShouldError", func(t *testing.T) {
+		assert.Error(t, VerifyCheckRunLimit(settingsLimit+1, settingsLimit, true))
+	})
+	t.Run("WithoutAppAuthBelowThresholdShouldNotError", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(CheckRunGitHubAppAuthThreshold-1, settingsLimit, false))
+	})
+	t.Run("WithoutAppAuthAtThresholdShouldNotError", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(CheckRunGitHubAppAuthThreshold, settingsLimit, false))
+	})
+	t.Run("WithoutAppAuthAboveThresholdShouldError", func(t *testing.T) {
+		assert.Error(t, VerifyCheckRunLimit(CheckRunGitHubAppAuthThreshold+1, settingsLimit, false))
+	})
+	t.Run("WithoutAppAuthIgnoresSettingsLimit", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(settingsLimit+1, settingsLimit, false))
+	})
+	t.Run("WithAppAuthIgnoresThreshold", func(t *testing.T) {
+		assert.NoError(t, VerifyCheckRunLimit(CheckRunGitHubAppAuthThreshold+1, CheckRunGitHubAppAuthThreshold+2, true))
 	})
 }

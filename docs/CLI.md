@@ -4,20 +4,14 @@
 
 ## Downloading the Command Line Tool
 
-Go to your [evergreen user settings page](https://spruce.mongodb.com/preferences) and follow the steps there.
+Go to your [evergreen user settings page](https://spruce.corp.mongodb.com/preferences) and follow the steps there.
 Copy and paste the text in the configuration panel on the settings page into a file in your _home directory_ called `.evergreen.yml`, which will contain the information needed for the client to access the server.
 
 On macOS, the evergreen binary is currently not notarized. To allow running it, go to System Preferences, then Security and Privacy. You should be able to make an exception for it in the "General" tab.
 
 ## Authentication
 
-[Service users](../Project-Configuration/Project-and-Distro-Settings#service-users) do not need any further authentication as they can rely on the api key in the `.evergreen.yml` file.
-
-API Keys will soon be deprecated for human users. The following will need to be done to authenticate when using the CLI.
-
-### (Legacy) Static Token Authentication
-
-We are currently in the process of deprecating static tokens for human users. If you are using a static token, please see the [Static Token Deprecation FAQ](../FAQ/Static-Token-Deprecation-FAQ.md) for more information.
+Human users authenticate with OAuth. [Service users](../Project-Configuration/Project-and-Distro-Settings#service-users), also called API users, authenticate with static credentials in the `.evergreen.yml` file.
 
 ### Ensure that your Evergreen CLI is not out of date
 
@@ -25,9 +19,9 @@ Please use `evergreen get-update` to upgrade your Evergreen CLI if you don't hav
 
 ### OAuth Authentication
 
-To start authenticating via OAuth, you will need to comment out or delete the `api_key` field from your `~/.evergreen.yml` file.
+Human users should comment out or delete the `api_key` field from their `~/.evergreen.yml` file.
 
-After doing so, the next time you run an evergreen command that requires authentication, you will be prompted to authenticate. If you would like to not use a browser to authenticate, please see the documentation [here](../Hosts/Spawn-Hosts.md#evergreen-cli).
+After doing so, the next time you run an evergreen command that requires authentication, you will be prompted to authenticate. If you would like to not use a browser to authenticate, please see the documentation [here](../Hosts/Spawn-Hosts.md#evergreen-cli-on-a-spawn-host).
 
 ## Basic Patch Usage
 
@@ -109,6 +103,12 @@ Note that `set-module` command will not work for module includes and this flag m
 evergreen patch --include-modules
 ```
 
+To specify module paths inline (overriding any configured paths for that invocation), use `--include-module`:
+
+```bash
+evergreen patch --include-module my_module=/path/to/my_module
+```
+
 ## Test Selection
 
 To run a patch with [test selection enabled](../Project-Configuration/Project-and-Distro-Settings#test_selection_settings) in a subset of those tasks, you can use the `--test-selection-include-variants`/`--tsv` and `--test-selection-include-tasks`/`--tst` flags. Those will specify a regexp subset of the variants/tasks that run in the patch where test selection will be enabled. You can also specify `--test-selection-exclude-variants` and `--test-selection-exclude-tasks` to define regexp variants/tasks where test selection should _not_ run (exclusion takes precedence over inclusion).
@@ -158,7 +158,6 @@ For example, an enterprising server engineer might create a config file called `
 ```yaml
 api_server_host: #api
 ui_server_host: #ui
-api_key: #apikey
 user: #user
 projects:
   - name: mongodb-mongo-master
@@ -176,7 +175,6 @@ You might also want to create a config called `compile.yml` with
 ```yaml
 api_server_host: #api
 ui_server_host: #ui
-api_key: #apikey
 user: #user
 projects:
   - name: mongodb-mongo-master
@@ -214,7 +212,6 @@ Users can define local aliases in their `evergreen.yml` files and even override 
 ```yaml
 api_server_host: #api
 ui_server_host: #ui
-api_key: #apikey
 user: #user
 projects:
   - name: mongodb-mongo-master
@@ -267,7 +264,17 @@ Finalizing a patch actually creates and schedules and tasks. Before this the pat
 evergreen patch --include-modules
 ```
 
-This will attempt to add changes for each module that your project supports. This flag will prompt you to provide your local absolute path to the module, and it will be stored in your evergreen.yml file. For example:
+This will attempt to add changes for each module that your project supports. This flag will prompt you to provide your local absolute path to the module, and it will be stored in your evergreen.yml file.
+
+To specify module paths directly on the command line without modifying your config, use the `--include-module` flag:
+
+```bash
+evergreen patch --include-module my_module=/path/to/my_module --include-module other_module=/path/to/other
+```
+
+This may be useful when working with multiple clones of the same module or when using automated tooling. It overrides any configured module paths that are set in your ~/.evergreen.yml.
+
+The stored config format looks like:
 
 ```yaml
 projects:
@@ -430,13 +437,39 @@ This feature helps maintain compatibility and ensures all users have access to i
 
 The command `evergreen fetch` can automate downloading of the binaries associated with a particular task, or cloning the repo for the task and setting up patches/modules appropriately. The default cloning depth for fetch is 1000.
 
-Example that downloads the artifacts for the given task ID and cloning its source:
+Required arguments:
+
+- `--task` (`-t`): The task ID.
+- At least one of:
+  - `--source`: Clone the repo for the task.
+  - `--artifacts`: Fetch all artifacts associated with the task.
+  - `--artifact_name`: Fetch a specific artifact by name. Cannot be used in conjunction with `--artifacts`.
+
+Optional arguments:
+
+- `--shallow`: Only download artifacts from the given task. If provided, the command will not fetch any artifacts from dependency tasks.
+- `--dir`: The destination path where the data is fetched to. If omitted, it defaults to the current working directory.
+- `--execution`: Can be used to fetch an older task execution. Note that it only applies to the given task; for dependency tasks, the latest execution will always be fetched.
+
+#### Examples
+
+Clone source and fetch artifacts for a task (includes dependency artifacts):
 
 ```bash
 evergreen fetch -t <task-id> --source --artifacts
 ```
 
-Specify the optional `--dir` argument to choose the destination path where the data is fetched to; if omitted, it defaults to the current working directory.
+Fetch only the given task's artifacts (excluding dependencies):
+
+```bash
+evergreen fetch -t <task-id> --artifacts --shallow
+```
+
+Fetch a single artifact by name:
+
+```bash
+evergreen fetch -t <task-id> --artifact_name "My Artifact Name" --shallow
+```
 
 ### List
 
@@ -660,14 +693,45 @@ api:
 
 The "url" keys in each list item should contain the appropriate URL to the binary for each architecture. The "latest*revision" key should contain the githash that was used to build the binary. It should match the output of `evergreen version` for \_all* the binaries at the URLs listed in order for auto-updates to be successful.
 
+#### Static client download manifest
+
+Evergreen also publishes a static manifest for tools that only need to discover client download URLs. It contains one entry for each supported platform.
+
+```json
+{
+  "client_binaries": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "url": "https://evg-bucket-evergreen.s3.amazonaws.com/evergreen/clients/latest/linux_amd64/evergreen",
+      "display_name": "Linux 64-bit"
+    }
+  ]
+}
+```
+
+The full manifest is available at `https://evg-bucket-evergreen.s3.amazonaws.com/evergreen/clients/latest/manifest.json`. This file is not used for automatic CLI updates. It does not include `latest_revision`. The urls listed in the manifest are static, you can hardcode them in to your application.
+
+### Task Debugger
+
+For debugging task commands on spawn hosts, see the [Task Debugger documentation](Hosts/Debug-Spawn-Hosts.md).
+
 ### Notifications
 
 The Evergreen CLI has the ability to send slack and email notifications for scripting. These use Evergreen's account, so be cautious about rate limits or being marked as a spammer.
 
-```bash
-# Send a Slack message
-evergreen notify slack --target <#channel or @user> --msg <message>
+#### Send a Slack message
 
-# Send an email
-evergreen notify --from <sender> --recipients <to> --subject <subject> --body <body>
+Only service users have permission to use this command, unless the target is yourself.
+
+```bash
+evergreen notify slack --target <#channel or @user> --msg <message>
+```
+
+#### Send an email
+
+Only service users have permission to use this command.
+
+```bash
+evergreen notify email --from <sender> --recipients <to> --subject <subject> --body <body>
 ```

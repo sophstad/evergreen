@@ -69,6 +69,25 @@ type Distro struct {
 
 	// Cost data for pricing calculations
 	CostData CostData `bson:"cost_data,omitempty" json:"cost_data,omitempty" mapstructure:"cost_data,omitempty"`
+
+	// TaskHostOverrides contains settings that should be overridden for EC2
+	// task hosts. If it's non-nil, all fields in this struct replace their
+	// corresponding distro settings, even if the override value is the zero
+	// value (to allow clearing fields).
+	TaskHostOverrides *TaskHostOverrides `bson:"task_host_overrides,omitempty" json:"task_host_overrides,omitempty" mapstructure:"task_host_overrides,omitempty"`
+}
+
+// TaskHostOverrides contains settings that override the distro's provider
+// settings when creating EC2 task hosts.
+type TaskHostOverrides struct {
+	// ProviderAccount overrides the distro's top-level provider account.
+	ProviderAccount string `bson:"provider_account" json:"provider_account" mapstructure:"provider_account"`
+	// The following settings override EC2-specific settings. See
+	// EC2ProviderSettings.
+	IAMInstanceProfileARN        string   `bson:"iam_instance_profile_arn" json:"iam_instance_profile_arn" mapstructure:"iam_instance_profile_arn"`
+	SecurityGroupIDs             []string `bson:"security_group_ids" json:"security_group_ids" mapstructure:"security_group_ids"`
+	SubnetID                     string   `bson:"subnet_id" json:"subnet_id" mapstructure:"subnet_id"`
+	DoNotAssignPublicIPv4Address bool     `bson:"do_not_assign_public_ipv4_address" json:"do_not_assign_public_ipv4_address" mapstructure:"do_not_assign_public_ipv4_address"`
 }
 
 // DistroData is the same as a distro, with the only difference being that all
@@ -293,7 +312,6 @@ type Expansion struct {
 
 const (
 	DockerImageBuildTypeImport = "import"
-	DockerImageBuildTypePull   = "pull"
 
 	// Bootstrapping mechanisms
 	// BootstrapMethodNone is for internal use only.
@@ -406,10 +424,6 @@ func (d *Distro) MaxDurationPerHost() time.Duration {
 		return d.PlannerSettings.maxDurationPerHost
 	}
 
-	if d.ContainerPool != "" {
-		return evergreen.MaxDurationPerDistroHostWithContainers
-	}
-
 	return evergreen.MaxDurationPerDistroHost
 }
 
@@ -512,7 +526,7 @@ func (d *Distro) GetImageID() (string, error) {
 	key := ""
 
 	switch d.Provider {
-	case evergreen.ProviderNameEc2OnDemand, evergreen.ProviderNameEc2Fleet:
+	case evergreen.ProviderNameEc2Fleet:
 		key = "ami"
 	case evergreen.ProviderNameDocker, evergreen.ProviderNameDockerMock:
 		key = "image_url"
@@ -581,15 +595,6 @@ func ValidateArch(arch string) error {
 	return nil
 }
 
-// GetDistroIds returns a slice of distro IDs for the given group of distros
-func (distros DistroGroup) GetDistroIds() []string {
-	var ids []string
-	for _, d := range distros {
-		ids = append(ids, d.Id)
-	}
-	return ids
-}
-
 func (d *Distro) GetProviderSettingByRegion(region string) (*birch.Document, error) {
 	// if no region given but there's a provider settings list, we assume the list is accurate
 	if region == "" {
@@ -613,7 +618,7 @@ func (d *Distro) GetRegionsList(allowedRegions []string) []string {
 	for _, doc := range d.ProviderSettingsList {
 		region, ok := doc.Lookup("region").StringValueOK()
 		if !ok {
-			grip.Debug(message.Fields{
+			grip.Debug(context.Background(), message.Fields{
 				"message":  "provider settings list missing region",
 				"distro":   d.Id,
 				"settings": doc,
@@ -673,8 +678,9 @@ func (d *Distro) GetResolvedHostAllocatorSettings(s *evergreen.Settings) (HostAl
 		catcher.Errorf("'%s' is not a valid host allocator version", resolved.Version)
 	}
 
-	// If release mode is enabled, multiply the distro max hosts by this factor.
-	if !s.ServiceFlags.ReleaseModeDisabled && s.ReleaseMode.DistroMaxHostsFactor > 0 {
+	// If release mode is enabled and the distro supports auto-tuning, multiply the distro max hosts by this factor.
+	// If it doesn't, we should assume that the distro has set its maximum hosts very intentionally.
+	if !s.ServiceFlags.ReleaseModeDisabled && s.ReleaseMode.DistroMaxHostsFactor > 0 && d.HostAllocatorSettings.AutoTuneMaximumHosts {
 		resolved.MaximumHosts = int(math.Ceil(float64(resolved.MaximumHosts) * s.ReleaseMode.DistroMaxHostsFactor))
 	}
 
@@ -726,13 +732,6 @@ func (d *Distro) GetResolvedPlannerSettings(s *evergreen.Settings) (PlannerSetti
 
 	catcher := grip.NewBasicCatcher()
 	catcher.Add(config.ValidateAndDefault())
-
-	if d.ContainerPool != "" {
-		if s.ContainerPools.GetContainerPool(d.ContainerPool) == nil {
-			catcher.Errorf("could not find pool '%s' for distro '%s'", d.ContainerPool, d.Id)
-		}
-		resolved.maxDurationPerHost = evergreen.MaxDurationPerDistroHostWithContainers
-	}
 
 	if resolved.Version == "" {
 		resolved.Version = evergreen.PlannerVersionTunable
@@ -787,7 +786,7 @@ func (d *Distro) GetResolvedPlannerSettings(s *evergreen.Settings) (PlannerSetti
 func (d *Distro) Add(ctx context.Context, creator *user.DBUser) error {
 	err := d.Insert(ctx)
 	if err != nil {
-		return errors.Wrap(err, "Error inserting distro")
+		return errors.Wrap(err, "inserting distro")
 	}
 	return d.AddPermissions(ctx, creator)
 }
@@ -918,7 +917,7 @@ func GetHostCreateDistro(ctx context.Context, createHost apimodels.CreateHost) (
 			return nil, errors.Errorf("distro '%s' not found", createHost.Distro)
 		}
 	}
-	d.Provider = evergreen.ProviderNameEc2OnDemand
+	d.Provider = evergreen.ProviderNameEc2Fleet
 
 	// Do not provision task-spawned hosts.
 	d.BootstrapSettings.Method = BootstrapMethodNone

@@ -7,22 +7,12 @@ input PublicKeyInput {
   name: String!
 }
 
-input UpdateParsleySettingsInput {
-  parsleySettings: ParsleySettingsInput!
-}
-
-input ParsleySettingsInput {
-  sectionsEnabled: Boolean
-  jumpToFailingLineEnabled: Boolean
-}
-
 input UpdateBetaFeaturesInput {
   betaFeatures: BetaFeaturesInput!
 }
 
 input BetaFeaturesInput {
   spruceWaterfallEnabled: Boolean
-  parsleyAIEnabled: Boolean
 }
 
 """
@@ -100,14 +90,15 @@ User is returned by the user query.
 It contains information about a user's id, name, email, and permissions.
 """
 type User {
-  betaFeatures: BetaFeatures!
-  displayName: String!
-  emailAddress: String!
-  parsleyFilters: [ParsleyFilter!]!
-  parsleySettings: ParsleySettings!
-  patches(patchesInput: PatchesInput!): Patches! # user patches
-  permissions: Permissions!
-  settings: UserSettings!
+  betaFeatures: BetaFeatures
+  displayName: String
+  emailAddress: String
+  hasTokenExchangePending: Boolean!
+  parsleyFilters: [ParsleyFilter!]
+  patches(patchesInput: PatchesInput!): Patches # user patches
+  permissions: Permissions
+  settings: UserSettings
+  tokenAccessTokenExpiresAt: Time
   subscriptions: [GeneralSubscription!]
   userId: String!
 }
@@ -122,12 +113,12 @@ type PublicKey {
 
 """
 UserConfig is returned by the userConfig query.
-It contains configuration information such as the user's api key for the Evergreen CLI and a user's
-preferred UI (legacy vs Spruce).
+It contains configuration information for the Evergreen CLI.
 """
 type UserConfig {
   api_key: String!
   api_server_host: String!
+  corp_api_server_host: String!
   ui_server_host: String!
   user: String!
   oauth_issuer: String!
@@ -135,25 +126,12 @@ type UserConfig {
   oauth_connector_id: String!
 }
 
-type UpdateParsleySettingsPayload {
-  parsleySettings: ParsleySettings
-}
-
 type UpdateBetaFeaturesPayload {
   betaFeatures: BetaFeatures
 }
 
-"""
-ParsleySettings contains information about a user's settings for Parsley.
-"""
-type ParsleySettings {
-  sectionsEnabled: Boolean!
-  jumpToFailingLineEnabled: Boolean!
-}
-
 type BetaFeatures {
   spruceWaterfallEnabled: Boolean
-  parsleyAIEnabled: Boolean
 }
 
 """
@@ -192,4 +170,22 @@ type Notifications {
 
 type UseSpruceOptions {
   spruceV1: Boolean
+}
+
+"""
+UserLite replaces User by sidestepping the APIDBUser API model and binding directly to the
+service-layer user model. New clients should query UserLite instead of User.
+"""
+type UserLite {
+  betaFeatures: BetaFeatures
+  displayName: String
+  emailAddress: String
+  hasTokenExchangePending: Boolean!
+  id: String!
+  parsleyFilters: [ParsleyFilter!]
+  patches(patchesInput: PatchesInput!): Patches # user patches
+  permissions: Permissions
+  settings: UserSettings
+  subscriptions: [GeneralSubscription!]
+  tokenAccessTokenExpiresAt: Time
 }

@@ -29,47 +29,6 @@ func buildIdInSlice(builds []Build, id string) bool {
 	return false
 }
 
-func TestGenericBuildFinding(t *testing.T) {
-
-	Convey("When finding builds", t, func() {
-		require.NoError(t, db.Clear(Collection))
-
-		Convey("when finding one build", func() {
-			Convey("the matching build should be returned", func() {
-				buildOne := &Build{Id: "buildOne"}
-				So(buildOne.Insert(t.Context()), ShouldBeNil)
-
-				buildTwo := &Build{Id: "buildTwo"}
-				So(buildTwo.Insert(t.Context()), ShouldBeNil)
-
-				found, err := FindOne(t.Context(), ById(buildOne.Id))
-				So(err, ShouldBeNil)
-				So(found.Id, ShouldEqual, buildOne.Id)
-			})
-		})
-
-		Convey("when finding multiple builds", func() {
-			Convey("a slice of all of the matching builds should be returned", func() {
-
-				buildOne := &Build{Id: "buildOne", Project: "b1"}
-				So(buildOne.Insert(t.Context()), ShouldBeNil)
-
-				buildTwo := &Build{Id: "buildTwo", Project: "b1"}
-				So(buildTwo.Insert(t.Context()), ShouldBeNil)
-
-				buildThree := &Build{Id: "buildThree", Project: "b2"}
-				So(buildThree.Insert(t.Context()), ShouldBeNil)
-
-				found, err := Find(t.Context(), ByProject("b1"))
-				So(err, ShouldBeNil)
-				So(len(found), ShouldEqual, 2)
-				So(buildIdInSlice(found, buildOne.Id), ShouldBeTrue)
-				So(buildIdInSlice(found, buildTwo.Id), ShouldBeTrue)
-			})
-		})
-	})
-}
-
 func TestRecentlyFinishedBuilds(t *testing.T) {
 
 	Convey("When finding all recently finished builds", t, func() {
@@ -307,6 +266,44 @@ func TestBuildSetHasUnfinishedEssentialTask(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestSetTasksCaches(t *testing.T) {
+	defer func() {
+		assert.NoError(t, db.ClearCollections(Collection))
+	}()
+
+	t.Run("NoopsWithEmptyMap", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection))
+		assert.NoError(t, SetTasksCaches(t.Context(), nil))
+	})
+
+	t.Run("SetsDistinctCachesPerBuild", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection))
+		b0 := Build{Id: "b0"}
+		b1 := Build{Id: "b1"}
+		require.NoError(t, b0.Insert(t.Context()))
+		require.NoError(t, b1.Insert(t.Context()))
+
+		tasksByBuild := map[string][]TaskCache{
+			"b0": {{Id: "t0"}},
+			"b1": {{Id: "t1a"}, {Id: "t1b"}},
+		}
+		require.NoError(t, SetTasksCaches(t.Context(), tasksByBuild))
+
+		dbBuild0, err := FindOneId(t.Context(), "b0")
+		require.NoError(t, err)
+		require.NotNil(t, dbBuild0)
+		require.Len(t, dbBuild0.Tasks, 1)
+		assert.Equal(t, "t0", dbBuild0.Tasks[0].Id)
+
+		dbBuild1, err := FindOneId(t.Context(), "b1")
+		require.NoError(t, err)
+		require.NotNil(t, dbBuild1)
+		require.Len(t, dbBuild1.Tasks, 2)
+		assert.Equal(t, "t1a", dbBuild1.Tasks[0].Id)
+		assert.Equal(t, "t1b", dbBuild1.Tasks[1].Id)
+	})
 }
 
 func TestBulkInsert(t *testing.T) {

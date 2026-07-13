@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
@@ -31,10 +32,20 @@ type Mock struct {
 	GetSubscriptionsFail bool
 	MockServiceFlags     *model.APIServiceFlags
 	MockServiceFlagErr   error
+	MockGetProjectResult *model.APIProjectRef
+	MockIsServiceUser    bool
+	MockIsServiceUserErr error
 
-	GetRecentVersionsResult   []restmodel.APIVersion
-	GetBuildsForVersionResult []restmodel.APIBuild
-	GetTasksForBuildResult    []restmodel.APITask
+	GetRecentVersionsResult             []restmodel.APIVersion
+	GetRecentVersionsResultsByRequester map[string][]restmodel.APIVersion
+	GetBuildsForVersionResult           []restmodel.APIBuild
+	GetTasksForBuildResult              []restmodel.APITask
+
+	SendSlackNotificationData *model.APISlack
+	SendEmailNotificationData *model.APIEmail
+
+	ValidateResult validator.ValidationErrors
+	ValidateErr    error
 }
 
 func (c *Mock) Close() {}
@@ -68,6 +79,10 @@ func (*Mock) CreateSpawnHost(ctx context.Context, spawnRequest *model.HostReques
 
 func (*Mock) GetSpawnHost(ctx context.Context, hostID string) (*model.APIHost, error) {
 	return nil, errors.New("(*Mock) GetSpawnHost is not implemented")
+}
+
+func (c *Mock) GetProject(ctx context.Context, projectID string) (*model.APIProjectRef, error) {
+	return c.MockGetProjectResult, nil
 }
 
 func (*Mock) ModifySpawnHost(ctx context.Context, hostID string, changes host.HostModifyOptions) error {
@@ -247,7 +262,13 @@ func (c *Mock) GetSubscriptions(_ context.Context) ([]event.Subscription, error)
 	}, nil
 }
 
-func (c *Mock) SendNotification(_ context.Context, _ string, _ any) error {
+func (c *Mock) SendSlackNotification(_ context.Context, data *model.APISlack) error {
+	c.SendSlackNotificationData = data
+	return nil
+}
+
+func (c *Mock) SendEmailNotification(_ context.Context, data *model.APIEmail) error {
+	c.SendEmailNotificationData = data
 	return nil
 }
 
@@ -271,7 +292,17 @@ func (c *Mock) GetMatchingHosts(context.Context, time.Time, time.Time, string, b
 	return nil, nil
 }
 
-func (c *Mock) GetRecentVersionsForProject(ctx context.Context, project, branch string, startAtOrderNum, limit int) ([]restmodel.APIVersion, error) {
+func (c *Mock) GetRecentVersionsForProject(ctx context.Context, projectID string, requesters []string, startAtOrderNum, limit int) ([]restmodel.APIVersion, error) {
+	if c.GetRecentVersionsResultsByRequester != nil {
+		var merged []restmodel.APIVersion
+		for _, req := range requesters {
+			merged = append(merged, c.GetRecentVersionsResultsByRequester[req]...)
+		}
+		sort.Slice(merged, func(i, j int) bool {
+			return merged[i].Order > merged[j].Order
+		})
+		return merged, nil
+	}
 	if c.GetRecentVersionsResult != nil {
 		return c.GetRecentVersionsResult, nil
 	}
@@ -343,7 +374,7 @@ func (c *Mock) GetUiV2URL(ctx context.Context) (string, error) {
 }
 
 func (c *Mock) Validate(ctx context.Context, data []byte, quiet bool, projectID string) (validator.ValidationErrors, error) {
-	return nil, nil
+	return c.ValidateResult, c.ValidateErr
 }
 
 func (c *Mock) SendPanicReport(ctx context.Context, details *model.PanicReport) error {
@@ -362,4 +393,6 @@ func (c *Mock) SetOAuth(oauth string) {}
 
 func (c *Mock) SetAPIServerHost(serverURL string) {}
 
-func (c *Mock) IsServiceUser(context.Context, string) (bool, error) { return false, nil }
+func (c *Mock) IsServiceUser(context.Context, string) (bool, error) {
+	return c.MockIsServiceUser, c.MockIsServiceUserErr
+}

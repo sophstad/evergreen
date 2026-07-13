@@ -13,6 +13,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/evergreen-ci/evergreen/rest/model"
@@ -87,6 +88,27 @@ func (hph *hostPostHandler) Run(ctx context.Context) gimlet.Responder {
 			return gimlet.MakeJSONErrorResponder(gimlet.ErrorResponse{
 				StatusCode: http.StatusForbidden,
 				Message:    errors.Errorf("not authorized to spawn admin-only distro '%s'", hph.options.DistroID).Error(),
+			})
+		}
+	}
+
+	if hph.options.TaskID != "" {
+		projectID, err := task.FindProjectForTask(ctx, hph.options.TaskID)
+		if err != nil {
+			return gimlet.MakeJSONErrorResponder(gimlet.ErrorResponse{
+				StatusCode: http.StatusNotFound,
+				Message:    fmt.Sprintf("task '%s' not found", hph.options.TaskID),
+			})
+		}
+		if !user.HasPermission(ctx, gimlet.PermissionOpts{
+			Resource:      projectID,
+			ResourceType:  evergreen.ProjectResourceType,
+			Permission:    evergreen.PermissionTasks,
+			RequiredLevel: evergreen.TasksView.Value,
+		}) {
+			return gimlet.MakeJSONErrorResponder(gimlet.ErrorResponse{
+				StatusCode: http.StatusForbidden,
+				Message:    fmt.Sprintf("user '%s' does not have permission to view tasks in project '%s'", user.Id, projectID),
 			})
 		}
 	}
@@ -567,7 +589,7 @@ func (h *attachVolumeHandler) Run(ctx context.Context) gimlet.Responder {
 		return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "getting cloud manager"))
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message": "attaching volume to spawnhost",
 		"host_id": h.hostID,
 		"volume":  h.attachment,
@@ -648,7 +670,7 @@ func (h *detachVolumeHandler) Run(ctx context.Context) gimlet.Responder {
 		})
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message": "detaching volume from spawn host",
 		"host_id": h.hostID,
 		"volume":  h.attachment.VolumeID,
@@ -700,7 +722,7 @@ func (h *createVolumeHandler) Parse(ctx context.Context, r *http.Request) error 
 	if h.volume.Size == 0 {
 		return errors.New("volume size is required")
 	}
-	h.provider = evergreen.ProviderNameEc2OnDemand
+	h.provider = evergreen.ProviderNameEc2Fleet
 	return nil
 }
 
@@ -766,7 +788,7 @@ func (h *deleteVolumeHandler) Factory() gimlet.RouteHandler {
 func (h *deleteVolumeHandler) Parse(ctx context.Context, r *http.Request) error {
 	var err error
 	h.VolumeID, err = validateID(gimlet.GetVars(r)["volume_id"])
-	h.provider = evergreen.ProviderNameEc2OnDemand
+	h.provider = evergreen.ProviderNameEc2Fleet
 	return err
 }
 
@@ -850,7 +872,7 @@ func (h *modifyVolumeHandler) Parse(ctx context.Context, r *http.Request) error 
 		return errors.Wrap(err, "invalid volume ID")
 	}
 
-	h.provider = evergreen.ProviderNameEc2OnDemand
+	h.provider = evergreen.ProviderNameEc2Fleet
 
 	return nil
 }
@@ -1297,7 +1319,7 @@ func (hs *hostStartProcesses) Run(ctx context.Context) gimlet.Responder {
 	for _, hostID := range hs.hostIDs {
 		h, err := data.FindHostByIdWithOwner(ctx, hostID, u)
 		if err != nil {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   hostID,
 				Complete: true,
 				Output:   errors.Wrapf(err, "finding host '%s'", hostID).Error(),
@@ -1305,7 +1327,7 @@ func (hs *hostStartProcesses) Run(ctx context.Context) gimlet.Responder {
 			continue
 		}
 		if h.Status != evergreen.HostRunning {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   hostID,
 				Complete: true,
 				Output:   fmt.Sprintf("can't run script on host with status '%s' because it is not running", h.Status),
@@ -1313,7 +1335,7 @@ func (hs *hostStartProcesses) Run(ctx context.Context) gimlet.Responder {
 			continue
 		}
 		if !h.Distro.JasperCommunication() {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   hostID,
 				Complete: true,
 				Output:   fmt.Sprintf("can't run script on host of distro '%s' because it doesn't support Jasper communication", h.Distro.Id),
@@ -1332,14 +1354,14 @@ func (hs *hostStartProcesses) Run(ctx context.Context) gimlet.Responder {
 		}
 		procID, err := h.StartJasperProcess(ctx, hs.env, opts)
 		if err != nil {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   hostID,
 				Complete: true,
 				Output:   errors.Wrap(err, "running script with Jasper").Error(),
 			}), "adding data for host '%s'", hostID))
 			continue
 		}
-		grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+		grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 			HostID:   hostID,
 			Complete: false,
 			ProcID:   procID,
@@ -1387,7 +1409,7 @@ func (h *hostGetProcesses) Run(ctx context.Context) gimlet.Responder {
 	for _, process := range h.hostProcesses {
 		host, err := data.FindHostByIdWithOwner(ctx, process.HostID, u)
 		if err != nil {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   process.HostID,
 				ProcID:   process.ProcID,
 				Complete: true,
@@ -1398,14 +1420,14 @@ func (h *hostGetProcesses) Run(ctx context.Context) gimlet.Responder {
 
 		complete, output, err := host.GetJasperProcess(ctx, h.env, process.ProcID)
 		if err != nil {
-			grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+			grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 				HostID:   process.HostID,
 				Complete: true,
 				Output:   errors.Wrapf(err, "getting output for process '%s'", process.ProcID).Error(),
 			}), "adding data for process on host '%s'", process.HostID))
 			continue
 		}
-		grip.Error(errors.Wrapf(response.AddData(model.APIHostProcess{
+		grip.Error(ctx, errors.Wrapf(response.AddData(model.APIHostProcess{
 			HostID:   process.HostID,
 			Complete: complete,
 			ProcID:   process.ProcID,

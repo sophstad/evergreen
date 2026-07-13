@@ -98,7 +98,7 @@ func (prioritizer *CmpBasedTaskPrioritizer) PrioritizeTasks(ctx context.Context,
 		startAt = time.Now()
 		err := comparator.setupForSortingTasks(ctx)
 		if err != nil {
-			return nil, nil, errors.Wrap(err, "Error running setup for sorting tasks")
+			return nil, nil, errors.Wrap(err, "running setup for sorting tasks")
 		}
 		setupRuntime += time.Since(startAt)
 
@@ -123,7 +123,7 @@ func (prioritizer *CmpBasedTaskPrioritizer) PrioritizeTasks(ctx context.Context,
 		HighPriorityTasks: prioritizedTaskLists[2],
 	}
 
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"message":                 "finished prioritizing task queues",
 		"instance":                prioritizer.runtimeID,
 		"distro":                  distroId,
@@ -146,7 +146,7 @@ func (prioritizer *CmpBasedTaskPrioritizer) PrioritizeTasks(ctx context.Context,
 func (cbtc *CmpBasedTaskComparator) setupForSortingTasks(ctx context.Context) error {
 	for _, setupFunc := range cbtc.setupFuncs {
 		if err := setupFunc(ctx, cbtc); err != nil {
-			return errors.Wrap(err, "Error running setup for sorting")
+			return errors.Wrap(err, "running setup for sorting")
 		}
 	}
 	return nil
@@ -229,7 +229,7 @@ func (cbtc *CmpBasedTaskComparator) splitTasksByRequester(
 		case task.Requester == evergreen.AdHocRequester:
 			patchTasks = append(patchTasks, task)
 		default:
-			grip.Error(message.Fields{
+			grip.Error(context.Background(), message.Fields{
 				"task":      task.Id,
 				"requester": task.Requester,
 				"runner":    RunnerName,

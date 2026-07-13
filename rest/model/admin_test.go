@@ -98,6 +98,16 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.Api.HttpListenAddr, utility.FromStringPtr(apiSettings.Api.HttpListenAddr))
 	assert.EqualValues(testSettings.Api.URL, utility.FromStringPtr(apiSettings.Api.URL))
 	assert.EqualValues(testSettings.Api.CorpURL, utility.FromStringPtr(apiSettings.Api.CorpURL))
+	assert.EqualValues(testSettings.RateLimit.RESTUserPerHour, apiSettings.RateLimit.RESTUserPerHour)
+	assert.EqualValues(testSettings.RateLimit.RESTUserBurst, apiSettings.RateLimit.RESTUserBurst)
+	assert.EqualValues(testSettings.RateLimit.RESTServicePerHour, apiSettings.RateLimit.RESTServicePerHour)
+	assert.EqualValues(testSettings.RateLimit.RESTServiceBurst, apiSettings.RateLimit.RESTServiceBurst)
+	assert.EqualValues(testSettings.RateLimit.GraphQLUserPerHour, apiSettings.RateLimit.GraphQLUserPerHour)
+	assert.EqualValues(testSettings.RateLimit.GraphQLUserBurst, apiSettings.RateLimit.GraphQLUserBurst)
+	assert.EqualValues(testSettings.RateLimit.GraphQLServicePerHour, apiSettings.RateLimit.GraphQLServicePerHour)
+	assert.EqualValues(testSettings.RateLimit.GraphQLServiceBurst, apiSettings.RateLimit.GraphQLServiceBurst)
+	assert.EqualValues(testSettings.RateLimit.GraphQLComplexityLimit, apiSettings.RateLimit.GraphQLComplexityLimit)
+	assert.EqualValues(testSettings.RateLimit.ElevatedUserIDs, apiSettings.RateLimit.ElevatedUserIDs)
 	assert.EqualValues(testSettings.AuthConfig.PreferredType, utility.FromStringPtr(apiSettings.AuthConfig.PreferredType))
 	assert.EqualValues(testSettings.AuthConfig.Naive.Users[0].Username, utility.FromStringPtr(apiSettings.AuthConfig.Naive.Users[0].Username))
 	assert.EqualValues(testSettings.AuthConfig.Okta.ClientID, utility.FromStringPtr(apiSettings.AuthConfig.Okta.ClientID))
@@ -108,11 +118,24 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.AuthConfig.OAuth.ClientID, utility.FromStringPtr(apiSettings.AuthConfig.OAuth.ClientID))
 	assert.EqualValues(testSettings.AuthConfig.OAuth.ConnectorID, utility.FromStringPtr(apiSettings.AuthConfig.OAuth.ConnectorID))
 	assert.Equal(len(testSettings.AuthConfig.Github.Users), len(apiSettings.AuthConfig.Github.Users))
+	assert.Equal(testSettings.OktaServiceConfig.ClientID, utility.FromStringPtr(apiSettings.OktaServiceConfig.ClientID))
+	assert.Equal(testSettings.OktaServiceConfig.ClientSecret, utility.FromStringPtr(apiSettings.OktaServiceConfig.ClientSecret))
+	assert.Equal(testSettings.OktaServiceConfig.Scopes, apiSettings.OktaServiceConfig.Scopes)
+	assert.Equal(testSettings.OktaServiceConfig.Audience, utility.FromStringPtr(apiSettings.OktaServiceConfig.Audience))
+	assert.Equal(testSettings.OktaServiceConfig.Issuer, utility.FromStringPtr(apiSettings.OktaServiceConfig.Issuer))
 	assert.Equal(testSettings.Buckets.LogBucket.Name, utility.FromStringPtr(apiSettings.Buckets.LogBucket.Name))
 	assert.EqualValues(testSettings.Buckets.LogBucket.Type, utility.FromStringPtr(apiSettings.Buckets.LogBucket.Type))
 	assert.Equal(testSettings.Buckets.LogBucket.DBName, utility.FromStringPtr(apiSettings.Buckets.LogBucket.DBName))
+	assert.EqualValues(testSettings.Buckets.RetryFailedLogMoveLookbackDays, utility.FromIntPtr(apiSettings.Buckets.RetryFailedLogMoveLookbackDays))
+	assert.EqualValues(testSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun, utility.FromIntPtr(apiSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun))
+	assert.Equal(testSettings.Buckets.TestResultsBucket.Name, utility.FromStringPtr(apiSettings.Buckets.TestResultsBucket.Name))
+	assert.EqualValues(testSettings.Buckets.TestResultsBucket.Type, utility.FromStringPtr(apiSettings.Buckets.TestResultsBucket.Type))
+	assert.Equal(testSettings.Buckets.TestResultsBucket.DBName, utility.FromStringPtr(apiSettings.Buckets.TestResultsBucket.DBName))
+	assert.Equal(testSettings.Buckets.TestResultsBucket.TestResultsPrefix, utility.FromStringPtr(apiSettings.Buckets.TestResultsBucket.TestResultsPrefix))
+	assert.Equal(testSettings.Buckets.TestResultsBucket.RoleARN, utility.FromStringPtr(apiSettings.Buckets.TestResultsBucket.RoleARN))
 	assert.EqualValues(testSettings.Buckets.Credentials.Key, utility.FromStringPtr(apiSettings.Buckets.Credentials.Key))
 	assert.EqualValues(testSettings.Buckets.Credentials.Secret, utility.FromStringPtr(apiSettings.Buckets.Credentials.Secret))
+	assert.EqualValues(testSettings.Buckets.Credentials.Bucket, utility.FromStringPtr(apiSettings.Buckets.Credentials.Bucket))
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].Distro, utility.FromStringPtr(apiSettings.ContainerPools.Pools[0].Distro))
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].Id, utility.FromStringPtr(apiSettings.ContainerPools.Pools[0].Id))
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].MaxContainers, apiSettings.ContainerPools.Pools[0].MaxContainers)
@@ -139,12 +162,8 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.Overrides.Overrides[0].Field, utility.FromStringPtr(apiSettings.Overrides.Overrides[0].Field))
 	assert.EqualValues(testSettings.Overrides.Overrides[0].Value, apiSettings.Overrides.Overrides[0].Value)
 	assert.EqualValues(testSettings.ParameterStore.Prefix, utility.FromStringPtr(apiSettings.ParameterStore.Prefix))
-	assert.EqualValues(testSettings.PodLifecycle.MaxParallelPodRequests, apiSettings.PodLifecycle.MaxParallelPodRequests)
-	assert.EqualValues(testSettings.PodLifecycle.MaxPodDefinitionCleanupRate, apiSettings.PodLifecycle.MaxPodDefinitionCleanupRate)
-	assert.EqualValues(testSettings.PodLifecycle.MaxSecretCleanupRate, apiSettings.PodLifecycle.MaxSecretCleanupRate)
 	assert.EqualValues(testSettings.ProjectCreation.TotalProjectLimit, apiSettings.ProjectCreation.TotalProjectLimit)
 	assert.EqualValues(testSettings.ProjectCreation.RepoProjectLimit, apiSettings.ProjectCreation.RepoProjectLimit)
-	assert.EqualValues(testSettings.ProjectCreation.JiraProject, apiSettings.ProjectCreation.JiraProject)
 	assert.EqualValues(testSettings.ProjectCreation.RepoExceptions[0].Owner, utility.FromStringPtr(apiSettings.ProjectCreation.RepoExceptions[0].Owner))
 	assert.EqualValues(testSettings.ProjectCreation.RepoExceptions[0].Repo, utility.FromStringPtr(apiSettings.ProjectCreation.RepoExceptions[0].Repo))
 	assert.EqualValues(testSettings.Providers.AWS.EC2Keys[0].Name, utility.FromStringPtr(apiSettings.Providers.AWS.EC2Keys[0].Name))
@@ -159,31 +178,6 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.Providers.AWS.ParserProject.GeneratedJSONPrefix, utility.FromStringPtr(apiSettings.Providers.AWS.ParserProject.GeneratedJSONPrefix))
 	assert.EqualValues(testSettings.Providers.AWS.PersistentDNS.HostedZoneID, utility.FromStringPtr(apiSettings.Providers.AWS.PersistentDNS.HostedZoneID))
 	assert.EqualValues(testSettings.Providers.AWS.PersistentDNS.Domain, utility.FromStringPtr(apiSettings.Providers.AWS.PersistentDNS.Domain))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.Role, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.Role))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.Region, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.Region))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.MaxCPU, utility.FromIntPtr(apiSettings.Providers.AWS.Pod.ECS.MaxCPU))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.AllowedImages, apiSettings.Providers.AWS.Pod.ECS.AllowedImages)
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.MaxMemoryMB, utility.FromIntPtr(apiSettings.Providers.AWS.Pod.ECS.MaxMemoryMB))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.TaskDefinitionPrefix, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.TaskDefinitionPrefix))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.TaskRole, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.TaskRole))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.AWSVPC.Subnets, apiSettings.Providers.AWS.Pod.ECS.AWSVPC.Subnets)
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.AWSVPC.SecurityGroups, apiSettings.Providers.AWS.Pod.ECS.AWSVPC.SecurityGroups)
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.ExecutionRole, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.ExecutionRole))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.LogRegion, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.LogRegion))
-	assert.EqualValues(testSettings.Providers.AWS.Pod.ECS.LogGroup, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.LogGroup))
-	require.Len(apiSettings.Providers.AWS.Pod.ECS.Clusters, len(testSettings.Providers.AWS.Pod.ECS.Clusters))
-	for i, cluster := range testSettings.Providers.AWS.Pod.ECS.Clusters {
-		assert.EqualValues(cluster.Name, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.Clusters[i].Name))
-		assert.EqualValues(cluster.OS, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.Clusters[i].OS))
-	}
-	require.Len(apiSettings.Providers.AWS.Pod.ECS.CapacityProviders, len(testSettings.Providers.AWS.Pod.ECS.CapacityProviders))
-	for i, cp := range testSettings.Providers.AWS.Pod.ECS.CapacityProviders {
-		assert.Equal(cp.Name, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.CapacityProviders[i].Name))
-		assert.EqualValues(cp.OS, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.CapacityProviders[i].OS))
-		assert.EqualValues(cp.Arch, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.CapacityProviders[i].Arch))
-		assert.EqualValues(cp.WindowsVersion, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.ECS.CapacityProviders[i].WindowsVersion))
-	}
-	assert.EqualValues(testSettings.Providers.AWS.Pod.SecretsManager.SecretPrefix, utility.FromStringPtr(apiSettings.Providers.AWS.Pod.SecretsManager.SecretPrefix))
 	require.Len(apiSettings.Providers.AWS.AccountRoles, len(testSettings.Providers.AWS.AccountRoles))
 	for i, ar := range testSettings.Providers.AWS.AccountRoles {
 		assert.Equal(ar.Account, utility.FromStringPtr(apiSettings.Providers.AWS.AccountRoles[i].Account))
@@ -193,17 +187,12 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.RepoTracker.MaxConcurrentRequests, apiSettings.RepoTracker.MaxConcurrentRequests)
 	assert.EqualValues(testSettings.Scheduler.TaskFinder, utility.FromStringPtr(apiSettings.Scheduler.TaskFinder))
 	assert.EqualValues(testSettings.ServiceFlags.HostInitDisabled, apiSettings.ServiceFlags.HostInitDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.PodInitDisabled, apiSettings.ServiceFlags.PodInitDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.PodAllocatorDisabled, apiSettings.ServiceFlags.PodAllocatorDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.UnrecognizedPodCleanupDisabled, apiSettings.ServiceFlags.UnrecognizedPodCleanupDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.LargeParserProjectsDisabled, apiSettings.ServiceFlags.LargeParserProjectsDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.SleepScheduleDisabled, apiSettings.ServiceFlags.SleepScheduleDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.StaticAPIKeysDisabled, apiSettings.ServiceFlags.StaticAPIKeysDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.JWTTokenForCLIDisabled, apiSettings.ServiceFlags.JWTTokenForCLIDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.SystemFailedTaskRestartDisabled, apiSettings.ServiceFlags.SystemFailedTaskRestartDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.CPUDegradedModeDisabled, apiSettings.ServiceFlags.DegradedModeDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.ElasticIPsDisabled, apiSettings.ServiceFlags.ElasticIPsDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.UseGitForGitHubFilesDisabled, apiSettings.ServiceFlags.UseGitForGitHubFilesDisabled)
+	assert.EqualValues(testSettings.ServiceFlags.PodDiagnosticsDisabled, apiSettings.ServiceFlags.PodDiagnosticsDisabled)
 	assert.EqualValues(testSettings.SingleTaskDistro.ProjectTasksPairs[0].ProjectID, apiSettings.SingleTaskDistro.ProjectTasksPairs[0].ProjectID)
 	assert.ElementsMatch(testSettings.SingleTaskDistro.ProjectTasksPairs[0].AllowedTasks, apiSettings.SingleTaskDistro.ProjectTasksPairs[0].AllowedTasks)
 	assert.EqualValues(testSettings.Slack.Level, utility.FromStringPtr(apiSettings.Slack.Level))
@@ -222,9 +211,13 @@ func TestModelConversion(t *testing.T) {
 	assert.Equal(testSettings.Spawnhost.SpawnHostsPerUser, *apiSettings.Spawnhost.SpawnHostsPerUser)
 	assert.Equal(testSettings.Spawnhost.UnexpirableHostsPerUser, *apiSettings.Spawnhost.UnexpirableHostsPerUser)
 	assert.Equal(testSettings.Spawnhost.UnexpirableVolumesPerUser, *apiSettings.Spawnhost.UnexpirableVolumesPerUser)
+	assert.Equal(testSettings.DebugSpawnHosts.SetupScript, utility.FromStringPtr(apiSettings.DebugSpawnHosts.SetupScript))
+	assert.Equal(testSettings.Diagnostics.S3BucketName, utility.FromStringPtr(apiSettings.Diagnostics.S3BucketName))
+	assert.Equal(testSettings.Diagnostics.S3Prefix, utility.FromStringPtr(apiSettings.Diagnostics.S3Prefix))
 	assert.Equal(testSettings.Tracer.Enabled, *apiSettings.Tracer.Enabled)
 	assert.Equal(testSettings.Tracer.CollectorEndpoint, *apiSettings.Tracer.CollectorEndpoint)
 	assert.Equal(testSettings.Tracer.CollectorInternalEndpoint, *apiSettings.Tracer.CollectorInternalEndpoint)
+	assert.Equal(testSettings.Tracer.TraceURLTemplate, utility.FromStringPtr(apiSettings.Tracer.TraceURLTemplate))
 	assert.Equal(testSettings.GitHubCheckRun.CheckRunLimit, *apiSettings.GitHubCheckRun.CheckRunLimit)
 	assert.Equal(testSettings.Sage.BaseURL, utility.FromStringPtr(apiSettings.Sage.BaseURL))
 
@@ -263,8 +256,12 @@ func TestModelConversion(t *testing.T) {
 	assert.Equal(testSettings.Buckets.LogBucket.Name, utility.FromStringPtr(apiSettings.Buckets.LogBucket.Name))
 	assert.EqualValues(testSettings.Buckets.LogBucket.Type, utility.FromStringPtr(apiSettings.Buckets.LogBucket.Type))
 	assert.Equal(testSettings.Buckets.LogBucket.DBName, utility.FromStringPtr(apiSettings.Buckets.LogBucket.DBName))
+	assert.EqualValues(testSettings.Buckets.RetryFailedLogMoveLookbackDays, dbSettings.Buckets.RetryFailedLogMoveLookbackDays)
+	assert.EqualValues(testSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun, dbSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun)
+	assert.EqualValues(testSettings.Buckets.TestResultsBucket, dbSettings.Buckets.TestResultsBucket)
 	assert.EqualValues(testSettings.Buckets.Credentials.Key, dbSettings.Buckets.Credentials.Key)
 	assert.EqualValues(testSettings.Buckets.Credentials.Secret, dbSettings.Buckets.Credentials.Secret)
+	assert.EqualValues(testSettings.Buckets.Credentials.Bucket, dbSettings.Buckets.Credentials.Bucket)
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].Distro, dbSettings.ContainerPools.Pools[0].Distro)
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].Id, dbSettings.ContainerPools.Pools[0].Id)
 	assert.EqualValues(testSettings.ContainerPools.Pools[0].MaxContainers, dbSettings.ContainerPools.Pools[0].MaxContainers)
@@ -282,12 +279,8 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.Overrides.Overrides[0].SectionID, dbSettings.Overrides.Overrides[0].SectionID)
 	assert.EqualValues(testSettings.Overrides.Overrides[0].Field, dbSettings.Overrides.Overrides[0].Field)
 	assert.EqualValues(testSettings.Overrides.Overrides[0].Value, dbSettings.Overrides.Overrides[0].Value)
-	assert.EqualValues(testSettings.PodLifecycle.MaxParallelPodRequests, dbSettings.PodLifecycle.MaxParallelPodRequests)
-	assert.EqualValues(testSettings.PodLifecycle.MaxPodDefinitionCleanupRate, dbSettings.PodLifecycle.MaxPodDefinitionCleanupRate)
-	assert.EqualValues(testSettings.PodLifecycle.MaxSecretCleanupRate, dbSettings.PodLifecycle.MaxSecretCleanupRate)
 	assert.EqualValues(testSettings.ProjectCreation.TotalProjectLimit, dbSettings.ProjectCreation.TotalProjectLimit)
 	assert.EqualValues(testSettings.ProjectCreation.RepoProjectLimit, dbSettings.ProjectCreation.RepoProjectLimit)
-	assert.EqualValues(testSettings.ProjectCreation.JiraProject, dbSettings.ProjectCreation.JiraProject)
 	assert.EqualValues(testSettings.ProjectCreation.RepoExceptions[0].Owner, dbSettings.ProjectCreation.RepoExceptions[0].Owner)
 	assert.EqualValues(testSettings.ProjectCreation.RepoExceptions[0].Repo, dbSettings.ProjectCreation.RepoExceptions[0].Repo)
 	assert.EqualValues(testSettings.Providers.AWS.EC2Keys[0].Name, dbSettings.Providers.AWS.EC2Keys[0].Name)
@@ -306,18 +299,13 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.RepoTracker.MaxConcurrentRequests, dbSettings.RepoTracker.MaxConcurrentRequests)
 	assert.EqualValues(testSettings.Scheduler.TaskFinder, dbSettings.Scheduler.TaskFinder)
 	assert.EqualValues(testSettings.ServiceFlags.HostInitDisabled, dbSettings.ServiceFlags.HostInitDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.PodInitDisabled, dbSettings.ServiceFlags.PodInitDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.PodAllocatorDisabled, dbSettings.ServiceFlags.PodAllocatorDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.LargeParserProjectsDisabled, dbSettings.ServiceFlags.LargeParserProjectsDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.CloudCleanupDisabled, dbSettings.ServiceFlags.CloudCleanupDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.UnrecognizedPodCleanupDisabled, dbSettings.ServiceFlags.UnrecognizedPodCleanupDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.SleepScheduleDisabled, dbSettings.ServiceFlags.SleepScheduleDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.StaticAPIKeysDisabled, dbSettings.ServiceFlags.StaticAPIKeysDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.JWTTokenForCLIDisabled, dbSettings.ServiceFlags.JWTTokenForCLIDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.SystemFailedTaskRestartDisabled, apiSettings.ServiceFlags.SystemFailedTaskRestartDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.CPUDegradedModeDisabled, apiSettings.ServiceFlags.DegradedModeDisabled)
 	assert.EqualValues(testSettings.ServiceFlags.ElasticIPsDisabled, apiSettings.ServiceFlags.ElasticIPsDisabled)
-	assert.EqualValues(testSettings.ServiceFlags.UseGitForGitHubFilesDisabled, apiSettings.ServiceFlags.UseGitForGitHubFilesDisabled)
+	assert.EqualValues(testSettings.ServiceFlags.PodDiagnosticsDisabled, dbSettings.ServiceFlags.PodDiagnosticsDisabled)
 	assert.EqualValues(testSettings.SingleTaskDistro.ProjectTasksPairs[0].ProjectID, dbSettings.SingleTaskDistro.ProjectTasksPairs[0].ProjectID)
 	assert.ElementsMatch(testSettings.SingleTaskDistro.ProjectTasksPairs[0].AllowedTasks, dbSettings.SingleTaskDistro.ProjectTasksPairs[0].AllowedTasks)
 	assert.EqualValues(testSettings.Slack.Level, dbSettings.Slack.Level)
@@ -336,11 +324,55 @@ func TestModelConversion(t *testing.T) {
 	assert.EqualValues(testSettings.Spawnhost.SpawnHostsPerUser, dbSettings.Spawnhost.SpawnHostsPerUser)
 	assert.EqualValues(testSettings.Spawnhost.UnexpirableHostsPerUser, dbSettings.Spawnhost.UnexpirableHostsPerUser)
 	assert.EqualValues(testSettings.Spawnhost.UnexpirableVolumesPerUser, dbSettings.Spawnhost.UnexpirableVolumesPerUser)
+	assert.EqualValues(testSettings.DebugSpawnHosts.SetupScript, dbSettings.DebugSpawnHosts.SetupScript)
+	assert.EqualValues(testSettings.Diagnostics.S3BucketName, dbSettings.Diagnostics.S3BucketName)
+	assert.EqualValues(testSettings.Diagnostics.S3Prefix, dbSettings.Diagnostics.S3Prefix)
 	assert.EqualValues(testSettings.Tracer.Enabled, dbSettings.Tracer.Enabled)
 	assert.EqualValues(testSettings.Tracer.CollectorEndpoint, dbSettings.Tracer.CollectorEndpoint)
 	assert.EqualValues(testSettings.Tracer.CollectorInternalEndpoint, dbSettings.Tracer.CollectorInternalEndpoint)
+	assert.EqualValues(testSettings.Tracer.TraceURLTemplate, dbSettings.Tracer.TraceURLTemplate)
 	assert.EqualValues(testSettings.GitHubCheckRun.CheckRunLimit, dbSettings.GitHubCheckRun.CheckRunLimit)
 	assert.EqualValues(testSettings.Sage.BaseURL, dbSettings.Sage.BaseURL)
+}
+
+func TestAPIBucketsConfigJSON(t *testing.T) {
+	const payload = `{
+		"log_bucket": {"name": "logs", "type": "s3"},
+		"log_bucket_long_retention": {},
+		"log_bucket_failed_tasks": {},
+		"retry_failed_log_move_lookback_days": 14,
+		"retry_failed_log_move_max_jobs_per_run": 25,
+		"test_results_bucket": {
+			"name": "tr-bucket",
+			"type": "s3",
+			"db_name": "tr_db",
+			"test_results_prefix": "prefix/",
+			"role_arn": "arn:aws:iam::123456789012:role/tr"
+		},
+		"internal_buckets": ["internal-a", "internal-b"],
+		"credentials": {"key": "k", "secret": "s", "bucket": "cb"}
+	}`
+	var out APIBucketsConfig
+	require.NoError(t, json.Unmarshal([]byte(payload), &out))
+	assert.Equal(t, 14, utility.FromIntPtr(out.RetryFailedLogMoveLookbackDays))
+	assert.Equal(t, 25, utility.FromIntPtr(out.RetryFailedLogMoveMaxJobsPerRun))
+	assert.Equal(t, "tr-bucket", utility.FromStringPtr(out.TestResultsBucket.Name))
+	assert.Equal(t, "tr_db", utility.FromStringPtr(out.TestResultsBucket.DBName))
+	assert.Equal(t, "prefix/", utility.FromStringPtr(out.TestResultsBucket.TestResultsPrefix))
+	assert.Equal(t, "arn:aws:iam::123456789012:role/tr", utility.FromStringPtr(out.TestResultsBucket.RoleARN))
+	assert.ElementsMatch(t, []string{"internal-a", "internal-b"}, out.InternalBuckets)
+	assert.Equal(t, "k", utility.FromStringPtr(out.Credentials.Key))
+	assert.Equal(t, "s", utility.FromStringPtr(out.Credentials.Secret))
+	assert.Equal(t, "cb", utility.FromStringPtr(out.Credentials.Bucket))
+
+	roundTrip, err := json.Marshal(&out)
+	require.NoError(t, err)
+	var again APIBucketsConfig
+	require.NoError(t, json.Unmarshal(roundTrip, &again))
+	assert.ElementsMatch(t, out.InternalBuckets, again.InternalBuckets)
+	assert.Equal(t, out.RetryFailedLogMoveMaxJobsPerRun, again.RetryFailedLogMoveMaxJobsPerRun)
+	assert.Equal(t, out.TestResultsBucket.Name, again.TestResultsBucket.Name)
+	assert.Equal(t, out.Credentials.Bucket, again.Credentials.Bucket)
 }
 
 func TestRestart(t *testing.T) {
@@ -631,6 +663,23 @@ func TestAPIS3StorageCostConfig(t *testing.T) {
 			assert.Equal(t, 0.25, svc.StandardStorageCostDiscount)
 			assert.Equal(t, 0.35, svc.IAStorageCostDiscount)
 		})
+
+		t.Run("AwsAccountListsRoundTrip", func(t *testing.T) {
+			api := APIS3StorageCostConfig{
+				DevprodOwnedAWSAccountIds:                []string{"123456789012"},
+				ArtifactAwsAccountsWithoutLifecycleRules: []string{"210987654321"},
+			}
+			svcInterface, err := api.ToService()
+			require.NoError(t, err)
+			svc := svcInterface.(evergreen.S3StorageCostConfig)
+			assert.Equal(t, []string{"123456789012"}, svc.DevprodOwnedAWSAccountIDs)
+			assert.Equal(t, []string{"210987654321"}, svc.ArtifactAWSAccountsWithoutLifecycleRules)
+
+			var out APIS3StorageCostConfig
+			require.NoError(t, out.BuildFromService(svc))
+			assert.Equal(t, api.DevprodOwnedAWSAccountIds, out.DevprodOwnedAWSAccountIds)
+			assert.Equal(t, api.ArtifactAwsAccountsWithoutLifecycleRules, out.ArtifactAwsAccountsWithoutLifecycleRules)
+		})
 	})
 }
 
@@ -813,6 +862,76 @@ func TestAPICostConfigWithS3Cost(t *testing.T) {
 			assert.Equal(t, 0.5, svc.FinanceFormula)
 			assert.Equal(t, 0.0, svc.S3Cost.Upload.UploadCostDiscount)
 			assert.Equal(t, 0.0, svc.S3Cost.Storage.StandardStorageCostDiscount)
+		})
+	})
+}
+
+func TestAPIRateLimitConfig(t *testing.T) {
+	t.Run("BuildFromService", func(t *testing.T) {
+		t.Run("RoundTrip", func(t *testing.T) {
+			svc := evergreen.RateLimitConfig{
+				RESTUserPerHour:        100,
+				RESTUserBurst:          10,
+				RESTServicePerHour:     200,
+				RESTServiceBurst:       20,
+				GraphQLUserPerHour:     300,
+				GraphQLUserBurst:       30,
+				GraphQLServicePerHour:  400,
+				GraphQLServiceBurst:    40,
+				GraphQLComplexityLimit: 1000,
+				ElevatedUserIDs:        []string{"user1", "user2"},
+			}
+			api := APIRateLimitConfig{}
+			require.NoError(t, api.BuildFromService(svc))
+			assert.Equal(t, 100, api.RESTUserPerHour)
+			assert.Equal(t, 10, api.RESTUserBurst)
+			assert.Equal(t, 200, api.RESTServicePerHour)
+			assert.Equal(t, 20, api.RESTServiceBurst)
+			assert.Equal(t, 300, api.GraphQLUserPerHour)
+			assert.Equal(t, 30, api.GraphQLUserBurst)
+			assert.Equal(t, 400, api.GraphQLServicePerHour)
+			assert.Equal(t, 40, api.GraphQLServiceBurst)
+			assert.Equal(t, 1000, api.GraphQLComplexityLimit)
+			assert.Equal(t, []string{"user1", "user2"}, api.ElevatedUserIDs)
+		})
+
+		t.Run("ZeroValues", func(t *testing.T) {
+			svc := evergreen.RateLimitConfig{}
+			api := APIRateLimitConfig{}
+			require.NoError(t, api.BuildFromService(svc))
+			assert.Equal(t, 0, api.RESTUserPerHour)
+			assert.Equal(t, 0, api.GraphQLComplexityLimit)
+			assert.Nil(t, api.ElevatedUserIDs)
+		})
+	})
+
+	t.Run("ToService", func(t *testing.T) {
+		t.Run("RoundTrip", func(t *testing.T) {
+			api := APIRateLimitConfig{
+				RESTUserPerHour:        100,
+				RESTUserBurst:          10,
+				RESTServicePerHour:     200,
+				RESTServiceBurst:       20,
+				GraphQLUserPerHour:     300,
+				GraphQLUserBurst:       30,
+				GraphQLServicePerHour:  400,
+				GraphQLServiceBurst:    40,
+				GraphQLComplexityLimit: 1000,
+				ElevatedUserIDs:        []string{"user1", "user2"},
+			}
+			svcIface, err := api.ToService()
+			require.NoError(t, err)
+			svc := svcIface.(evergreen.RateLimitConfig)
+			assert.Equal(t, 100, svc.RESTUserPerHour)
+			assert.Equal(t, 10, svc.RESTUserBurst)
+			assert.Equal(t, 200, svc.RESTServicePerHour)
+			assert.Equal(t, 20, svc.RESTServiceBurst)
+			assert.Equal(t, 300, svc.GraphQLUserPerHour)
+			assert.Equal(t, 30, svc.GraphQLUserBurst)
+			assert.Equal(t, 400, svc.GraphQLServicePerHour)
+			assert.Equal(t, 40, svc.GraphQLServiceBurst)
+			assert.Equal(t, 1000, svc.GraphQLComplexityLimit)
+			assert.Equal(t, []string{"user1", "user2"}, svc.ElevatedUserIDs)
 		})
 	})
 }

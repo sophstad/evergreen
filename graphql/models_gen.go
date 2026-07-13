@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/rest/model"
@@ -149,9 +150,10 @@ type DistroEventsPayload struct {
 }
 
 type DistroPermissions struct {
-	Admin bool `json:"admin"`
-	Edit  bool `json:"edit"`
-	View  bool `json:"view"`
+	DistroID string `json:"distroId"`
+	Admin    bool   `json:"admin"`
+	Edit     bool   `json:"edit"`
+	View     bool   `json:"view"`
 }
 
 type DistroPermissionsOptions struct {
@@ -172,7 +174,7 @@ type EditSpawnHostInput struct {
 	SavePublicKey       *bool                   `json:"savePublicKey,omitempty"`
 	ServicePassword     *string                 `json:"servicePassword,omitempty"`
 	SleepSchedule       *host.SleepScheduleInfo `json:"sleepSchedule,omitempty"`
-	Volume              *string                 `json:"volume,omitempty"`
+	VolumeID            *string                 `json:"volumeId,omitempty"`
 }
 
 type ExternalLinkForMetadata struct {
@@ -359,6 +361,7 @@ type Patches struct {
 // PatchesInput is the input value to the patches field for the User and Project types.
 // Based on the information in PatchesInput, we return a list of Patches for either an individual user or a project.
 type PatchesInput struct {
+	CountLimit     *int     `json:"countLimit,omitempty"`
 	Limit          int      `json:"limit"`
 	OnlyMergeQueue *bool    `json:"onlyMergeQueue,omitempty"`
 	IncludeHidden  *bool    `json:"includeHidden,omitempty"`
@@ -378,13 +381,6 @@ type Permissions struct {
 	UserID               string              `json:"userId"`
 }
 
-// PodEvents is the return value for the events query.
-// It contains the event log entries for a pod.
-type PodEvents struct {
-	Count           int                          `json:"count"`
-	EventLogEntries []*model.PodAPIEventLogEntry `json:"eventLogEntries"`
-}
-
 type ProjectBuildVariant struct {
 	DisplayName string   `json:"displayName"`
 	Name        string   `json:"name"`
@@ -401,8 +397,9 @@ type ProjectEvents struct {
 }
 
 type ProjectPermissions struct {
-	Edit bool `json:"edit"`
-	View bool `json:"view"`
+	ProjectIdentifier string `json:"projectIdentifier"`
+	Edit              bool   `json:"edit"`
+	View              bool   `json:"view"`
 }
 
 type ProjectPermissionsOptions struct {
@@ -421,16 +418,31 @@ type PublicKeyInput struct {
 	Name string `json:"name"`
 }
 
+// QuarantineTaskInput is the input to the quarantineTask mutation. It marks every known test of the given task as manually quarantined in the test selection service.
+type QuarantineTaskInput struct {
+	TaskID string `json:"taskId"`
+}
+
 type QuarantineTestInput struct {
 	TaskID   string `json:"taskId"`
 	TestName string `json:"testName"`
 }
 
-type QuarantineTestPayload struct {
-	Success bool `json:"success"`
+// QuarantineVariantInput is the input to the quarantineVariant mutation. It marks every known test of every known task in the build variant as manually quarantined in the test selection service.
+type QuarantineVariantInput struct {
+	ProjectIdentifier string `json:"projectIdentifier"`
+	BuildVariant      string `json:"buildVariant"`
 }
 
 type Query struct {
+}
+
+type RefreshGitHubStatusesInput struct {
+	VersionID string `json:"versionId"`
+}
+
+type RefreshGitHubStatusesPayload struct {
+	Success bool `json:"success"`
 }
 
 type RemoveFavoriteProjectInput struct {
@@ -438,8 +450,9 @@ type RemoveFavoriteProjectInput struct {
 }
 
 type RepoPermissions struct {
-	Edit bool `json:"edit"`
-	View bool `json:"view"`
+	RepoID string `json:"repoId"`
+	Edit   bool   `json:"edit"`
+	View   bool   `json:"view"`
 }
 
 type RepoPermissionsOptions struct {
@@ -464,6 +477,16 @@ type SaveDistroInput struct {
 type SaveDistroPayload struct {
 	Distro    *model.APIDistro `json:"distro"`
 	HostCount int              `json:"hostCount"`
+}
+
+type ServiceFlag struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+type ServiceFlagInput struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
 }
 
 // SetLastRevisionInput is the input to the setLastRevision mutation.
@@ -504,6 +527,7 @@ type SpawnHostInput struct {
 	VolumeID                *string                 `json:"volumeId,omitempty"`
 	UseOAuth                *bool                   `json:"useOAuth,omitempty"`
 	IsDebug                 *bool                   `json:"isDebug,omitempty"`
+	SetupStepNumber         *string                 `json:"setupStepNumber,omitempty"`
 }
 
 // SpawnVolumeInput is the input to the spawnVolume mutation.
@@ -511,7 +535,7 @@ type SpawnHostInput struct {
 type SpawnVolumeInput struct {
 	AvailabilityZone string     `json:"availabilityZone"`
 	Expiration       *time.Time `json:"expiration,omitempty"`
-	Host             *string    `json:"host,omitempty"`
+	HostID           *string    `json:"hostId,omitempty"`
 	NoExpiration     *bool      `json:"noExpiration,omitempty"`
 	Size             int        `json:"size"`
 	Type             string     `json:"type"`
@@ -554,6 +578,16 @@ type TaskFilterOptions struct {
 type TaskHistory struct {
 	Tasks      []*model.APITask       `json:"tasks"`
 	Pagination *TaskHistoryPagination `json:"pagination"`
+}
+
+type TaskHistoryByCreateTime struct {
+	Tasks      []*model.APITask                   `json:"tasks"`
+	Pagination *TaskHistoryByCreateTimePagination `json:"pagination"`
+}
+
+type TaskHistoryByCreateTimePagination struct {
+	MostRecentTaskCreateTime time.Time `json:"mostRecentTaskCreateTime"`
+	OldestTaskCreateTime     time.Time `json:"oldestTaskCreateTime"`
 }
 
 type TaskHistoryOpts struct {
@@ -648,20 +682,28 @@ type TestSortOptions struct {
 	Direction SortDirection    `json:"direction"`
 }
 
+// UnquarantineTaskInput is the input to the unquarantineTask mutation.
+type UnquarantineTaskInput struct {
+	TaskID string `json:"taskId"`
+}
+
+type UnquarantineTestInput struct {
+	TaskID   string `json:"taskId"`
+	TestName string `json:"testName"`
+}
+
+// UnquarantineVariantInput is the input to the unquarantineVariant mutation.
+type UnquarantineVariantInput struct {
+	ProjectIdentifier string `json:"projectIdentifier"`
+	BuildVariant      string `json:"buildVariant"`
+}
+
 type UpdateBetaFeaturesInput struct {
 	BetaFeatures *model.APIBetaFeatures `json:"betaFeatures"`
 }
 
 type UpdateBetaFeaturesPayload struct {
-	BetaFeatures *model.APIBetaFeatures `json:"betaFeatures,omitempty"`
-}
-
-type UpdateParsleySettingsInput struct {
-	ParsleySettings *model.APIParsleySettings `json:"parsleySettings"`
-}
-
-type UpdateParsleySettingsPayload struct {
-	ParsleySettings *model.APIParsleySettings `json:"parsleySettings,omitempty"`
+	BetaFeatures *evergreen.BetaFeatures `json:"betaFeatures,omitempty"`
 }
 
 type UpdateSpawnHostStatusInput struct {
@@ -693,16 +735,16 @@ type UpstreamProject struct {
 }
 
 // UserConfig is returned by the userConfig query.
-// It contains configuration information such as the user's api key for the Evergreen CLI and a user's
-// preferred UI (legacy vs Spruce).
+// It contains configuration information for the Evergreen CLI.
 type UserConfig struct {
-	APIKey           string `json:"api_key"`
-	APIServerHost    string `json:"api_server_host"`
-	UIServerHost     string `json:"ui_server_host"`
-	User             string `json:"user"`
-	OauthIssuer      string `json:"oauth_issuer"`
-	OauthClientID    string `json:"oauth_client_id"`
-	OauthConnectorID string `json:"oauth_connector_id"`
+	APIKey            string `json:"api_key"`
+	APIServerHost     string `json:"api_server_host"`
+	CorpAPIServerHost string `json:"corp_api_server_host"`
+	UIServerHost      string `json:"ui_server_host"`
+	User              string `json:"user"`
+	OauthIssuer       string `json:"oauth_issuer"`
+	OauthClientID     string `json:"oauth_client_id"`
+	OauthConnectorID  string `json:"oauth_connector_id"`
 }
 
 type VariantTasks struct {
@@ -760,11 +802,6 @@ type WaterfallPagination struct {
 	MostRecentVersionOrder int      `json:"mostRecentVersionOrder"`
 	NextPageOrder          int      `json:"nextPageOrder"`
 	PrevPageOrder          int      `json:"prevPageOrder"`
-}
-
-type WaterfallVersion struct {
-	InactiveVersions []*model.APIVersion `json:"inactiveVersions,omitempty"`
-	Version          *model.APIVersion   `json:"version,omitempty"`
 }
 
 type AccessLevel string
@@ -1187,21 +1224,23 @@ func (e ProjectPermission) MarshalJSON() ([]byte, error) {
 type ProjectSettingsSection string
 
 const (
-	ProjectSettingsSectionGeneral              ProjectSettingsSection = "GENERAL"
-	ProjectSettingsSectionAccess               ProjectSettingsSection = "ACCESS"
-	ProjectSettingsSectionVariables            ProjectSettingsSection = "VARIABLES"
-	ProjectSettingsSectionNotifications        ProjectSettingsSection = "NOTIFICATIONS"
-	ProjectSettingsSectionPatchAliases         ProjectSettingsSection = "PATCH_ALIASES"
-	ProjectSettingsSectionWorkstation          ProjectSettingsSection = "WORKSTATION"
-	ProjectSettingsSectionTriggers             ProjectSettingsSection = "TRIGGERS"
-	ProjectSettingsSectionPeriodicBuilds       ProjectSettingsSection = "PERIODIC_BUILDS"
-	ProjectSettingsSectionPlugins              ProjectSettingsSection = "PLUGINS"
-	ProjectSettingsSectionContainers           ProjectSettingsSection = "CONTAINERS"
-	ProjectSettingsSectionViewsAndFilters      ProjectSettingsSection = "VIEWS_AND_FILTERS"
-	ProjectSettingsSectionTestSelection        ProjectSettingsSection = "TEST_SELECTION"
-	ProjectSettingsSectionGithubAndCommitQueue ProjectSettingsSection = "GITHUB_AND_COMMIT_QUEUE"
-	ProjectSettingsSectionGithubAppSettings    ProjectSettingsSection = "GITHUB_APP_SETTINGS"
-	ProjectSettingsSectionGithubPermissions    ProjectSettingsSection = "GITHUB_PERMISSIONS"
+	ProjectSettingsSectionGeneral           ProjectSettingsSection = "GENERAL"
+	ProjectSettingsSectionAccess            ProjectSettingsSection = "ACCESS"
+	ProjectSettingsSectionVariables         ProjectSettingsSection = "VARIABLES"
+	ProjectSettingsSectionNotifications     ProjectSettingsSection = "NOTIFICATIONS"
+	ProjectSettingsSectionPatchAliases      ProjectSettingsSection = "PATCH_ALIASES"
+	ProjectSettingsSectionWorkstation       ProjectSettingsSection = "WORKSTATION"
+	ProjectSettingsSectionTriggers          ProjectSettingsSection = "TRIGGERS"
+	ProjectSettingsSectionPeriodicBuilds    ProjectSettingsSection = "PERIODIC_BUILDS"
+	ProjectSettingsSectionPlugins           ProjectSettingsSection = "PLUGINS"
+	ProjectSettingsSectionViewsAndFilters   ProjectSettingsSection = "VIEWS_AND_FILTERS"
+	ProjectSettingsSectionTestSelection     ProjectSettingsSection = "TEST_SELECTION"
+	ProjectSettingsSectionGithubAppSettings ProjectSettingsSection = "GITHUB_APP_SETTINGS"
+	ProjectSettingsSectionGithubPermissions ProjectSettingsSection = "GITHUB_PERMISSIONS"
+	ProjectSettingsSectionPullRequests      ProjectSettingsSection = "PULL_REQUESTS"
+	ProjectSettingsSectionGitTags           ProjectSettingsSection = "GIT_TAGS"
+	ProjectSettingsSectionMergeQueue        ProjectSettingsSection = "MERGE_QUEUE"
+	ProjectSettingsSectionCommitChecks      ProjectSettingsSection = "COMMIT_CHECKS"
 )
 
 var AllProjectSettingsSection = []ProjectSettingsSection{
@@ -1214,17 +1253,19 @@ var AllProjectSettingsSection = []ProjectSettingsSection{
 	ProjectSettingsSectionTriggers,
 	ProjectSettingsSectionPeriodicBuilds,
 	ProjectSettingsSectionPlugins,
-	ProjectSettingsSectionContainers,
 	ProjectSettingsSectionViewsAndFilters,
 	ProjectSettingsSectionTestSelection,
-	ProjectSettingsSectionGithubAndCommitQueue,
 	ProjectSettingsSectionGithubAppSettings,
 	ProjectSettingsSectionGithubPermissions,
+	ProjectSettingsSectionPullRequests,
+	ProjectSettingsSectionGitTags,
+	ProjectSettingsSectionMergeQueue,
+	ProjectSettingsSectionCommitChecks,
 }
 
 func (e ProjectSettingsSection) IsValid() bool {
 	switch e {
-	case ProjectSettingsSectionGeneral, ProjectSettingsSectionAccess, ProjectSettingsSectionVariables, ProjectSettingsSectionNotifications, ProjectSettingsSectionPatchAliases, ProjectSettingsSectionWorkstation, ProjectSettingsSectionTriggers, ProjectSettingsSectionPeriodicBuilds, ProjectSettingsSectionPlugins, ProjectSettingsSectionContainers, ProjectSettingsSectionViewsAndFilters, ProjectSettingsSectionTestSelection, ProjectSettingsSectionGithubAndCommitQueue, ProjectSettingsSectionGithubAppSettings, ProjectSettingsSectionGithubPermissions:
+	case ProjectSettingsSectionGeneral, ProjectSettingsSectionAccess, ProjectSettingsSectionVariables, ProjectSettingsSectionNotifications, ProjectSettingsSectionPatchAliases, ProjectSettingsSectionWorkstation, ProjectSettingsSectionTriggers, ProjectSettingsSectionPeriodicBuilds, ProjectSettingsSectionPlugins, ProjectSettingsSectionViewsAndFilters, ProjectSettingsSectionTestSelection, ProjectSettingsSectionGithubAppSettings, ProjectSettingsSectionGithubPermissions, ProjectSettingsSectionPullRequests, ProjectSettingsSectionGitTags, ProjectSettingsSectionMergeQueue, ProjectSettingsSectionCommitChecks:
 		return true
 	}
 	return false

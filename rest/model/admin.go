@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/utility"
@@ -19,11 +20,13 @@ func NewConfigModel() *APIAdminSettings {
 		AmboyDB:             &APIAmboyDBConfig{},
 		Api:                 &APIapiConfig{},
 		AuthConfig:          &APIAuthConfig{},
+		OktaServiceConfig:   &APIOktaServiceConfig{},
 		Buckets:             &APIBucketsConfig{},
 		Cedar:               &APICedarConfig{},
 		ContainerPools:      &APIContainerPoolsConfig{},
 		Expansions:          map[string]string{},
 		Cost:                &APICostConfig{},
+		Diagnostics:         &APIDiagnosticsConfig{},
 		FWS:                 &APIFWSConfig{},
 		Graphite:            &APIGraphiteConfig{},
 		HostInit:            &APIHostInitConfig{},
@@ -35,9 +38,9 @@ func NewConfigModel() *APIAdminSettings {
 		Overrides:           &APIOverridesConfig{},
 		ParameterStore:      &APIParameterStoreConfig{},
 		Plugins:             map[string]map[string]any{},
-		PodLifecycle:        &APIPodLifecycleConfig{},
 		ProjectCreation:     &APIProjectCreationConfig{},
 		Providers:           &APICloudProviders{},
+		RateLimit:           &APIRateLimitConfig{},
 		RepoTracker:         &APIRepoTrackerConfig{},
 		ReleaseMode:         &APIReleaseModeConfig{},
 		RuntimeEnvironments: &APIRuntimeEnvironmentsConfig{},
@@ -66,12 +69,15 @@ type APIAdminSettings struct {
 	Api                     *APIapiConfig                 `json:"api,omitempty"`
 	AWSInstanceRole         *string                       `json:"aws_instance_role,omitempty"`
 	AuthConfig              *APIAuthConfig                `json:"auth,omitempty"`
+	OktaServiceConfig       *APIOktaServiceConfig         `json:"okta_service,omitempty"`
 	Banner                  *string                       `json:"banner,omitempty"`
 	BannerTheme             *string                       `json:"banner_theme,omitempty"`
 	Buckets                 *APIBucketsConfig             `json:"buckets,omitempty"`
 	Cedar                   *APICedarConfig               `json:"cedar,omitempty"`
 	ConfigDir               *string                       `json:"configdir,omitempty"`
 	ContainerPools          *APIContainerPoolsConfig      `json:"container_pools,omitempty"`
+	DebugSpawnHosts         *APIDebugSpawnHostsConfig     `json:"debug_spawn_hosts,omitempty"`
+	Diagnostics             *APIDiagnosticsConfig         `json:"diagnostics,omitempty"`
 	DomainName              *string                       `json:"domain_name,omitempty"`
 	Expansions              map[string]string             `json:"expansions,omitempty"`
 	Cost                    *APICostConfig                `json:"cost,omitempty"`
@@ -85,7 +91,6 @@ type APIAdminSettings struct {
 	HostJasper              *APIHostJasperConfig          `json:"host_jasper,omitempty"`
 	Jira                    *APIJiraConfig                `json:"jira,omitempty"`
 	JIRANotifications       *APIJIRANotificationsConfig   `json:"jira_notifications,omitempty"`
-	KanopySSHKeyPath        *string                       `json:"kanopy_ssh_key_path,omitempty"`
 	LoggerConfig            *APILoggerConfig              `json:"logger_config,omitempty"`
 	LogPath                 *string                       `json:"log_path,omitempty"`
 	Notify                  *APINotifyConfig              `json:"notify,omitempty"`
@@ -95,10 +100,10 @@ type APIAdminSettings struct {
 	PerfMonitoringURL       *string                       `json:"perf_monitoring_url"`
 	PerfMonitoringKanopyURL *string                       `json:"perf_monitoring_kanopy_url"`
 	Plugins                 map[string]map[string]any     `json:"plugins,omitempty"`
-	PodLifecycle            *APIPodLifecycleConfig        `json:"pod_lifecycle,omitempty"`
 	PprofPort               *string                       `json:"pprof_port,omitempty"`
 	ProjectCreation         *APIProjectCreationConfig     `json:"project_creation,omitempty"`
 	Providers               *APICloudProviders            `json:"providers,omitempty"`
+	RateLimit               *APIRateLimitConfig           `json:"rate_limit,omitempty"`
 	RepoTracker             *APIRepoTrackerConfig         `json:"repotracker,omitempty"`
 	ReleaseMode             *APIReleaseModeConfig         `json:"release_mode,omitempty"`
 	RuntimeEnvironments     *APIRuntimeEnvironmentsConfig `json:"runtime_environments,omitempty"`
@@ -169,7 +174,6 @@ func (as *APIAdminSettings) BuildFromService(h any) error {
 		as.Plugins = v.Plugins
 		as.PprofPort = &v.PprofPort
 		as.Expansions = v.Expansions
-		as.KanopySSHKeyPath = utility.ToStringPtr(v.KanopySSHKeyPath)
 		as.GithubOrgs = v.GithubOrgs
 		as.GithubWebhookSecret = utility.ToStringPtr(v.GithubWebhookSecret)
 		as.DisabledGQLQueries = v.DisabledGQLQueries
@@ -204,6 +208,12 @@ func (as *APIAdminSettings) BuildFromService(h any) error {
 			return errors.Wrap(err, "converting spawn host config to API model")
 		}
 		as.Spawnhost = &spawnHostConfig
+		debugSpawnHostsConfig := APIDebugSpawnHostsConfig{}
+		err = debugSpawnHostsConfig.BuildFromService(v.DebugSpawnHosts)
+		if err != nil {
+			return errors.Wrap(err, "converting debug spawn hosts config to API model")
+		}
+		as.DebugSpawnHosts = &debugSpawnHostsConfig
 		slackConfig := APISlackConfig{}
 		err = slackConfig.BuildFromService(v.Slack)
 		if err != nil {
@@ -317,7 +327,6 @@ func (as *APIAdminSettings) ToService() (any, error) {
 	for k, v := range as.Expansions {
 		settings.Expansions[k] = v
 	}
-	settings.KanopySSHKeyPath = utility.FromStringPtr(as.KanopySSHKeyPath)
 	for k, v := range as.Plugins {
 		settings.Plugins[k] = map[string]any{}
 		for k2, v2 := range v {
@@ -541,6 +550,53 @@ func (a *APIapiConfig) ToService() (any, error) {
 	}, nil
 }
 
+type APIRateLimitConfig struct {
+	RESTUserPerHour        int      `json:"rest_user_per_hour"`
+	RESTUserBurst          int      `json:"rest_user_burst"`
+	RESTServicePerHour     int      `json:"rest_service_per_hour"`
+	RESTServiceBurst       int      `json:"rest_service_burst"`
+	GraphQLUserPerHour     int      `json:"graphql_user_per_hour"`
+	GraphQLUserBurst       int      `json:"graphql_user_burst"`
+	GraphQLServicePerHour  int      `json:"graphql_service_per_hour"`
+	GraphQLServiceBurst    int      `json:"graphql_service_burst"`
+	GraphQLComplexityLimit int      `json:"graphql_complexity_limit"`
+	ElevatedUserIDs        []string `json:"elevated_user_ids"`
+}
+
+func (a *APIRateLimitConfig) BuildFromService(h any) error {
+	switch v := h.(type) {
+	case evergreen.RateLimitConfig:
+		a.RESTUserPerHour = v.RESTUserPerHour
+		a.RESTUserBurst = v.RESTUserBurst
+		a.RESTServicePerHour = v.RESTServicePerHour
+		a.RESTServiceBurst = v.RESTServiceBurst
+		a.GraphQLUserPerHour = v.GraphQLUserPerHour
+		a.GraphQLUserBurst = v.GraphQLUserBurst
+		a.GraphQLServicePerHour = v.GraphQLServicePerHour
+		a.GraphQLServiceBurst = v.GraphQLServiceBurst
+		a.GraphQLComplexityLimit = v.GraphQLComplexityLimit
+		a.ElevatedUserIDs = v.ElevatedUserIDs
+	default:
+		return errors.Errorf("programmatic error: expected rate limit config but got type %T", h)
+	}
+	return nil
+}
+
+func (a *APIRateLimitConfig) ToService() (any, error) {
+	return evergreen.RateLimitConfig{
+		RESTUserPerHour:        a.RESTUserPerHour,
+		RESTUserBurst:          a.RESTUserBurst,
+		RESTServicePerHour:     a.RESTServicePerHour,
+		RESTServiceBurst:       a.RESTServiceBurst,
+		GraphQLUserPerHour:     a.GraphQLUserPerHour,
+		GraphQLUserBurst:       a.GraphQLUserBurst,
+		GraphQLServicePerHour:  a.GraphQLServicePerHour,
+		GraphQLServiceBurst:    a.GraphQLServiceBurst,
+		GraphQLComplexityLimit: a.GraphQLComplexityLimit,
+		ElevatedUserIDs:        a.ElevatedUserIDs,
+	}, nil
+}
+
 type APIAuthConfig struct {
 	Okta                    *APIOktaConfig       `json:"okta"`
 	Naive                   *APINaiveAuthConfig  `json:"naive"`
@@ -688,22 +744,63 @@ func (a *APIAuthConfig) ToService() (any, error) {
 	}, nil
 }
 
+type APIOktaServiceConfig struct {
+	ClientID     *string  `json:"client_id"`
+	ClientSecret *string  `json:"client_secret"`
+	Scopes       []string `json:"scopes"`
+	Audience     *string  `json:"audience"`
+	Issuer       *string  `json:"issuer"`
+}
+
+func (a *APIOktaServiceConfig) BuildFromService(h any) error {
+	switch v := h.(type) {
+	case evergreen.OktaServiceConfig:
+		a.ClientID = utility.ToStringPtr(v.ClientID)
+		a.ClientSecret = utility.ToStringPtr(v.ClientSecret)
+		a.Scopes = v.Scopes
+		a.Audience = utility.ToStringPtr(v.Audience)
+		a.Issuer = utility.ToStringPtr(v.Issuer)
+	default:
+		return errors.Errorf("programmatic error: expected Okta service config but got type %T", h)
+	}
+	return nil
+}
+
+func (a *APIOktaServiceConfig) ToService() (any, error) {
+	return evergreen.OktaServiceConfig{
+		ClientID:     utility.FromStringPtr(a.ClientID),
+		ClientSecret: utility.FromStringPtr(a.ClientSecret),
+		Scopes:       a.Scopes,
+		Audience:     utility.FromStringPtr(a.Audience),
+		Issuer:       utility.FromStringPtr(a.Issuer),
+	}, nil
+}
+
 type APIBucketsConfig struct {
-	LogBucket              APIBucketConfig  `json:"log_bucket"`
-	LogBucketLongRetention APIBucketConfig  `json:"log_bucket_long_retention"`
-	LogBucketFailedTasks   APIBucketConfig  `json:"log_bucket_failed_tasks"`
-	LongRetentionProjects  []string         `json:"long_retention_projects"`
-	TestResultsBucket      APIBucketConfig  `json:"test_results_bucket"`
-	InternalBuckets        []string         `json:"internal_buckets"`
-	Credentials            APIS3Credentials `json:"credentials"`
+	LogBucket                      APIBucketConfig `json:"log_bucket"`
+	LogBucketLongRetention         APIBucketConfig `json:"log_bucket_long_retention"`
+	LogBucketFailedTasks           APIBucketConfig `json:"log_bucket_failed_tasks"`
+	LongRetentionProjects          []string        `json:"long_retention_projects"`
+	RetryFailedLogMoveLookbackDays *int            `json:"retry_failed_log_move_lookback_days,omitempty"`
+	// Kept for Spruce backward compatibility.
+	RetryFailedLogMoveLookbackMonths *int             `json:"retry_failed_log_move_lookback_months,omitempty"`
+	RetryFailedLogMoveMaxJobsPerRun  *int             `json:"retry_failed_log_move_max_jobs_per_run,omitempty"`
+	TestResultsBucket                APIBucketConfig  `json:"test_results_bucket"`
+	InternalBuckets                  []string         `json:"internal_buckets"`
+	Credentials                      APIS3Credentials `json:"credentials"`
 }
 
 type APIBucketConfig struct {
-	Name              *string `json:"name"`
-	Type              *string `json:"type"`
-	DBName            *string `json:"db_name"`
-	TestResultsPrefix *string `json:"test_results_prefix"`
-	RoleARN           *string `json:"role_arn"`
+	Name                    *string    `json:"name"`
+	Type                    *string    `json:"type"`
+	DBName                  *string    `json:"db_name"`
+	TestResultsPrefix       *string    `json:"test_results_prefix"`
+	RoleARN                 *string    `json:"role_arn"`
+	ExpirationDays          *int       `json:"expiration_days,omitempty"`
+	TransitionToIADays      *int       `json:"transition_to_ia_days,omitempty"`
+	TransitionToGlacierDays *int       `json:"transition_to_glacier_days,omitempty"`
+	LifecycleLastSyncedAt   *time.Time `json:"lifecycle_last_synced_at,omitempty"`
+	LifecycleSyncError      *string    `json:"lifecycle_sync_error,omitempty"`
 }
 
 type APIProjectToPrefixMapping struct {
@@ -723,18 +820,42 @@ func (a *APIBucketsConfig) BuildFromService(h any) error {
 		a.LogBucket.Name = utility.ToStringPtr(v.LogBucket.Name)
 		a.LogBucket.Type = utility.ToStringPtr(string(v.LogBucket.Type))
 		a.LogBucket.DBName = utility.ToStringPtr(v.LogBucket.DBName)
+		a.LogBucket.ExpirationDays = v.LogBucket.ExpirationDays
+		a.LogBucket.TransitionToIADays = v.LogBucket.TransitionToIADays
+		a.LogBucket.TransitionToGlacierDays = v.LogBucket.TransitionToGlacierDays
+		if !v.LogBucket.LifecycleLastSyncedAt.IsZero() {
+			a.LogBucket.LifecycleLastSyncedAt = &v.LogBucket.LifecycleLastSyncedAt
+		}
+		a.LogBucket.LifecycleSyncError = utility.ToStringPtr(v.LogBucket.LifecycleSyncError)
 
 		a.LogBucketLongRetention.Name = utility.ToStringPtr(v.LogBucketLongRetention.Name)
 		a.LogBucketLongRetention.Type = utility.ToStringPtr(string(v.LogBucketLongRetention.Type))
 		a.LogBucketLongRetention.DBName = utility.ToStringPtr(v.LogBucketLongRetention.DBName)
 		a.LogBucketLongRetention.RoleARN = utility.ToStringPtr(v.LogBucketLongRetention.RoleARN)
+		a.LogBucketLongRetention.ExpirationDays = v.LogBucketLongRetention.ExpirationDays
+		a.LogBucketLongRetention.TransitionToIADays = v.LogBucketLongRetention.TransitionToIADays
+		a.LogBucketLongRetention.TransitionToGlacierDays = v.LogBucketLongRetention.TransitionToGlacierDays
+		if !v.LogBucketLongRetention.LifecycleLastSyncedAt.IsZero() {
+			a.LogBucketLongRetention.LifecycleLastSyncedAt = &v.LogBucketLongRetention.LifecycleLastSyncedAt
+		}
+		a.LogBucketLongRetention.LifecycleSyncError = utility.ToStringPtr(v.LogBucketLongRetention.LifecycleSyncError)
 
 		a.LogBucketFailedTasks.Name = utility.ToStringPtr(v.LogBucketFailedTasks.Name)
 		a.LogBucketFailedTasks.Type = utility.ToStringPtr(string(v.LogBucketFailedTasks.Type))
 		a.LogBucketFailedTasks.DBName = utility.ToStringPtr(v.LogBucketFailedTasks.DBName)
 		a.LogBucketFailedTasks.RoleARN = utility.ToStringPtr(v.LogBucketFailedTasks.RoleARN)
+		a.LogBucketFailedTasks.ExpirationDays = v.LogBucketFailedTasks.ExpirationDays
+		a.LogBucketFailedTasks.TransitionToIADays = v.LogBucketFailedTasks.TransitionToIADays
+		a.LogBucketFailedTasks.TransitionToGlacierDays = v.LogBucketFailedTasks.TransitionToGlacierDays
+		if !v.LogBucketFailedTasks.LifecycleLastSyncedAt.IsZero() {
+			a.LogBucketFailedTasks.LifecycleLastSyncedAt = &v.LogBucketFailedTasks.LifecycleLastSyncedAt
+		}
+		a.LogBucketFailedTasks.LifecycleSyncError = utility.ToStringPtr(v.LogBucketFailedTasks.LifecycleSyncError)
 
 		a.LongRetentionProjects = v.LongRetentionProjects
+		a.RetryFailedLogMoveLookbackDays = utility.ToIntPtr(v.RetryFailedLogMoveLookbackDays)
+		a.RetryFailedLogMoveLookbackMonths = utility.ToIntPtr(v.RetryFailedLogMoveLookbackDays)
+		a.RetryFailedLogMoveMaxJobsPerRun = utility.ToIntPtr(v.RetryFailedLogMoveMaxJobsPerRun)
 
 		a.TestResultsBucket.Name = utility.ToStringPtr(v.TestResultsBucket.Name)
 		a.TestResultsBucket.Type = utility.ToStringPtr(string(v.TestResultsBucket.Type))
@@ -763,6 +884,12 @@ func (a *APIBucketsConfig) ToService() (any, error) {
 		return nil, errors.Errorf("programmatic error: expected S3 credentials but got type %T", i)
 	}
 
+	// Prefer Days; fall back to Months for Spruce backward compatibility.
+	lookbackDays := a.RetryFailedLogMoveLookbackDays
+	if lookbackDays == nil {
+		lookbackDays = a.RetryFailedLogMoveLookbackMonths
+	}
+
 	return evergreen.BucketsConfig{
 		LogBucket: evergreen.BucketConfig{
 			Name:   utility.FromStringPtr(a.LogBucket.Name),
@@ -781,7 +908,9 @@ func (a *APIBucketsConfig) ToService() (any, error) {
 			DBName:  utility.FromStringPtr(a.LogBucketFailedTasks.DBName),
 			RoleARN: utility.FromStringPtr(a.LogBucketFailedTasks.RoleARN),
 		},
-		LongRetentionProjects: a.LongRetentionProjects,
+		LongRetentionProjects:           a.LongRetentionProjects,
+		RetryFailedLogMoveLookbackDays:  utility.FromIntPtr(lookbackDays),
+		RetryFailedLogMoveMaxJobsPerRun: utility.FromIntPtr(a.RetryFailedLogMoveMaxJobsPerRun),
 		TestResultsBucket: evergreen.BucketConfig{
 			Name:              utility.FromStringPtr(a.TestResultsBucket.Name),
 			Type:              evergreen.BucketType(utility.FromStringPtr(a.TestResultsBucket.Type)),
@@ -1113,32 +1242,6 @@ func (a *APIHostInitConfig) ToService() (any, error) {
 	}, nil
 }
 
-type APIPodLifecycleConfig struct {
-	MaxParallelPodRequests      int `json:"max_parallel_pod_requests"`
-	MaxPodDefinitionCleanupRate int `json:"max_pod_definition_cleanup_rate"`
-	MaxSecretCleanupRate        int `json:"max_secret_cleanup_rate"`
-}
-
-func (a *APIPodLifecycleConfig) BuildFromService(h any) error {
-	switch v := h.(type) {
-	case evergreen.PodLifecycleConfig:
-		a.MaxParallelPodRequests = v.MaxParallelPodRequests
-		a.MaxPodDefinitionCleanupRate = v.MaxPodDefinitionCleanupRate
-		a.MaxSecretCleanupRate = v.MaxSecretCleanupRate
-	default:
-		return errors.Errorf("programmatic error: expected pod lifecycle config but got type %T", h)
-	}
-	return nil
-}
-
-func (a *APIPodLifecycleConfig) ToService() (any, error) {
-	return evergreen.PodLifecycleConfig{
-		MaxParallelPodRequests:      a.MaxParallelPodRequests,
-		MaxPodDefinitionCleanupRate: a.MaxPodDefinitionCleanupRate,
-		MaxSecretCleanupRate:        a.MaxSecretCleanupRate,
-	}, nil
-}
-
 type APIJiraConfig struct {
 	Host                *string `json:"host"`
 	DefaultProject      *string `json:"default_project"`
@@ -1397,7 +1500,6 @@ type APIProjectCreationConfig struct {
 	TotalProjectLimit int            `json:"total_project_limit"`
 	RepoProjectLimit  int            `json:"repo_project_limit"`
 	RepoExceptions    []APIOwnerRepo `json:"repo_exceptions"`
-	JiraProject       string         `json:"jira_project"`
 }
 
 func (a *APIProjectCreationConfig) BuildFromService(h any) error {
@@ -1412,7 +1514,6 @@ func (a *APIProjectCreationConfig) BuildFromService(h any) error {
 		}
 		a.TotalProjectLimit = v.TotalProjectLimit
 		a.RepoProjectLimit = v.RepoProjectLimit
-		a.JiraProject = v.JiraProject
 	default:
 		return errors.Errorf("programmatic error: expected Project Creation config but got type %T", h)
 	}
@@ -1428,7 +1529,6 @@ func (a *APIProjectCreationConfig) ToService() (any, error) {
 	config := evergreen.ProjectCreationConfig{
 		TotalProjectLimit: a.TotalProjectLimit,
 		RepoProjectLimit:  a.RepoProjectLimit,
-		JiraProject:       a.JiraProject,
 	}
 
 	for _, r := range a.RepoExceptions {
@@ -1616,7 +1716,6 @@ type APIAWSConfig struct {
 	AlertableInstanceTypes []*string                  `json:"alertable_instance_types"`
 	AllowedRegions         []*string                  `json:"allowed_regions"`
 	MaxVolumeSizePerUser   *int                       `json:"max_volume_size"`
-	Pod                    *APIAWSPodConfig           `json:"pod"`
 	AccountRoles           []APIAWSAccountRoleMapping `json:"account_roles"`
 	IPAMPoolID             *string                    `json:"ipam_pool_id"`
 	ElasticIPUsageRate     *float64                   `json:"elastic_ip_usage_rate"`
@@ -1658,10 +1757,6 @@ func (a *APIAWSConfig) BuildFromService(h any) error {
 		a.AllowedInstanceTypes = utility.ToStringPtrSlice(v.AllowedInstanceTypes)
 		a.AlertableInstanceTypes = utility.ToStringPtrSlice(v.AlertableInstanceTypes)
 		a.AllowedRegions = utility.ToStringPtrSlice(v.AllowedRegions)
-
-		var pod APIAWSPodConfig
-		pod.BuildFromService(v.Pod)
-		a.Pod = &pod
 
 		var roleMappings []APIAWSAccountRoleMapping
 		for _, m := range v.AccountRoles {
@@ -1748,14 +1843,6 @@ func (a *APIAWSConfig) ToService() (any, error) {
 	config.AllowedInstanceTypes = utility.FromStringPtrSlice(a.AllowedInstanceTypes)
 	config.AlertableInstanceTypes = utility.FromStringPtrSlice(a.AlertableInstanceTypes)
 	config.AllowedRegions = utility.FromStringPtrSlice(a.AllowedRegions)
-
-	pod, err := a.Pod.ToService()
-	if err != nil {
-		return nil, errors.Wrap(err, "converting ECS configuration to service model")
-	}
-	if pod != nil {
-		config.Pod = *pod
-	}
 
 	var roleMappings []evergreen.AWSAccountRoleMapping
 	for _, m := range a.AccountRoles {
@@ -1863,129 +1950,6 @@ func (a *APIPersistentDNSConfig) ToService() (any, error) {
 	}, nil
 }
 
-// APIAWSPodConfig represents configuration options for pods running in AWS.
-type APIAWSPodConfig struct {
-	Role           *string                  `json:"role"`
-	Region         *string                  `json:"region"`
-	ECS            *APIECSConfig            `json:"ecs"`
-	SecretsManager *APISecretsManagerConfig `json:"secrets_manager"`
-}
-
-func (a *APIAWSPodConfig) BuildFromService(conf evergreen.AWSPodConfig) {
-	a.Role = utility.ToStringPtr(conf.Role)
-	a.Region = utility.ToStringPtr(conf.Region)
-	var apiECS APIECSConfig
-	apiECS.BuildFromService(conf.ECS)
-	a.ECS = &apiECS
-	var apiSecretsManager APISecretsManagerConfig
-	apiSecretsManager.BuildFromService(conf.SecretsManager)
-	a.SecretsManager = &apiSecretsManager
-}
-
-func (a *APIAWSPodConfig) ToService() (*evergreen.AWSPodConfig, error) {
-	if a == nil {
-		return nil, nil
-	}
-
-	ecs, err := a.ECS.ToService()
-	if err != nil {
-		return nil, errors.Wrap(err, "converting ECS config to service model")
-	}
-
-	sm := a.SecretsManager.ToService()
-
-	config := &evergreen.AWSPodConfig{
-		Role:           utility.FromStringPtr(a.Role),
-		Region:         utility.FromStringPtr(a.Region),
-		SecretsManager: sm,
-	}
-
-	if ecs != nil {
-		config.ECS = *ecs
-	}
-
-	return config, nil
-}
-
-// APIECSConfig represents configuration options for AWS ECS.
-type APIECSConfig struct {
-	MaxCPU               *int                     `json:"max_cpu"`
-	MaxMemoryMB          *int                     `json:"max_memory_mb"`
-	TaskDefinitionPrefix *string                  `json:"task_definition_prefix"`
-	TaskRole             *string                  `json:"task_role"`
-	ExecutionRole        *string                  `json:"execution_role"`
-	LogRegion            *string                  `json:"log_region"`
-	LogGroup             *string                  `json:"log_group"`
-	LogStreamPrefix      *string                  `json:"log_stream_prefix"`
-	AWSVPC               *APIAWSVPCConfig         `json:"awsvpc"`
-	Clusters             []APIECSClusterConfig    `json:"clusters"`
-	CapacityProviders    []APIECSCapacityProvider `json:"capacity_providers"`
-	AllowedImages        []string                 `json:"allowed_images"`
-}
-
-func (a *APIECSConfig) BuildFromService(conf evergreen.ECSConfig) {
-	a.MaxCPU = utility.ToIntPtr(conf.MaxCPU)
-	a.MaxMemoryMB = utility.ToIntPtr(conf.MaxMemoryMB)
-	a.TaskDefinitionPrefix = utility.ToStringPtr(conf.TaskDefinitionPrefix)
-	a.TaskRole = utility.ToStringPtr(conf.TaskRole)
-	a.ExecutionRole = utility.ToStringPtr(conf.ExecutionRole)
-	a.LogRegion = utility.ToStringPtr(conf.LogRegion)
-	a.LogStreamPrefix = utility.ToStringPtr(conf.LogStreamPrefix)
-	a.LogGroup = utility.ToStringPtr(conf.LogGroup)
-	var apiAWSVPC APIAWSVPCConfig
-	apiAWSVPC.BuildFromService(conf.AWSVPC)
-	a.AWSVPC = &apiAWSVPC
-	for _, cluster := range conf.Clusters {
-		var apiCluster APIECSClusterConfig
-		apiCluster.BuildFromService(cluster)
-		a.Clusters = append(a.Clusters, apiCluster)
-	}
-	for _, cp := range conf.CapacityProviders {
-		var apiProvider APIECSCapacityProvider
-		apiProvider.BuildFromService(cp)
-		a.CapacityProviders = append(a.CapacityProviders, apiProvider)
-	}
-	a.AllowedImages = conf.AllowedImages
-}
-
-func (a *APIECSConfig) ToService() (*evergreen.ECSConfig, error) {
-	if a == nil {
-		return nil, nil
-	}
-
-	var clusters []evergreen.ECSClusterConfig
-	for _, apiCluster := range a.Clusters {
-		cluster, err := apiCluster.ToService()
-		if err != nil {
-			return nil, errors.Wrap(err, "converting ECS cluster config to service model")
-		}
-		clusters = append(clusters, *cluster)
-	}
-	var providers []evergreen.ECSCapacityProvider
-	for _, apiProvider := range a.CapacityProviders {
-		cp, err := apiProvider.ToService()
-		if err != nil {
-			return nil, errors.Wrap(err, "converting capacity provider to service model")
-		}
-		providers = append(providers, *cp)
-	}
-
-	return &evergreen.ECSConfig{
-		MaxCPU:               utility.FromIntPtr(a.MaxCPU),
-		MaxMemoryMB:          utility.FromIntPtr(a.MaxMemoryMB),
-		TaskDefinitionPrefix: utility.FromStringPtr(a.TaskDefinitionPrefix),
-		TaskRole:             utility.FromStringPtr(a.TaskRole),
-		ExecutionRole:        utility.FromStringPtr(a.ExecutionRole),
-		LogRegion:            utility.FromStringPtr(a.LogRegion),
-		LogStreamPrefix:      utility.FromStringPtr(a.LogStreamPrefix),
-		LogGroup:             utility.FromStringPtr(a.LogGroup),
-		AWSVPC:               a.AWSVPC.ToService(),
-		Clusters:             clusters,
-		CapacityProviders:    providers,
-		AllowedImages:        a.AllowedImages,
-	}, nil
-}
-
 // APIAWSVPCConfig represents configuration options for tasks in ECS using
 // AWSVPC networking.
 type APIAWSVPCConfig struct {
@@ -2005,90 +1969,6 @@ func (a *APIAWSVPCConfig) ToService() evergreen.AWSVPCConfig {
 	return evergreen.AWSVPCConfig{
 		Subnets:        a.Subnets,
 		SecurityGroups: a.SecurityGroups,
-	}
-}
-
-// APIECSClusterConfig represents configuration options for a cluster in AWS
-// ECS.
-type APIECSClusterConfig struct {
-	Name *string `json:"name"`
-	OS   *string `json:"os"`
-}
-
-func (a *APIECSClusterConfig) BuildFromService(conf evergreen.ECSClusterConfig) {
-	a.Name = utility.ToStringPtr(conf.Name)
-	a.OS = utility.ToStringPtr(string(conf.OS))
-}
-
-func (a *APIECSClusterConfig) ToService() (*evergreen.ECSClusterConfig, error) {
-	if a == nil {
-		return nil, nil
-	}
-	os := evergreen.ECSOS(utility.FromStringPtr(a.OS))
-	if err := os.Validate(); err != nil {
-		return nil, errors.Wrap(err, "invalid OS")
-	}
-	return &evergreen.ECSClusterConfig{
-		Name: utility.FromStringPtr(a.Name),
-		OS:   os,
-	}, nil
-}
-
-// APIECSCapacityProvider represents configuration options for a capacity
-// provider within an ECS cluster.
-type APIECSCapacityProvider struct {
-	Name           *string `json:"name"`
-	OS             *string `json:"os"`
-	Arch           *string `json:"arch"`
-	WindowsVersion *string `json:"windows_version"`
-}
-
-func (a *APIECSCapacityProvider) BuildFromService(cp evergreen.ECSCapacityProvider) {
-	a.Name = utility.ToStringPtr(cp.Name)
-	a.OS = utility.ToStringPtr(string(cp.OS))
-	a.Arch = utility.ToStringPtr(string(cp.Arch))
-	a.WindowsVersion = utility.ToStringPtr(string(cp.WindowsVersion))
-}
-
-func (a *APIECSCapacityProvider) ToService() (*evergreen.ECSCapacityProvider, error) {
-	os := evergreen.ECSOS(utility.FromStringPtr(a.OS))
-	if err := os.Validate(); err != nil {
-		return nil, errors.Wrap(err, "invalid OS")
-	}
-	arch := evergreen.ECSArch(utility.FromStringPtr(a.Arch))
-	if err := arch.Validate(); err != nil {
-		return nil, errors.Wrap(err, "invalid arch")
-	}
-	winVer := evergreen.ECSWindowsVersion(utility.FromStringPtr(a.WindowsVersion))
-	if winVer != "" {
-		if err := winVer.Validate(); err != nil {
-			return nil, errors.Wrap(err, "invalid Windows version")
-		}
-	}
-	return &evergreen.ECSCapacityProvider{
-		Name:           utility.FromStringPtr(a.Name),
-		OS:             os,
-		Arch:           arch,
-		WindowsVersion: winVer,
-	}, nil
-}
-
-// APISecretsManagerConfig represents configuration options for AWS Secrets
-// Manager.
-type APISecretsManagerConfig struct {
-	SecretPrefix *string `json:"secret_prefix"`
-}
-
-func (a *APISecretsManagerConfig) BuildFromService(conf evergreen.SecretsManagerConfig) {
-	a.SecretPrefix = utility.ToStringPtr(conf.SecretPrefix)
-}
-
-func (a *APISecretsManagerConfig) ToService() evergreen.SecretsManagerConfig {
-	if a == nil {
-		return evergreen.SecretsManagerConfig{}
-	}
-	return evergreen.SecretsManagerConfig{
-		SecretPrefix: utility.FromStringPtr(a.SecretPrefix),
 	}
 }
 
@@ -2168,24 +2048,27 @@ func (a *APIReleaseModeConfig) ToService() (any, error) {
 }
 
 type APISchedulerConfig struct {
-	TaskFinder                    *string `json:"task_finder"`
-	HostAllocator                 *string `json:"host_allocator"`
-	HostAllocatorRoundingRule     *string `json:"host_allocator_rounding_rule"`
-	HostAllocatorFeedbackRule     *string `json:"host_allocator_feedback_rule"`
-	HostsOverallocatedRule        *string `json:"hosts_overallocated_rule"`
-	FutureHostFraction            float64 `json:"free_host_fraction"`
-	CacheDurationSeconds          int     `json:"cache_duration_seconds"`
-	TargetTimeSeconds             int     `json:"target_time_seconds"`
-	AcceptableHostIdleTimeSeconds int     `json:"acceptable_host_idle_time_seconds"`
-	GroupVersions                 bool    `json:"group_versions"`
-	PatchFactor                   int64   `json:"patch_factor"`
-	PatchTimeInQueueFactor        int64   `json:"patch_time_in_queue_factor"`
-	CommitQueueFactor             int64   `json:"commit_queue_factor"`
-	MainlineTimeInQueueFactor     int64   `json:"mainline_time_in_queue_factor"`
-	ExpectedRuntimeFactor         int64   `json:"expected_runtime_factor"`
-	GenerateTaskFactor            int64   `json:"generate_task_factor"`
-	NumDependentsFactor           float64 `json:"num_dependents_factor"`
-	StepbackTaskFactor            int64   `json:"stepback_task_factor"`
+	TaskFinder                       *string `json:"task_finder"`
+	HostAllocator                    *string `json:"host_allocator"`
+	HostAllocatorRoundingRule        *string `json:"host_allocator_rounding_rule"`
+	HostAllocatorFeedbackRule        *string `json:"host_allocator_feedback_rule"`
+	HostsOverallocatedRule           *string `json:"hosts_overallocated_rule"`
+	FutureHostFraction               float64 `json:"free_host_fraction"`
+	CacheDurationSeconds             int     `json:"cache_duration_seconds"`
+	TargetTimeSeconds                int     `json:"target_time_seconds"`
+	AcceptableHostIdleTimeSeconds    int     `json:"acceptable_host_idle_time_seconds"`
+	GroupVersions                    bool    `json:"group_versions"`
+	PatchFactor                      int64   `json:"patch_factor"`
+	PatchTimeInQueueFactor           int64   `json:"patch_time_in_queue_factor"`
+	CommitQueueFactor                int64   `json:"commit_queue_factor"`
+	MainlineTimeInQueueFactor        int64   `json:"mainline_time_in_queue_factor"`
+	ExpectedRuntimeFactor            int64   `json:"expected_runtime_factor"`
+	GenerateTaskFactor               int64   `json:"generate_task_factor"`
+	NumDependentsFactor              float64 `json:"num_dependents_factor"`
+	StepbackTaskFactor               int64   `json:"stepback_task_factor"`
+	TranslateProjectConcurrencyLimit int     `json:"translate_project_concurrency_limit"`
+	TranslateProjectCacheBytesLimit  int64   `json:"translate_project_cache_bytes_limit"`
+	TranslateProjectCacheTTLSeconds  int64   `json:"translate_project_cache_ttl_seconds"`
 }
 
 func (a *APISchedulerConfig) BuildFromService(h any) error {
@@ -2209,6 +2092,9 @@ func (a *APISchedulerConfig) BuildFromService(h any) error {
 		a.GenerateTaskFactor = v.GenerateTaskFactor
 		a.NumDependentsFactor = v.NumDependentsFactor
 		a.StepbackTaskFactor = v.StepbackTaskFactor
+		a.TranslateProjectConcurrencyLimit = v.TranslateProjectConcurrencyLimit
+		a.TranslateProjectCacheBytesLimit = v.TranslateProjectCacheBytesLimit
+		a.TranslateProjectCacheTTLSeconds = v.TranslateProjectCacheTTLSeconds
 	default:
 		return errors.Errorf("programmatic error: expected host scheduler config but got type %T", h)
 	}
@@ -2217,63 +2103,67 @@ func (a *APISchedulerConfig) BuildFromService(h any) error {
 
 func (a *APISchedulerConfig) ToService() (any, error) {
 	return evergreen.SchedulerConfig{
-		TaskFinder:                    utility.FromStringPtr(a.TaskFinder),
-		HostAllocator:                 utility.FromStringPtr(a.HostAllocator),
-		HostAllocatorRoundingRule:     utility.FromStringPtr(a.HostAllocatorRoundingRule),
-		HostAllocatorFeedbackRule:     utility.FromStringPtr(a.HostAllocatorFeedbackRule),
-		HostsOverallocatedRule:        utility.FromStringPtr(a.HostsOverallocatedRule),
-		FutureHostFraction:            a.FutureHostFraction,
-		CacheDurationSeconds:          a.CacheDurationSeconds,
-		TargetTimeSeconds:             a.TargetTimeSeconds,
-		AcceptableHostIdleTimeSeconds: a.AcceptableHostIdleTimeSeconds,
-		GroupVersions:                 a.GroupVersions,
-		PatchFactor:                   a.PatchFactor,
-		ExpectedRuntimeFactor:         a.ExpectedRuntimeFactor,
-		PatchTimeInQueueFactor:        a.PatchTimeInQueueFactor,
-		CommitQueueFactor:             a.CommitQueueFactor,
-		MainlineTimeInQueueFactor:     a.MainlineTimeInQueueFactor,
-		GenerateTaskFactor:            a.GenerateTaskFactor,
-		NumDependentsFactor:           a.NumDependentsFactor,
-		StepbackTaskFactor:            a.StepbackTaskFactor,
+		TaskFinder:                       utility.FromStringPtr(a.TaskFinder),
+		HostAllocator:                    utility.FromStringPtr(a.HostAllocator),
+		HostAllocatorRoundingRule:        utility.FromStringPtr(a.HostAllocatorRoundingRule),
+		HostAllocatorFeedbackRule:        utility.FromStringPtr(a.HostAllocatorFeedbackRule),
+		HostsOverallocatedRule:           utility.FromStringPtr(a.HostsOverallocatedRule),
+		FutureHostFraction:               a.FutureHostFraction,
+		CacheDurationSeconds:             a.CacheDurationSeconds,
+		TargetTimeSeconds:                a.TargetTimeSeconds,
+		AcceptableHostIdleTimeSeconds:    a.AcceptableHostIdleTimeSeconds,
+		GroupVersions:                    a.GroupVersions,
+		PatchFactor:                      a.PatchFactor,
+		ExpectedRuntimeFactor:            a.ExpectedRuntimeFactor,
+		PatchTimeInQueueFactor:           a.PatchTimeInQueueFactor,
+		CommitQueueFactor:                a.CommitQueueFactor,
+		MainlineTimeInQueueFactor:        a.MainlineTimeInQueueFactor,
+		GenerateTaskFactor:               a.GenerateTaskFactor,
+		NumDependentsFactor:              a.NumDependentsFactor,
+		StepbackTaskFactor:               a.StepbackTaskFactor,
+		TranslateProjectConcurrencyLimit: a.TranslateProjectConcurrencyLimit,
+		TranslateProjectCacheBytesLimit:  a.TranslateProjectCacheBytesLimit,
+		TranslateProjectCacheTTLSeconds:  a.TranslateProjectCacheTTLSeconds,
 	}, nil
 }
 
 // APIServiceFlags is a public structure representing the admin service flags
 type APIServiceFlags struct {
-	TaskDispatchDisabled           bool `json:"task_dispatch_disabled"`
-	HostInitDisabled               bool `json:"host_init_disabled"`
-	PodInitDisabled                bool `json:"pod_init_disabled"`
-	LargeParserProjectsDisabled    bool `json:"large_parser_projects_disabled"`
-	MonitorDisabled                bool `json:"monitor_disabled"`
-	AlertsDisabled                 bool `json:"alerts_disabled"`
-	AgentStartDisabled             bool `json:"agent_start_disabled"`
-	RepotrackerDisabled            bool `json:"repotracker_disabled"`
-	SchedulerDisabled              bool `json:"scheduler_disabled"`
-	CheckBlockedTasksDisabled      bool `json:"check_blocked_tasks_disabled"`
-	GithubPRTestingDisabled        bool `json:"github_pr_testing_disabled"`
-	CLIUpdatesDisabled             bool `json:"cli_updates_disabled"`
-	BackgroundStatsDisabled        bool `json:"background_stats_disabled"`
-	TaskLoggingDisabled            bool `json:"task_logging_disabled"`
-	CacheStatsJobDisabled          bool `json:"cache_stats_job_disabled"`
-	CacheStatsEndpointDisabled     bool `json:"cache_stats_endpoint_disabled"`
-	TaskReliabilityDisabled        bool `json:"task_reliability_disabled"`
-	HostAllocatorDisabled          bool `json:"host_allocator_disabled"`
-	PodAllocatorDisabled           bool `json:"pod_allocator_disabled"`
-	UnrecognizedPodCleanupDisabled bool `json:"unrecognized_pod_cleanup_disabled"`
-	BackgroundReauthDisabled       bool `json:"background_reauth_disabled"`
-	CloudCleanupDisabled           bool `json:"cloud_cleanup_disabled"`
-	SleepScheduleDisabled          bool `json:"sleep_schedule_disabled"`
-	StaticAPIKeysDisabled          bool `json:"static_api_keys_disabled"`
-	// JWTTokenForCLIDisabled disables the use of OAuth tokens for the CLI.
-	JWTTokenForCLIDisabled          bool `json:"jwt_token_for_cli_disabled"`
-	SystemFailedTaskRestartDisabled bool `json:"system_failed_task_restart_disabled"`
-	DegradedModeDisabled            bool `json:"cpu_degraded_mode_disabled"`
-	ElasticIPsDisabled              bool `json:"elastic_ips_disabled"`
-	ReleaseModeDisabled             bool `json:"release_mode_disabled"`
-	LegacyUIAdminPageDisabled       bool `json:"legacy_ui_admin_page_disabled"`
-	DebugSpawnHostDisabled          bool `json:"debug_spawn_host_disabled"`
-	S3LifecycleSyncDisabled         bool `json:"s3_lifecycle_sync_disabled"`
-	UseGitForGitHubFilesDisabled    bool `json:"use_git_for_github_files_disabled"`
+	TaskDispatchDisabled               bool `json:"task_dispatch_disabled"`
+	HostInitDisabled                   bool `json:"host_init_disabled"`
+	LargeParserProjectsDisabled        bool `json:"large_parser_projects_disabled"`
+	MonitorDisabled                    bool `json:"monitor_disabled"`
+	MergeQueueRecoveryEnabled          bool `json:"merge_queue_recovery_enabled"`
+	AlertsDisabled                     bool `json:"alerts_disabled"`
+	AgentStartDisabled                 bool `json:"agent_start_disabled"`
+	RepotrackerDisabled                bool `json:"repotracker_disabled"`
+	SchedulerDisabled                  bool `json:"scheduler_disabled"`
+	CheckBlockedTasksDisabled          bool `json:"check_blocked_tasks_disabled"`
+	GithubPRTestingDisabled            bool `json:"github_pr_testing_disabled"`
+	CLIUpdatesDisabled                 bool `json:"cli_updates_disabled"`
+	BackgroundStatsDisabled            bool `json:"background_stats_disabled"`
+	TaskLoggingDisabled                bool `json:"task_logging_disabled"`
+	CacheStatsJobDisabled              bool `json:"cache_stats_job_disabled"`
+	CacheStatsEndpointDisabled         bool `json:"cache_stats_endpoint_disabled"`
+	TaskReliabilityDisabled            bool `json:"task_reliability_disabled"`
+	HostAllocatorDisabled              bool `json:"host_allocator_disabled"`
+	BackgroundReauthDisabled           bool `json:"background_reauth_disabled"`
+	CloudCleanupDisabled               bool `json:"cloud_cleanup_disabled"`
+	SleepScheduleDisabled              bool `json:"sleep_schedule_disabled"`
+	SystemFailedTaskRestartDisabled    bool `json:"system_failed_task_restart_disabled"`
+	DegradedModeDisabled               bool `json:"cpu_degraded_mode_disabled"`
+	ElasticIPsDisabled                 bool `json:"elastic_ips_disabled"`
+	ReleaseModeDisabled                bool `json:"release_mode_disabled"`
+	LegacyUIAdminPageDisabled          bool `json:"legacy_ui_admin_page_disabled"`
+	DebugSpawnHostDisabled             bool `json:"debug_spawn_host_disabled"`
+	S3LifecycleSyncDisabled            bool `json:"s3_lifecycle_sync_disabled"`
+	UseMergeQueuePathFilteringDisabled bool `json:"use_merge_queue_path_filtering_disabled"`
+	PSLoggingDisabled                  bool `json:"ps_logging_disabled"`
+	PodDiagnosticsDisabled             bool `json:"pod_diagnostics_disabled"`
+	WebhookSecretMigrationEnabled      bool `json:"webhook_secret_migration_enabled"`
+	WebhookSecretCleanupEnabled        bool `json:"webhook_secret_cleanup_enabled"`
+	RetryFailedLogMoveEnabled          bool `json:"retry_failed_log_move_enabled"`
+	ProjectTranslationCacheEnabled     bool `json:"project_translation_cache_enabled"`
 
 	// Notifications Flags
 	EventProcessingDisabled      bool `json:"event_processing_disabled"`
@@ -2282,6 +2172,13 @@ type APIServiceFlags struct {
 	EmailNotificationsDisabled   bool `json:"email_notifications_disabled"`
 	WebhookNotificationsDisabled bool `json:"webhook_notifications_disabled"`
 	GithubStatusAPIDisabled      bool `json:"github_status_api_disabled"`
+	SecondaryReadsDisabled       bool `json:"secondary_reads_disabled"`
+
+	BackgroundCommandFailureEnabled bool `json:"background_command_failure_enabled"`
+
+	// Rate Limiting Flags
+	APIRateLimiterDisabled           bool `json:"api_rate_limiter_disabled"`
+	GraphQLComplexityLimiterDisabled bool `json:"graphql_complexity_limiter_disabled"`
 }
 
 type APIProjectTasksPair struct {
@@ -2559,7 +2456,6 @@ func (a *APISSHKeyPair) ToService() (any, error) {
 
 type APIUIConfig struct {
 	Url                       *string         `json:"url"`
-	HelpUrl                   *string         `json:"help_url"`
 	UIv2Url                   *string         `json:"uiv2_url"`
 	ParsleyUrl                *string         `json:"parsley_url"`
 	HttpListenAddr            *string         `json:"http_listen_addr"`
@@ -2579,7 +2475,6 @@ func (a *APIUIConfig) BuildFromService(h any) error {
 	switch v := h.(type) {
 	case evergreen.UIConfig:
 		a.Url = utility.ToStringPtr(v.Url)
-		a.HelpUrl = utility.ToStringPtr(v.HelpUrl)
 		a.UIv2Url = utility.ToStringPtr(v.UIv2Url)
 		a.ParsleyUrl = utility.ToStringPtr(v.ParsleyUrl)
 		a.HttpListenAddr = utility.ToStringPtr(v.HttpListenAddr)
@@ -2605,7 +2500,6 @@ func (a *APIUIConfig) BuildFromService(h any) error {
 func (a *APIUIConfig) ToService() (any, error) {
 	return evergreen.UIConfig{
 		Url:                       utility.FromStringPtr(a.Url),
-		HelpUrl:                   utility.FromStringPtr(a.HelpUrl),
 		UIv2Url:                   utility.FromStringPtr(a.UIv2Url),
 		ParsleyUrl:                utility.FromStringPtr(a.ParsleyUrl),
 		HttpListenAddr:            utility.FromStringPtr(a.HttpListenAddr),
@@ -2694,9 +2588,9 @@ func (as *APIServiceFlags) BuildFromService(h any) error {
 	case evergreen.ServiceFlags:
 		as.TaskDispatchDisabled = v.TaskDispatchDisabled
 		as.HostInitDisabled = v.HostInitDisabled
-		as.PodInitDisabled = v.PodInitDisabled
 		as.LargeParserProjectsDisabled = v.LargeParserProjectsDisabled
 		as.MonitorDisabled = v.MonitorDisabled
+		as.MergeQueueRecoveryEnabled = v.MergeQueueRecoveryEnabled
 		as.AlertsDisabled = v.AlertsDisabled
 		as.AgentStartDisabled = v.AgentStartDisabled
 		as.RepotrackerDisabled = v.RepotrackerDisabled
@@ -2710,19 +2604,16 @@ func (as *APIServiceFlags) BuildFromService(h any) error {
 		as.EmailNotificationsDisabled = v.EmailNotificationsDisabled
 		as.WebhookNotificationsDisabled = v.WebhookNotificationsDisabled
 		as.GithubStatusAPIDisabled = v.GithubStatusAPIDisabled
+		as.SecondaryReadsDisabled = v.SecondaryReadsDisabled
 		as.BackgroundStatsDisabled = v.BackgroundStatsDisabled
 		as.TaskLoggingDisabled = v.TaskLoggingDisabled
 		as.CacheStatsJobDisabled = v.CacheStatsJobDisabled
 		as.CacheStatsEndpointDisabled = v.CacheStatsEndpointDisabled
 		as.TaskReliabilityDisabled = v.TaskReliabilityDisabled
 		as.HostAllocatorDisabled = v.HostAllocatorDisabled
-		as.PodAllocatorDisabled = v.PodAllocatorDisabled
-		as.UnrecognizedPodCleanupDisabled = v.UnrecognizedPodCleanupDisabled
 		as.BackgroundReauthDisabled = v.BackgroundReauthDisabled
 		as.CloudCleanupDisabled = v.CloudCleanupDisabled
 		as.SleepScheduleDisabled = v.SleepScheduleDisabled
-		as.StaticAPIKeysDisabled = v.StaticAPIKeysDisabled
-		as.JWTTokenForCLIDisabled = v.JWTTokenForCLIDisabled
 		as.SystemFailedTaskRestartDisabled = v.SystemFailedTaskRestartDisabled
 		as.DegradedModeDisabled = v.CPUDegradedModeDisabled
 		as.ElasticIPsDisabled = v.ElasticIPsDisabled
@@ -2730,7 +2621,16 @@ func (as *APIServiceFlags) BuildFromService(h any) error {
 		as.LegacyUIAdminPageDisabled = v.LegacyUIAdminPageDisabled
 		as.DebugSpawnHostDisabled = v.DebugSpawnHostDisabled
 		as.S3LifecycleSyncDisabled = v.S3LifecycleSyncDisabled
-		as.UseGitForGitHubFilesDisabled = v.UseGitForGitHubFilesDisabled
+		as.PSLoggingDisabled = v.PSLoggingDisabled
+		as.UseMergeQueuePathFilteringDisabled = v.UseMergeQueuePathFilteringDisabled
+		as.PodDiagnosticsDisabled = v.PodDiagnosticsDisabled
+		as.WebhookSecretMigrationEnabled = v.WebhookSecretMigrationEnabled
+		as.WebhookSecretCleanupEnabled = v.WebhookSecretCleanupEnabled
+		as.RetryFailedLogMoveEnabled = v.RetryFailedLogMoveEnabled
+		as.ProjectTranslationCacheEnabled = v.ProjectTranslationCacheEnabled
+		as.BackgroundCommandFailureEnabled = v.BackgroundCommandFailureEnabled
+		as.APIRateLimiterDisabled = v.APIRateLimiterDisabled
+		as.GraphQLComplexityLimiterDisabled = v.GraphQLComplexityLimiterDisabled
 	default:
 		return errors.Errorf("programmatic error: expected service flags config but got type %T", h)
 	}
@@ -2740,45 +2640,51 @@ func (as *APIServiceFlags) BuildFromService(h any) error {
 // ToService returns a service model from an API model
 func (as *APIServiceFlags) ToService() (any, error) {
 	return evergreen.ServiceFlags{
-		TaskDispatchDisabled:            as.TaskDispatchDisabled,
-		HostInitDisabled:                as.HostInitDisabled,
-		PodInitDisabled:                 as.PodInitDisabled,
-		LargeParserProjectsDisabled:     as.LargeParserProjectsDisabled,
-		MonitorDisabled:                 as.MonitorDisabled,
-		AlertsDisabled:                  as.AlertsDisabled,
-		AgentStartDisabled:              as.AgentStartDisabled,
-		RepotrackerDisabled:             as.RepotrackerDisabled,
-		SchedulerDisabled:               as.SchedulerDisabled,
-		CheckBlockedTasksDisabled:       as.CheckBlockedTasksDisabled,
-		GithubPRTestingDisabled:         as.GithubPRTestingDisabled,
-		CLIUpdatesDisabled:              as.CLIUpdatesDisabled,
-		EventProcessingDisabled:         as.EventProcessingDisabled,
-		JIRANotificationsDisabled:       as.JIRANotificationsDisabled,
-		SlackNotificationsDisabled:      as.SlackNotificationsDisabled,
-		EmailNotificationsDisabled:      as.EmailNotificationsDisabled,
-		WebhookNotificationsDisabled:    as.WebhookNotificationsDisabled,
-		GithubStatusAPIDisabled:         as.GithubStatusAPIDisabled,
-		BackgroundStatsDisabled:         as.BackgroundStatsDisabled,
-		TaskLoggingDisabled:             as.TaskLoggingDisabled,
-		CacheStatsJobDisabled:           as.CacheStatsJobDisabled,
-		CacheStatsEndpointDisabled:      as.CacheStatsEndpointDisabled,
-		TaskReliabilityDisabled:         as.TaskReliabilityDisabled,
-		HostAllocatorDisabled:           as.HostAllocatorDisabled,
-		PodAllocatorDisabled:            as.PodAllocatorDisabled,
-		UnrecognizedPodCleanupDisabled:  as.UnrecognizedPodCleanupDisabled,
-		BackgroundReauthDisabled:        as.BackgroundReauthDisabled,
-		CloudCleanupDisabled:            as.CloudCleanupDisabled,
-		SleepScheduleDisabled:           as.SleepScheduleDisabled,
-		StaticAPIKeysDisabled:           as.StaticAPIKeysDisabled,
-		JWTTokenForCLIDisabled:          as.JWTTokenForCLIDisabled,
-		SystemFailedTaskRestartDisabled: as.SystemFailedTaskRestartDisabled,
-		CPUDegradedModeDisabled:         as.DegradedModeDisabled,
-		ElasticIPsDisabled:              as.ElasticIPsDisabled,
-		ReleaseModeDisabled:             as.ReleaseModeDisabled,
-		LegacyUIAdminPageDisabled:       as.LegacyUIAdminPageDisabled,
-		DebugSpawnHostDisabled:          as.DebugSpawnHostDisabled,
-		S3LifecycleSyncDisabled:         as.S3LifecycleSyncDisabled,
-		UseGitForGitHubFilesDisabled:    as.UseGitForGitHubFilesDisabled,
+		TaskDispatchDisabled:               as.TaskDispatchDisabled,
+		HostInitDisabled:                   as.HostInitDisabled,
+		LargeParserProjectsDisabled:        as.LargeParserProjectsDisabled,
+		MonitorDisabled:                    as.MonitorDisabled,
+		MergeQueueRecoveryEnabled:          as.MergeQueueRecoveryEnabled,
+		AlertsDisabled:                     as.AlertsDisabled,
+		AgentStartDisabled:                 as.AgentStartDisabled,
+		RepotrackerDisabled:                as.RepotrackerDisabled,
+		SchedulerDisabled:                  as.SchedulerDisabled,
+		CheckBlockedTasksDisabled:          as.CheckBlockedTasksDisabled,
+		GithubPRTestingDisabled:            as.GithubPRTestingDisabled,
+		CLIUpdatesDisabled:                 as.CLIUpdatesDisabled,
+		EventProcessingDisabled:            as.EventProcessingDisabled,
+		JIRANotificationsDisabled:          as.JIRANotificationsDisabled,
+		SlackNotificationsDisabled:         as.SlackNotificationsDisabled,
+		EmailNotificationsDisabled:         as.EmailNotificationsDisabled,
+		WebhookNotificationsDisabled:       as.WebhookNotificationsDisabled,
+		GithubStatusAPIDisabled:            as.GithubStatusAPIDisabled,
+		SecondaryReadsDisabled:             as.SecondaryReadsDisabled,
+		BackgroundStatsDisabled:            as.BackgroundStatsDisabled,
+		TaskLoggingDisabled:                as.TaskLoggingDisabled,
+		CacheStatsJobDisabled:              as.CacheStatsJobDisabled,
+		CacheStatsEndpointDisabled:         as.CacheStatsEndpointDisabled,
+		TaskReliabilityDisabled:            as.TaskReliabilityDisabled,
+		HostAllocatorDisabled:              as.HostAllocatorDisabled,
+		BackgroundReauthDisabled:           as.BackgroundReauthDisabled,
+		CloudCleanupDisabled:               as.CloudCleanupDisabled,
+		SleepScheduleDisabled:              as.SleepScheduleDisabled,
+		SystemFailedTaskRestartDisabled:    as.SystemFailedTaskRestartDisabled,
+		CPUDegradedModeDisabled:            as.DegradedModeDisabled,
+		ElasticIPsDisabled:                 as.ElasticIPsDisabled,
+		ReleaseModeDisabled:                as.ReleaseModeDisabled,
+		LegacyUIAdminPageDisabled:          as.LegacyUIAdminPageDisabled,
+		DebugSpawnHostDisabled:             as.DebugSpawnHostDisabled,
+		S3LifecycleSyncDisabled:            as.S3LifecycleSyncDisabled,
+		UseMergeQueuePathFilteringDisabled: as.UseMergeQueuePathFilteringDisabled,
+		PSLoggingDisabled:                  as.PSLoggingDisabled,
+		PodDiagnosticsDisabled:             as.PodDiagnosticsDisabled,
+		WebhookSecretMigrationEnabled:      as.WebhookSecretMigrationEnabled,
+		WebhookSecretCleanupEnabled:        as.WebhookSecretCleanupEnabled,
+		RetryFailedLogMoveEnabled:          as.RetryFailedLogMoveEnabled,
+		ProjectTranslationCacheEnabled:     as.ProjectTranslationCacheEnabled,
+		BackgroundCommandFailureEnabled:    as.BackgroundCommandFailureEnabled,
+		APIRateLimiterDisabled:             as.APIRateLimiterDisabled,
+		GraphQLComplexityLimiterDisabled:   as.GraphQLComplexityLimiterDisabled,
 	}, nil
 }
 
@@ -3028,11 +2934,33 @@ func (c *APISpawnHostConfig) ToService() (any, error) {
 	return config, nil
 }
 
+type APIDebugSpawnHostsConfig struct {
+	SetupScript *string `json:"setup_script"`
+}
+
+func (c *APIDebugSpawnHostsConfig) BuildFromService(h any) error {
+	switch v := h.(type) {
+	case evergreen.DebugSpawnHostsConfig:
+		c.SetupScript = utility.ToStringPtr(v.SetupScript)
+	default:
+		return errors.Errorf("programmatic error: expected debug spawn hosts config but got type %T", h)
+	}
+	return nil
+}
+
+func (c *APIDebugSpawnHostsConfig) ToService() (any, error) {
+	config := evergreen.DebugSpawnHostsConfig{
+		SetupScript: utility.FromStringPtr(c.SetupScript),
+	}
+	return config, nil
+}
+
 type APITracerSettings struct {
 	Enabled                   *bool   `json:"enabled"`
 	CollectorEndpoint         *string `json:"collector_endpoint"`
 	CollectorInternalEndpoint *string `json:"collector_internal_endpoint"`
 	CollectorAPIKey           *string `json:"collector_api_key"`
+	TraceURLTemplate          *string `json:"trace_url_template"`
 }
 
 func (c *APITracerSettings) BuildFromService(h any) error {
@@ -3042,6 +2970,7 @@ func (c *APITracerSettings) BuildFromService(h any) error {
 		c.CollectorEndpoint = &v.CollectorEndpoint
 		c.CollectorInternalEndpoint = &v.CollectorInternalEndpoint
 		c.CollectorAPIKey = &v.CollectorAPIKey
+		c.TraceURLTemplate = &v.TraceURLTemplate
 	default:
 		return errors.Errorf("programmatic error: expected tracer config but got type %T", h)
 	}
@@ -3054,9 +2983,33 @@ func (c *APITracerSettings) ToService() (any, error) {
 		CollectorEndpoint:         utility.FromStringPtr(c.CollectorEndpoint),
 		CollectorInternalEndpoint: utility.FromStringPtr(c.CollectorInternalEndpoint),
 		CollectorAPIKey:           utility.FromStringPtr(c.CollectorAPIKey),
+		TraceURLTemplate:          utility.FromStringPtr(c.TraceURLTemplate),
 	}
 
 	return config, nil
+}
+
+type APIDiagnosticsConfig struct {
+	S3BucketName *string `json:"s3_bucket_name"`
+	S3Prefix     *string `json:"s3_prefix"`
+}
+
+func (c *APIDiagnosticsConfig) BuildFromService(h any) error {
+	switch v := h.(type) {
+	case evergreen.DiagnosticsConfig:
+		c.S3BucketName = utility.ToStringPtr(v.S3BucketName)
+		c.S3Prefix = utility.ToStringPtr(v.S3Prefix)
+	default:
+		return errors.Errorf("programmatic error: expected DiagnosticsConfig but got type %T", h)
+	}
+	return nil
+}
+
+func (c *APIDiagnosticsConfig) ToService() (any, error) {
+	return evergreen.DiagnosticsConfig{
+		S3BucketName: utility.FromStringPtr(c.S3BucketName),
+		S3Prefix:     utility.FromStringPtr(c.S3Prefix),
+	}, nil
 }
 
 type APIGitHubCheckRunConfig struct {
@@ -3110,6 +3063,8 @@ type APITaskLimitsConfig struct {
 	MaxTaskExecution *int `json:"max_task_execution"`
 	// MaxDailyAutomaticRestarts is the maximum number of times a project can automatically restart a task within a 24-hour period.
 	MaxDailyAutomaticRestarts *int `json:"max_daily_automatic_restarts"`
+	// MaxScheduledTasksPerDistro is the cap for the number of max tasks materialized into a distro's queue doc per pass.
+	MaxScheduledTasksPerDistro *int `json:"max_scheduled_tasks_per_distro"`
 }
 
 func (c *APITaskLimitsConfig) BuildFromService(h any) error {
@@ -3127,6 +3082,7 @@ func (c *APITaskLimitsConfig) BuildFromService(h any) error {
 		c.MaxExecTimeoutSecs = utility.ToIntPtr(v.MaxExecTimeoutSecs)
 		c.MaxTaskExecution = utility.ToIntPtr(v.MaxTaskExecution)
 		c.MaxDailyAutomaticRestarts = utility.ToIntPtr(v.MaxDailyAutomaticRestarts)
+		c.MaxScheduledTasksPerDistro = utility.ToIntPtr(v.MaxScheduledTasksPerDistro)
 		return nil
 	default:
 		return errors.Errorf("programmatic error: expected task limits config but got type %T", h)
@@ -3147,6 +3103,7 @@ func (c *APITaskLimitsConfig) ToService() (any, error) {
 		MaxDegradedModeConcurrentLargeParserProjectTasks: utility.FromIntPtr(c.MaxDegradedModeConcurrentLargeParserProjectTasks),
 		MaxTaskExecution:                                 utility.FromIntPtr(c.MaxTaskExecution),
 		MaxDailyAutomaticRestarts:                        utility.FromIntPtr(c.MaxDailyAutomaticRestarts),
+		MaxScheduledTasksPerDistro:                       utility.FromIntPtr(c.MaxScheduledTasksPerDistro),
 	}, nil
 }
 
@@ -3211,10 +3168,33 @@ func (a *APIAWSAccountRoleMapping) ToService() evergreen.AWSAccountRoleMapping {
 }
 
 type APICostConfig struct {
-	FinanceFormula      *float64         `json:"finance_formula"`
-	SavingsPlanDiscount *float64         `json:"savings_plan_discount"`
-	OnDemandDiscount    *float64         `json:"on_demand_discount"`
-	S3Cost              *APIS3CostConfig `json:"s3_cost"`
+	FinanceFormula      *float64          `json:"finance_formula"`
+	SavingsPlanDiscount *float64          `json:"savings_plan_discount"`
+	OnDemandDiscount    *float64          `json:"on_demand_discount"`
+	S3Cost              *APIS3CostConfig  `json:"s3_cost"`
+	EBSCost             *APIEBSCostConfig `json:"ebs_cost"`
+}
+
+type APIEBSCostConfig struct {
+	EBSDiscount *float64 `json:"ebs_discount"`
+}
+
+func (a *APIEBSCostConfig) BuildFromService(h any) error {
+	switch v := h.(type) {
+	case *evergreen.EBSCostConfig:
+		a.EBSDiscount = utility.ToFloat64Ptr(v.EBSDiscount)
+	case evergreen.EBSCostConfig:
+		a.EBSDiscount = utility.ToFloat64Ptr(v.EBSDiscount)
+	default:
+		return errors.Errorf("incorrect type %T", v)
+	}
+	return nil
+}
+
+func (a *APIEBSCostConfig) ToService() (any, error) {
+	return evergreen.EBSCostConfig{
+		EBSDiscount: utility.FromFloat64Ptr(a.EBSDiscount),
+	}, nil
 }
 
 func (a *APICostConfig) BuildFromService(h any) error {
@@ -3227,6 +3207,10 @@ func (a *APICostConfig) BuildFromService(h any) error {
 		if err := a.S3Cost.BuildFromService(v.S3Cost); err != nil {
 			return errors.Wrap(err, "building S3 cost config")
 		}
+		a.EBSCost = &APIEBSCostConfig{}
+		if err := a.EBSCost.BuildFromService(&v.EBSCost); err != nil {
+			return errors.Wrap(err, "building EBS cost config")
+		}
 	case evergreen.CostConfig:
 		a.FinanceFormula = &v.FinanceFormula
 		a.SavingsPlanDiscount = &v.SavingsPlanDiscount
@@ -3234,6 +3218,10 @@ func (a *APICostConfig) BuildFromService(h any) error {
 		a.S3Cost = &APIS3CostConfig{}
 		if err := a.S3Cost.BuildFromService(v.S3Cost); err != nil {
 			return errors.Wrap(err, "building S3 cost config")
+		}
+		a.EBSCost = &APIEBSCostConfig{}
+		if err := a.EBSCost.BuildFromService(&v.EBSCost); err != nil {
+			return errors.Wrap(err, "building EBS cost config")
 		}
 	default:
 		return errors.Errorf("incorrect type %T", v)
@@ -3250,11 +3238,20 @@ func (a *APICostConfig) ToService() (any, error) {
 		}
 		s3Cost = s3CostInterface.(evergreen.S3CostConfig)
 	}
+	ebsCost := evergreen.EBSCostConfig{}
+	if a.EBSCost != nil {
+		ebsCostInterface, err := a.EBSCost.ToService()
+		if err != nil {
+			return nil, errors.Wrap(err, "converting EBS cost config")
+		}
+		ebsCost = ebsCostInterface.(evergreen.EBSCostConfig)
+	}
 	return evergreen.CostConfig{
 		FinanceFormula:      utility.FromFloat64Ptr(a.FinanceFormula),
 		SavingsPlanDiscount: utility.FromFloat64Ptr(a.SavingsPlanDiscount),
 		OnDemandDiscount:    utility.FromFloat64Ptr(a.OnDemandDiscount),
 		S3Cost:              s3Cost,
+		EBSCost:             ebsCost,
 	}, nil
 }
 
@@ -3314,8 +3311,12 @@ func (a *APIS3UploadCostConfig) ToService() (any, error) {
 }
 
 type APIS3StorageCostConfig struct {
-	StandardStorageCostDiscount float64 `json:"standard_storage_cost_discount"`
-	IAStorageCostDiscount       float64 `json:"i_a_storage_cost_discount"`
+	StandardStorageCostDiscount              float64  `json:"standard_storage_cost_discount"`
+	IAStorageCostDiscount                    float64  `json:"i_a_storage_cost_discount"`
+	ArchiveStorageCostDiscount               float64  `json:"archive_storage_cost_discount"`
+	DefaultMaxArtifactExpirationDays         int      `json:"default_max_artifact_expiration_days"`
+	DevprodOwnedAWSAccountIds                []string `json:"devprod_owned_aws_account_ids"`
+	ArtifactAwsAccountsWithoutLifecycleRules []string `json:"artifact_aws_accounts_without_lifecycle_rules"`
 }
 
 func (a *APIS3StorageCostConfig) BuildFromService(h any) error {
@@ -3323,6 +3324,10 @@ func (a *APIS3StorageCostConfig) BuildFromService(h any) error {
 	case evergreen.S3StorageCostConfig:
 		a.StandardStorageCostDiscount = v.StandardStorageCostDiscount
 		a.IAStorageCostDiscount = v.IAStorageCostDiscount
+		a.ArchiveStorageCostDiscount = v.ArchiveStorageCostDiscount
+		a.DefaultMaxArtifactExpirationDays = v.DefaultMaxArtifactExpirationDays
+		a.DevprodOwnedAWSAccountIds = v.DevprodOwnedAWSAccountIDs
+		a.ArtifactAwsAccountsWithoutLifecycleRules = v.ArtifactAWSAccountsWithoutLifecycleRules
 		return nil
 	default:
 		return errors.Errorf("incorrect type %T", v)
@@ -3331,8 +3336,12 @@ func (a *APIS3StorageCostConfig) BuildFromService(h any) error {
 
 func (a *APIS3StorageCostConfig) ToService() (any, error) {
 	return evergreen.S3StorageCostConfig{
-		StandardStorageCostDiscount: a.StandardStorageCostDiscount,
-		IAStorageCostDiscount:       a.IAStorageCostDiscount,
+		StandardStorageCostDiscount:              a.StandardStorageCostDiscount,
+		IAStorageCostDiscount:                    a.IAStorageCostDiscount,
+		ArchiveStorageCostDiscount:               a.ArchiveStorageCostDiscount,
+		DefaultMaxArtifactExpirationDays:         a.DefaultMaxArtifactExpirationDays,
+		DevprodOwnedAWSAccountIDs:                a.DevprodOwnedAWSAccountIds,
+		ArtifactAWSAccountsWithoutLifecycleRules: a.ArtifactAwsAccountsWithoutLifecycleRules,
 	}, nil
 }
 

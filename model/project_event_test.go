@@ -1,12 +1,15 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
 	"github.com/evergreen-ci/evergreen/model/event"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -20,6 +23,10 @@ func TestProjectEventSuite(t *testing.T) {
 }
 
 func (s *ProjectEventSuite) SetupTest() {
+	s.Require().NoError(db.ClearCollections(event.EventCollection))
+}
+
+func (s *ProjectEventSuite) TearDownTest() {
 	s.Require().NoError(db.ClearCollections(event.EventCollection))
 }
 
@@ -170,6 +177,129 @@ func (s *ProjectEventSuite) TestModifyProjectEventRedactsAllVars() {
 	s.Equal(evergreen.RedactedAfterValue, string(eventData.After.GitHubAppAuth.PrivateKey))
 	s.Equal(after.Aliases, eventData.After.Aliases)
 	s.Equal(after.Subscriptions, eventData.After.Subscriptions)
+}
+
+func (s *ProjectEventSuite) TestRedactSubscriptionSecrets() {
+	tests := map[string]struct {
+		beforeSecret         []byte
+		afterSecret          []byte
+		beforeAuthValue      string
+		afterAuthValue       string
+		expectedBeforeSecret string
+		expectedAfterSecret  string
+		expectedBeforeAuth   string
+		expectedAfterAuth    string
+	}{
+		"SecretAndAuthHeaderModified": {
+			beforeSecret:         []byte("old-secret"),
+			afterSecret:          []byte("new-secret"),
+			beforeAuthValue:      "Bearer old-token",
+			afterAuthValue:       "Bearer new-token",
+			expectedBeforeSecret: evergreen.RedactedBeforeValue,
+			expectedAfterSecret:  evergreen.RedactedAfterValue,
+			expectedBeforeAuth:   evergreen.RedactedBeforeValue,
+			expectedAfterAuth:    evergreen.RedactedAfterValue,
+		},
+		"NeitherSecretNorAuthHeaderModified": {
+			beforeSecret:    []byte("same-secret"),
+			afterSecret:     []byte("same-secret"),
+			beforeAuthValue: "Bearer same-token",
+			afterAuthValue:  "Bearer same-token",
+		},
+		"OnlyAuthHeaderModified": {
+			beforeSecret:       []byte("same-secret"),
+			afterSecret:        []byte("same-secret"),
+			beforeAuthValue:    "Bearer old-token",
+			afterAuthValue:     "Bearer new-token",
+			expectedBeforeAuth: evergreen.RedactedBeforeValue,
+			expectedAfterAuth:  evergreen.RedactedAfterValue,
+		},
+		"OnlySecretModified": {
+			beforeSecret:         []byte("old-secret"),
+			afterSecret:          []byte("new-secret"),
+			beforeAuthValue:      "Bearer same-token",
+			afterAuthValue:       "Bearer same-token",
+			expectedBeforeSecret: evergreen.RedactedBeforeValue,
+			expectedAfterSecret:  evergreen.RedactedAfterValue,
+		},
+	}
+	for name, tc := range tests {
+		s.T().Run(name, func(t *testing.T) {
+			require.NoError(t, db.ClearCollections(event.EventCollection))
+			t.Cleanup(func() { require.NoError(t, db.ClearCollections(event.EventCollection)) })
+
+			before := getMockProjectSettings()
+			before.Subscriptions = append(before.Subscriptions, event.Subscription{
+				ID:           "webhook-sub",
+				ResourceType: "project",
+				Owner:        "admin",
+				Subscriber: event.Subscriber{
+					Type: event.EvergreenWebhookSubscriberType,
+					Target: &event.WebhookSubscriber{
+						URL:    "https://example.com/hook",
+						Secret: tc.beforeSecret,
+						Headers: []event.WebhookHeader{
+							{Key: event.WebhookAuthorizationHeader, Value: tc.beforeAuthValue},
+							{Key: "Content-Type", Value: "application/json"},
+						},
+					},
+				},
+			})
+			after := getMockProjectSettings()
+			after.ProjectRef.Enabled = false
+			after.Subscriptions = append(after.Subscriptions, event.Subscription{
+				ID:           "webhook-sub",
+				ResourceType: "project",
+				Owner:        "admin",
+				Subscriber: event.Subscriber{
+					Type: event.EvergreenWebhookSubscriberType,
+					Target: &event.WebhookSubscriber{
+						URL:    "https://example.com/hook",
+						Secret: tc.afterSecret,
+						Headers: []event.WebhookHeader{
+							{Key: event.WebhookAuthorizationHeader, Value: tc.afterAuthValue},
+							{Key: "Content-Type", Value: "application/json"},
+						},
+					},
+				},
+			})
+
+			require.NoError(t, LogProjectModified(t.Context(), projectId, username, &before, &after))
+
+			projectEvents, err := MostRecentProjectEvents(t.Context(), projectId, 5)
+			require.NoError(t, err)
+			require.Len(t, projectEvents, 1)
+
+			eventData, ok := projectEvents[0].Data.(*ProjectChangeEvent)
+			require.True(t, ok)
+			require.NotNil(t, eventData)
+
+			checkWebhook := func(settingsEvent ProjectSettingsEvent, expectedSecret, expectedAuth string) {
+				var foundWebhook bool
+				for _, sub := range settingsEvent.Subscriptions {
+					if sub.Subscriber.Type != event.EvergreenWebhookSubscriberType {
+						continue
+					}
+					foundWebhook = true
+					webhookSub, ok := sub.Subscriber.Target.(*event.WebhookSubscriber)
+					require.True(t, ok)
+					require.NotNil(t, webhookSub)
+					assert.Equal(t, expectedSecret, string(webhookSub.Secret))
+					for _, header := range webhookSub.Headers {
+						if strings.EqualFold(header.Key, event.WebhookAuthorizationHeader) {
+							assert.Equal(t, expectedAuth, header.Value)
+						}
+						if header.Key == "Content-Type" {
+							assert.Equal(t, "application/json", header.Value)
+						}
+					}
+				}
+				assert.True(t, foundWebhook, "should have found webhook subscription")
+			}
+			checkWebhook(eventData.Before, tc.expectedBeforeSecret, tc.expectedBeforeAuth)
+			checkWebhook(eventData.After, tc.expectedAfterSecret, tc.expectedAfterAuth)
+		})
+	}
 }
 
 func (s *ProjectEventSuite) TestModifyProjectNonEvent() {

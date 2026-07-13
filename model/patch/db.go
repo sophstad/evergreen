@@ -2,6 +2,7 @@ package patch
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
@@ -16,41 +17,48 @@ import (
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
 	Collection   = "patches"
 	GridFSPrefix = "patchfiles"
+
+	MergeQueueMetricsEmitStatusSuccess = "success"
+	MergeQueueMetricsEmitStatusFailed  = "failed"
 )
 
 // BSON fields for the patches
 var (
-	IdKey                   = bsonutil.MustHaveTag(Patch{}, "Id")
-	DescriptionKey          = bsonutil.MustHaveTag(Patch{}, "Description")
-	ProjectKey              = bsonutil.MustHaveTag(Patch{}, "Project")
-	GithashKey              = bsonutil.MustHaveTag(Patch{}, "Githash")
-	AuthorKey               = bsonutil.MustHaveTag(Patch{}, "Author")
-	NumberKey               = bsonutil.MustHaveTag(Patch{}, "PatchNumber")
-	VersionKey              = bsonutil.MustHaveTag(Patch{}, "Version")
-	StatusKey               = bsonutil.MustHaveTag(Patch{}, "Status")
-	CreateTimeKey           = bsonutil.MustHaveTag(Patch{}, "CreateTime")
-	StartTimeKey            = bsonutil.MustHaveTag(Patch{}, "StartTime")
-	FinishTimeKey           = bsonutil.MustHaveTag(Patch{}, "FinishTime")
-	BuildVariantsKey        = bsonutil.MustHaveTag(Patch{}, "BuildVariants")
-	TasksKey                = bsonutil.MustHaveTag(Patch{}, "Tasks")
-	VariantsTasksKey        = bsonutil.MustHaveTag(Patch{}, "VariantsTasks")
-	PatchesKey              = bsonutil.MustHaveTag(Patch{}, "Patches")
-	ParametersKey           = bsonutil.MustHaveTag(Patch{}, "Parameters")
-	ActivatedKey            = bsonutil.MustHaveTag(Patch{}, "Activated")
-	IsReconfiguredKey       = bsonutil.MustHaveTag(Patch{}, "IsReconfigured")
-	ProjectStorageMethodKey = bsonutil.MustHaveTag(Patch{}, "ProjectStorageMethod")
-	PatchedProjectConfigKey = bsonutil.MustHaveTag(Patch{}, "PatchedProjectConfig")
-	AliasKey                = bsonutil.MustHaveTag(Patch{}, "Alias")
-	githubMergeDataKey      = bsonutil.MustHaveTag(Patch{}, "GithubMergeData")
-	githubPatchDataKey      = bsonutil.MustHaveTag(Patch{}, "GithubPatchData")
-	MergePatchKey           = bsonutil.MustHaveTag(Patch{}, "MergePatch")
-	TriggersKey             = bsonutil.MustHaveTag(Patch{}, "Triggers")
-	HiddenKey               = bsonutil.MustHaveTag(Patch{}, "Hidden")
+	IdKey                          = bsonutil.MustHaveTag(Patch{}, "Id")
+	DescriptionKey                 = bsonutil.MustHaveTag(Patch{}, "Description")
+	ProjectKey                     = bsonutil.MustHaveTag(Patch{}, "Project")
+	GithashKey                     = bsonutil.MustHaveTag(Patch{}, "Githash")
+	AuthorKey                      = bsonutil.MustHaveTag(Patch{}, "Author")
+	NumberKey                      = bsonutil.MustHaveTag(Patch{}, "PatchNumber")
+	VersionKey                     = bsonutil.MustHaveTag(Patch{}, "Version")
+	StatusKey                      = bsonutil.MustHaveTag(Patch{}, "Status")
+	CreateTimeKey                  = bsonutil.MustHaveTag(Patch{}, "CreateTime")
+	IngestTimeKey                  = bsonutil.MustHaveTag(Patch{}, "IngestTime")
+	StartTimeKey                   = bsonutil.MustHaveTag(Patch{}, "StartTime")
+	FinishTimeKey                  = bsonutil.MustHaveTag(Patch{}, "FinishTime")
+	BuildVariantsKey               = bsonutil.MustHaveTag(Patch{}, "BuildVariants")
+	TasksKey                       = bsonutil.MustHaveTag(Patch{}, "Tasks")
+	VariantsTasksKey               = bsonutil.MustHaveTag(Patch{}, "VariantsTasks")
+	PatchesKey                     = bsonutil.MustHaveTag(Patch{}, "Patches")
+	ParametersKey                  = bsonutil.MustHaveTag(Patch{}, "Parameters")
+	ActivatedKey                   = bsonutil.MustHaveTag(Patch{}, "Activated")
+	IsReconfiguredKey              = bsonutil.MustHaveTag(Patch{}, "IsReconfigured")
+	ProjectStorageMethodKey        = bsonutil.MustHaveTag(Patch{}, "ProjectStorageMethod")
+	PatchedProjectConfigKey        = bsonutil.MustHaveTag(Patch{}, "PatchedProjectConfig")
+	AliasKey                       = bsonutil.MustHaveTag(Patch{}, "Alias")
+	GithubMergeDataKey             = bsonutil.MustHaveTag(Patch{}, "GithubMergeData")
+	githubPatchDataKey             = bsonutil.MustHaveTag(Patch{}, "GithubPatchData")
+	MergePatchKey                  = bsonutil.MustHaveTag(Patch{}, "MergePatch")
+	TriggersKey                    = bsonutil.MustHaveTag(Patch{}, "Triggers")
+	HiddenKey                      = bsonutil.MustHaveTag(Patch{}, "Hidden")
+	MergeQueueMetricsEmitStatusKey = bsonutil.MustHaveTag(Patch{}, "MergeQueueMetricsEmitStatus")
 
 	// BSON fields for the module patch struct
 	ModulePatchNameKey    = bsonutil.MustHaveTag(ModulePatch{}, "ModuleName")
@@ -62,16 +70,31 @@ var (
 	PatchSetSummaryKey = bsonutil.MustHaveTag(PatchSet{}, "Summary")
 
 	// BSON fields for the patch trigger struct
-	TriggerInfoAliasesKey              = bsonutil.MustHaveTag(TriggerInfo{}, "Aliases")
-	TriggerInfoParentPatchKey          = bsonutil.MustHaveTag(TriggerInfo{}, "ParentPatch")
-	TriggerInfoChildPatchesKey         = bsonutil.MustHaveTag(TriggerInfo{}, "ChildPatches")
-	TriggerInfoDownstreamParametersKey = bsonutil.MustHaveTag(TriggerInfo{}, "DownstreamParameters")
+	TriggerInfoAliasesKey               = bsonutil.MustHaveTag(TriggerInfo{}, "Aliases")
+	TriggerInfoParentPatchKey           = bsonutil.MustHaveTag(TriggerInfo{}, "ParentPatch")
+	TriggerInfoChildPatchesKey          = bsonutil.MustHaveTag(TriggerInfo{}, "ChildPatches")
+	TriggerInfoDownstreamParametersKey  = bsonutil.MustHaveTag(TriggerInfo{}, "DownstreamParameters")
+	TriggerInfoChildrenCompletedTimeKey = bsonutil.MustHaveTag(TriggerInfo{}, "ChildrenCompletedTime")
 
 	// BSON fields for thirdparty.Github
 	githubPatchHeadOwnerKey = bsonutil.MustHaveTag(thirdparty.GithubPatch{}, "HeadOwner")
 
 	// BSON fields for thirdparty.GithubMergeGroup
-	githubMergeGroupHeadSHAKey = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "HeadSHA")
+	githubMergeGroupOrgKey                   = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "Org")
+	githubMergeGroupRepoKey                  = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "Repo")
+	githubMergeGroupHeadSHAKey               = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "HeadSHA")
+	githubMergeGroupRemovedFromQueueAtKey    = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "RemovedFromQueueAt")
+	githubMergeGroupRemovalReasonKey         = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "RemovalReason")
+	GithubMergeGroupGitRefNotFoundKey        = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "GitRefNotFound")
+	githubMergeGroupInvalidatedByUpstreamKey = bsonutil.MustHaveTag(thirdparty.GithubMergeGroup{}, "InvalidatedByUpstream")
+)
+
+// ProjectCreateTimeIndex is a partial index used to speed up finding GitHub Merge Queue patches
+var (
+	ProjectCreateTimeIndex = bson.D{
+		{Key: ProjectKey, Value: 1},
+		{Key: CreateTimeKey, Value: -1},
+	}
 )
 
 // Query Validation
@@ -101,7 +124,7 @@ func ByStringIds(ids []string) db.Q {
 		if IsValidId(id) {
 			objectIds = append(objectIds, NewId(id))
 		} else {
-			grip.Debug(message.Fields{
+			grip.Debug(context.Background(), message.Fields{
 				"message": "patch id is not valid",
 				"id":      id,
 			})
@@ -111,15 +134,6 @@ func ByStringIds(ids []string) db.Q {
 }
 
 var commitQueueFilter = bson.M{"$ne": evergreen.CommitQueueAlias}
-
-// ByProject produces a query that returns projects with the given identifier.
-func ByProjectAndCommitQueue(project string, filterCommitQueue bool) db.Q {
-	q := bson.M{ProjectKey: project}
-	if filterCommitQueue {
-		q[AliasKey] = commitQueueFilter
-	}
-	return db.Query(q)
-}
 
 // ByUser produces a query that returns patches by the given user.
 func ByUserAndCommitQueue(user string, filterCommitQueue bool) db.Q {
@@ -135,8 +149,9 @@ func ByGithash(githash string) db.Q {
 	return db.Query(bson.M{bsonutil.GetDottedKeyName(githubPatchDataKey, headHashKey): githash})
 }
 
-type ByPatchNameStatusesMergeQueuePaginatedOptions struct {
+type ProjectOrUserPatchesOptions struct {
 	Author         *string
+	CountLimit     int
 	IncludeHidden  *bool
 	Limit          int
 	OnlyMergeQueue *bool
@@ -166,8 +181,8 @@ var requesterExpression = bson.M{
 				"case": bson.M{
 					"$or": []bson.M{
 						{"$and": []bson.M{
-							{"$ifNull": []any{"$" + githubMergeDataKey, false}},
-							{"$ne": []string{"$" + bsonutil.GetDottedKeyName(githubMergeDataKey, githubMergeGroupHeadSHAKey), ""}},
+							{"$ifNull": []any{"$" + GithubMergeDataKey, false}},
+							{"$ne": []string{"$" + bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupHeadSHAKey), ""}},
 						}},
 						{"$eq": []string{"$" + AliasKey, evergreen.CommitQueueAlias}},
 					},
@@ -179,10 +194,10 @@ var requesterExpression = bson.M{
 	},
 }
 
-func ByPatchNameStatusesMergeQueuePaginated(ctx context.Context, opts ByPatchNameStatusesMergeQueuePaginatedOptions) ([]Patch, int, error) {
-	if opts.Project != nil && opts.Author != nil {
-		return nil, 0, errors.New("can't set both project and author")
-	}
+// buildPatchFilterPipeline constructs the common filtering pipeline for patch queries.
+// Returns the pipeline stages and a boolean indicating if we're filtering for merge queue only.
+// If includeSort is false, the sort stage is omitted (useful for count queries where order doesn't matter).
+func buildPatchFilterPipeline(opts ProjectOrUserPatchesOptions, includeSort bool) ([]bson.M, bool) {
 	pipeline := []bson.M{}
 	match := bson.M{}
 
@@ -203,76 +218,139 @@ func ByPatchNameStatusesMergeQueuePaginated(ctx context.Context, opts ByPatchNam
 	if opts.Project != nil {
 		match[ProjectKey] = utility.FromStringPtr(opts.Project)
 	}
+
+	// Validate requesters and check if we're only filtering for merge queue patches.
+	patchRequesters := []string{}
+	for _, requester := range opts.Requesters {
+		if evergreen.IsPatchRequester(requester) {
+			patchRequesters = append(patchRequesters, requester)
+		}
+	}
+	onlyMergeQueue := len(patchRequesters) == 1 && patchRequesters[0] == evergreen.GithubMergeRequester
+
+	// This filter matches the logic in IsMergeQueuePatch() and results in significantly fewer documents being retrieved from the db.
+	if onlyMergeQueue {
+		match["$or"] = []bson.M{
+			{
+				bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupHeadSHAKey): bson.M{
+					"$exists": true,
+					"$ne":     "",
+				},
+			},
+			{AliasKey: evergreen.CommitQueueAlias},
+		}
+	}
+
 	pipeline = append(pipeline, bson.M{"$match": match})
 
-	sortStage := bson.M{
-		"$sort": bson.M{
-			CreateTimeKey: -1,
-		},
+	if includeSort {
+		sortStage := bson.M{
+			"$sort": bson.M{
+				CreateTimeKey: -1,
+			},
+		}
+		pipeline = append(pipeline, sortStage)
 	}
 
-	pipeline = append(pipeline, sortStage)
-
-	if len(opts.Requesters) > 0 || utility.FromBoolPtr(opts.OnlyMergeQueue) {
-		matchRequesterStage := bson.M{}
-		validatedRequesters := []string{}
-		for _, requester := range opts.Requesters {
-			if evergreen.IsPatchRequester(requester) {
-				validatedRequesters = append(validatedRequesters, requester)
-			}
-		}
-		requesterMatch := bson.M{"$in": validatedRequesters}
-		// Conditionally add the merge queue requester filter if the user is explicitly filtering on it.
-		// This is only used on the project patches page when we want to conditionally only show merge queue patches.
-		if utility.FromBoolPtr(opts.OnlyMergeQueue) {
-			requesterMatch = bson.M{"$eq": evergreen.GithubMergeRequester}
-		}
+	// Apply requester filtering using the computed requester expression.
+	// Skip this step if we're only filtering for merge queue patches since we already applied the optimization above.
+	if len(patchRequesters) > 0 && !onlyMergeQueue {
 		pipeline = append(pipeline, bson.M{"$addFields": bson.M{"requester": requesterExpression}})
-		matchRequesterStage["requester"] = requesterMatch
-		pipeline = append(pipeline, bson.M{"$match": matchRequesterStage})
+		pipeline = append(pipeline, bson.M{"$match": bson.M{"requester": bson.M{"$in": patchRequesters}}})
 	}
 
-	resultPipeline := pipeline
+	return pipeline, onlyMergeQueue
+}
+
+// ProjectOrUserPatchesPage returns a page of patches matching the filter criteria.
+func ProjectOrUserPatchesPage(ctx context.Context, opts ProjectOrUserPatchesOptions) ([]Patch, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "ProjectOrUserPatchesPage")})
+
+	if opts.Project != nil && opts.Author != nil {
+		return nil, errors.New("can't set both project and author")
+	}
+
+	pipeline, onlyMergeQueue := buildPatchFilterPipeline(opts, true)
+
+	// Exclude large patch diff data to avoid exceeding MongoDB's 16MB document limit.
+	pipeline = append(pipeline, bson.M{"$project": ExcludePatchDiff})
+
 	if opts.Page > 0 {
-		skipStage := bson.M{
-			"$skip": opts.Page * opts.Limit,
-		}
-		resultPipeline = append(resultPipeline, skipStage)
+		pipeline = append(pipeline, bson.M{"$skip": opts.Page * opts.Limit})
 	}
 	if opts.Limit > 0 {
-		limitStage := bson.M{
-			"$limit": opts.Limit,
-		}
-		resultPipeline = append(resultPipeline, limitStage)
+		pipeline = append(pipeline, bson.M{"$limit": opts.Limit})
+	}
+
+	env := evergreen.GetEnvironment()
+
+	var aggregateOpts *options.AggregateOptions
+	if onlyMergeQueue {
+		aggregateOpts = options.Aggregate().SetHint(ProjectCreateTimeIndex)
+	}
+
+	cursor, err := env.DB().Collection(Collection).Aggregate(ctx, pipeline, aggregateOpts)
+	if err != nil {
+		return nil, err
 	}
 
 	results := []Patch{}
-	env := evergreen.GetEnvironment()
-	cursor, err := env.DB().Collection(Collection).Aggregate(ctx, resultPipeline)
-	if err != nil {
-		return nil, 0, err
-	}
 	if err = cursor.All(ctx, &results); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	// Will be used to get the total count of the filtered patches
-	countPipeline := append(pipeline, bson.M{"$count": "count"})
+	return results, nil
+}
+
+// ProjectOrUserPatchesCount returns the count of patches matching the filter criteria.
+// An upper threshold is set since the precise document count doesn't really matter.
+func ProjectOrUserPatchesCount(ctx context.Context, opts ProjectOrUserPatchesOptions) (int, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "ProjectOrUserPatchesCount")})
+
+	if opts.Project != nil && opts.Author != nil {
+		return 0, errors.New("can't set both project and author")
+	}
+
+	if opts.CountLimit <= 0 || opts.CountLimit > 10000 {
+		opts.CountLimit = 10000
+	}
+
+	pipeline, onlyMergeQueue := buildPatchFilterPipeline(opts, false)
+
+	// For performance, use $limit instead of $count to avoid scanning all matching documents.
+	pipeline = append(pipeline, bson.M{"$limit": opts.CountLimit})
+	pipeline = append(pipeline, bson.M{"$count": "count"})
+
+	env := evergreen.GetEnvironment()
+
+	var aggregateOpts *options.AggregateOptions
+	if onlyMergeQueue {
+		aggregateOpts = options.Aggregate().SetHint(ProjectCreateTimeIndex)
+	}
+
+	cursor, err := env.DB().Collection(Collection).Aggregate(ctx, pipeline, aggregateOpts)
+	if err != nil {
+		return 0, err
+	}
+
 	type countResult struct {
 		Count int `bson:"count"`
 	}
 	countResults := []countResult{}
-	cursor, err = env.DB().Collection(Collection).Aggregate(ctx, countPipeline)
-	if err != nil {
-		return nil, 0, err
-	}
 	if err = cursor.All(ctx, &countResults); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
+
 	if len(countResults) == 0 {
-		return results, 0, nil
+		return 0, nil
 	}
-	return results, countResults[0].Count, nil
+
+	if countResults[0].Count == opts.CountLimit {
+		// Indicate that we've maxed out at our count limit
+		return math.MaxInt32, nil
+	}
+
+	return countResults[0].Count, nil
 }
 
 // ByUserPaginated produces a query that returns patches by the given user
@@ -301,11 +379,6 @@ func MostRecentPatchByUserAndProject(user, project string) db.Q {
 // ByVersion produces a query that returns the patch for a given version.
 func ByVersion(version string) db.Q {
 	return db.Query(bson.M{VersionKey: version})
-}
-
-// ByVersion produces a query that returns the patch for a given version.
-func ByVersions(versions []string) db.Q {
-	return db.Query(bson.M{VersionKey: bson.M{"$in": versions}})
 }
 
 // ExcludePatchDiff is a projection that excludes diff data, helping load times.
@@ -461,4 +534,209 @@ func GetFinalizedChildPatchIdsForPatch(ctx context.Context, patchID string) ([]s
 		}
 	}
 	return res, nil
+}
+
+// FindMergeQueuePatchesByProject returns all active merge queue patches for a project
+func FindMergeQueuePatchesByProject(ctx context.Context, projectID string) ([]Patch, error) {
+	timeThreshold := time.Now().Add(-24 * time.Hour)
+
+	query := bson.M{
+		ProjectKey: projectID,
+		AliasKey:   evergreen.CommitQueueAlias,
+		StatusKey: bson.M{
+			"$nin": []string{evergreen.VersionFailed, evergreen.VersionSucceeded},
+		},
+		CreateTimeKey: bson.M{
+			"$gte": timeThreshold,
+		},
+		bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey): bson.M{
+			"$exists": false,
+		},
+	}
+
+	return Find(ctx, db.Query(query))
+}
+
+// FindFinalizedMergeQueuePatchesMissingCompletionMetrics returns finalized merge queue patches that did not receive
+// a GitHub removal webhook and have not yet had completion metrics emitted.
+func FindFinalizedMergeQueuePatchesMissingCompletionMetrics(ctx context.Context, projectID string) ([]Patch, error) {
+	timeThreshold := time.Now().Add(-30 * time.Minute)
+
+	query := bson.D{
+		{Key: ProjectKey, Value: projectID},
+		{Key: AliasKey, Value: evergreen.CommitQueueAlias},
+		{Key: StatusKey, Value: bson.D{{Key: "$in", Value: []string{evergreen.VersionSucceeded, evergreen.VersionFailed}}}},
+		{Key: FinishTimeKey, Value: bson.D{{Key: "$gte", Value: timeThreshold}}},
+		{Key: bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey), Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: MergeQueueMetricsEmitStatusKey, Value: bson.D{{Key: "$nin", Value: []string{MergeQueueMetricsEmitStatusSuccess}}}},
+	}
+
+	return Find(ctx, db.Query(query))
+}
+
+// determineInvalidatedByUpstream determines if a merge queue patch was invalidated due to
+// upstream failure rather than its own failure.
+func determineInvalidatedByUpstream(ctx context.Context, p *Patch, reason string, removalTime time.Time) bool {
+	// Only determine upstream failure for the "invalidated" reason.
+	// "dequeued" represents manual removal (not upstream failure).
+	// "merged" represents successful merge.
+	if reason != thirdparty.MergeQueueReasonInvalidated {
+		return false
+	}
+
+	// Check if GitRefNotFound was already set by the agent. This handles a potential race condition where
+	// GitHub invalidates the merge queue entry and deletes the ref. The agent then tries to clone but fails
+	// because the ref is already gone (setting GitRefNotFound), after which the webhook arrives. The combination of
+	// GitRefNotFound being set and the removal reason being "invalidated" tells us this was an upstream
+	// failure.
+	if p.GithubMergeData.GitRefNotFound {
+		return true
+	}
+
+	if p.Version == "" {
+		// No version was created yet, indicating an upstream failure.
+		return true
+	}
+
+	isFinished := p.IsFinished()
+	status := p.Status
+
+	// If the patch is still running or succeeded, this indicates that the patch wasn't
+	// removed due to its own task's failures and instead indicates an upstream failure.
+	if !isFinished || status == evergreen.VersionSucceeded {
+		return true
+	}
+
+	// Check if the patch was removed from the queue before it finished.
+	// If RemovedFromQueueAt is before FinishTime, the patch was invalidated while running,
+	// indicating an upstream failure rather than its own failure.
+	if !p.FinishTime.IsZero() && removalTime.Before(p.FinishTime) {
+		return true
+	}
+
+	return false
+}
+
+// groupPatchesAndBuildUpdates groups patches by whether they were invalidated due to
+// upstream failures or their own failures, and builds the corresponding update documents.
+func groupPatchesAndBuildUpdates(ctx context.Context, patches []Patch, reason string, removalTime time.Time) (
+	patchesInvalidatedByUpstream []mgobson.ObjectId, updateForUpstream bson.M,
+	patchesOwnFailure []mgobson.ObjectId, updateForOwnFailure bson.M) {
+
+	for _, p := range patches {
+		if determineInvalidatedByUpstream(ctx, &p, reason, removalTime) {
+			patchesInvalidatedByUpstream = append(patchesInvalidatedByUpstream, p.Id)
+		} else {
+			patchesOwnFailure = append(patchesOwnFailure, p.Id)
+		}
+	}
+
+	updateForUpstream = bson.M{
+		"$set": bson.M{
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey):    removalTime,
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovalReasonKey):         reason,
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupInvalidatedByUpstreamKey): true,
+		},
+	}
+
+	updateForOwnFailure = bson.M{
+		"$set": bson.M{
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey):    removalTime,
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovalReasonKey):         reason,
+			bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupInvalidatedByUpstreamKey): false,
+		},
+	}
+
+	return patchesInvalidatedByUpstream, updateForUpstream, patchesOwnFailure, updateForOwnFailure
+}
+
+// MarkMergeQueuePatchesRemovedFromQueue updates patches matching the given HeadSHA to mark them
+// as removed from the GitHub merge queue. Returns the patches that were updated.
+func MarkMergeQueuePatchesRemovedFromQueue(ctx context.Context, org, repo, headSHA, reason string) ([]Patch, error) {
+	if headSHA == "" {
+		return nil, errors.New("headSHA cannot be empty")
+	}
+	if reason == "" {
+		return nil, errors.New("reason cannot be empty")
+	}
+
+	query := bson.M{
+		bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupOrgKey):     org,
+		bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRepoKey):    repo,
+		bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupHeadSHAKey): headSHA,
+		bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey): bson.M{
+			"$exists": false,
+		},
+	}
+
+	patches, err := Find(ctx, db.Query(query))
+	if err != nil {
+		return nil, errors.Wrap(err, "finding patches")
+	}
+
+	if len(patches) == 0 {
+		return nil, nil
+	}
+
+	removalTime := time.Now().UTC().Round(time.Millisecond)
+
+	patchesInvalidatedByUpstream, updateForUpstream, patchesOwnFailure, updateForOwnFailure :=
+		groupPatchesAndBuildUpdates(ctx, patches, reason, removalTime)
+
+	updates := []struct {
+		patches []mgobson.ObjectId
+		update  bson.M
+		errMsg  string
+	}{
+		{patchesInvalidatedByUpstream, updateForUpstream, "updating patches invalidated by upstream"},
+		{patchesOwnFailure, updateForOwnFailure, "updating patches with own failures"},
+	}
+
+	for _, u := range updates {
+		if len(u.patches) > 0 {
+			_, err := UpdateAll(ctx, bson.M{IdKey: bson.M{"$in": u.patches}}, u.update)
+			if err != nil {
+				return patches, errors.Wrap(err, u.errMsg)
+			}
+		}
+	}
+
+	return patches, nil
+}
+
+// ClaimMergeQueueMetricsEmit atomically claims the right to emit the patch_completed span for a merge queue
+// patch, returning true if claimed and false if another process claimed it first. If emission fails after
+// a successful claim, callers must correct the status via SetMergeQueueMetricsEmitStatus.
+func ClaimMergeQueueMetricsEmit(ctx context.Context, patchID mgobson.ObjectId) (bool, error) {
+	info, err := UpdateAll(ctx,
+		bson.D{
+			{Key: IdKey, Value: patchID},
+			{Key: MergeQueueMetricsEmitStatusKey, Value: bson.D{{Key: "$nin", Value: []string{
+				MergeQueueMetricsEmitStatusSuccess,
+				MergeQueueMetricsEmitStatusFailed,
+			}}}},
+		},
+		bson.D{{Key: "$set", Value: bson.D{{Key: MergeQueueMetricsEmitStatusKey, Value: MergeQueueMetricsEmitStatusSuccess}}}},
+	)
+	if err != nil {
+		return false, err
+	}
+	return info.Updated > 0, nil
+}
+
+// SetMergeQueueMetricsEmitStatus records the emit status of the patch_completed span for a merge queue patch.
+func SetMergeQueueMetricsEmitStatus(ctx context.Context, patchID mgobson.ObjectId, status string) error {
+	return UpdateOne(ctx,
+		bson.D{{Key: IdKey, Value: patchID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: MergeQueueMetricsEmitStatusKey, Value: status}}}},
+	)
+}
+
+// SetRemovedFromQueueAt records the time the patch was removed from the merge queue. This is called
+// by the cron fallback path to store the GitHub-derived merge time when the destroyed webhook was missed.
+func SetRemovedFromQueueAt(ctx context.Context, patchID mgobson.ObjectId, t time.Time) error {
+	return UpdateOne(ctx,
+		bson.D{{Key: IdKey, Value: patchID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: bsonutil.GetDottedKeyName(GithubMergeDataKey, githubMergeGroupRemovedFromQueueAtKey), Value: t}}}},
+	)
 }

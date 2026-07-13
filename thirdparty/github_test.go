@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -159,6 +158,22 @@ func (s *githubSuite) TestGithubShouldRetry() {
 		retryFn = githubShouldRetry("", retryConfig{retry: true, ignoreCodes: []int{code}})
 		s.False(retryFn(0, req, resp, nil))
 	})
+
+	s.Run("UnauthorizedNotRetried", func() {
+		resp := &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header: http.Header{
+				"X-Ratelimit-Limit":     []string{"10"},
+				"X-Ratelimit-Remaining": []string{"10"},
+			},
+		}
+
+		// Without ignoreCodes, 401 would fall through without retrying (no
+		// explicit retry path for it), but with ignoreCodes it is explicitly
+		// short-circuited.
+		retryFn := githubShouldRetry("", retryConfig{retry: true, ignoreCodes: []int{http.StatusUnauthorized}})
+		s.False(retryFn(0, req, resp, nil))
+	})
 }
 
 func (s *githubSuite) TestCheckGithubAPILimit() {
@@ -168,14 +183,26 @@ func (s *githubSuite) TestCheckGithubAPILimit() {
 }
 
 func (s *githubSuite) TestGetGithubCommits() {
-	githubCommits, _, err := GetGithubCommits(s.ctx, "evergreen-ci", "sample", "", time.Time{}, 0)
+	listOpts := &github.CommitsListOptions{
+		SHA: "",
+		ListOptions: github.ListOptions{
+			Page: 0,
+		},
+	}
+	githubCommits, _, err := GetGithubCommits(s.ctx, "evergreen-ci", "sample", listOpts)
 	s.NoError(err)
 	s.Len(githubCommits, 18)
 }
 
 func (s *githubSuite) TestGetGithubCommitsUntil() {
-	until := time.Date(2015, time.January, 1, 0, 0, 0, 0, time.UTC)
-	githubCommits, _, err := GetGithubCommits(s.ctx, "evergreen-ci", "sample", "", until, 0)
+	listOpts := &github.CommitsListOptions{
+		SHA:   "",
+		Until: time.Date(2015, time.January, 1, 0, 0, 0, 0, time.UTC),
+		ListOptions: github.ListOptions{
+			Page: 0,
+		},
+	}
+	githubCommits, _, err := GetGithubCommits(s.ctx, "evergreen-ci", "sample", listOpts)
 	s.NoError(err)
 	s.Len(githubCommits, 4)
 }
@@ -240,12 +267,17 @@ func (s *githubSuite) TestGetTaggedCommitFromGithub() {
 	})
 }
 
-func (s *githubSuite) TestGetBranchEvent() {
-	branch, err := GetBranchEvent(s.ctx, "evergreen-ci", "evergreen", "main")
-	s.NoError(err)
-	s.NotPanics(func() {
-		s.Equal("main", *branch.Name)
-		s.NotNil(*branch.Commit)
+func (s *githubSuite) TestMergeQueueRefExists() {
+	s.Run("RefDoesNotExist", func() {
+		exists, err := MergeQueueRefExists(s.ctx, "evergreen-ci", "evergreen", "heads/gh-readonly-queue/main/pr-999999999-nonexistent", "")
+		s.NoError(err)
+		s.False(exists)
+	})
+
+	s.Run("RefExists", func() {
+		exists, err := MergeQueueRefExists(s.ctx, "evergreen-ci", "evergreen", "heads/main", "")
+		s.NoError(err)
+		s.True(exists)
 	})
 }
 
@@ -321,18 +353,75 @@ func (s *githubSuite) TestGetGithubUser() {
 }
 
 func (s *githubSuite) TestGetPullRequestMergeBase() {
-	hash, err := GetPullRequestMergeBase(s.ctx, "evergreen-ci", "evergreen", "", "", 666)
+	evergreen666PR := &github.PullRequest{
+		Base: &github.PullRequestBranch{
+			Repo: &github.Repository{
+				Owner: &github.User{
+					Login: utility.ToStringPtr("evergreen-ci"),
+				},
+				Name: utility.ToStringPtr("evergreen"),
+			},
+			SHA: utility.ToStringPtr("61d770097ca0515e46d29add8f9b69e9d9272b94"),
+		},
+		Head: &github.PullRequestBranch{
+			SHA: utility.ToStringPtr("8e153d2b8781fa46ffd5e9dffb0a646bfbd12b1c"),
+		},
+		Number: utility.ToIntPtr(666),
+	}
+	hash, err := GetPullRequestMergeBase(s.ctx, evergreen666PR)
 	s.NoError(err)
 	s.Equal("61d770097ca0515e46d29add8f9b69e9d9272b94", hash)
+
+	s.Run("TestCommitWithMergeCommitMain", func() {
+		// This test uses the commits found in https://github.com/evergreen-ci/commit-queue-sandbox/pull/802.
+		// The merge base of the branch commit in reference to the main branch commit
+		// should be 4139a07 despite the branch being cut from 4aa48dc.
+		// This is because the branch commit has a merge commit from main as its parent that
+		// contains 4139a07.
+		mainHash := "4139a07"
+		branchHash := "1c413b1"
+		expectedMergeBase := "4139a07989ec3a5dfd9c3055161f753c61ef90f8"
+
+		commitQueueSandboxPR := &github.PullRequest{
+			Base: &github.PullRequestBranch{
+				Repo: &github.Repository{
+					Owner: &github.User{
+						Login: utility.ToStringPtr("evergreen-ci"),
+					},
+					Name: utility.ToStringPtr("commit-queue-sandbox"),
+				},
+				SHA: &mainHash,
+			},
+			Head: &github.PullRequestBranch{
+				SHA: &branchHash,
+			},
+			Number: utility.ToIntPtr(802),
+		}
+
+		hash, err = GetPullRequestMergeBase(s.ctx, commitQueueSandboxPR)
+		s.NoError(err)
+		s.Equal(expectedMergeBase, hash)
+	})
 
 	// This test should fail, but it triggers the retry logic which in turn
 	// causes the context to expire, so we reset the context with a longer
 	// deadline here
+	coniferPR := &github.PullRequest{
+		Base: &github.PullRequestBranch{
+			Repo: &github.Repository{
+				Owner: &github.User{
+					Login: utility.ToStringPtr("evergreen-ci"),
+				},
+				Name: utility.ToStringPtr("conifer"),
+			},
+		},
+		Number: utility.ToIntPtr(666),
+	}
 	s.cancel()
 	s.ctx, s.cancel = context.WithTimeout(context.Background(), 30*time.Second)
 	s.Require().NotNil(s.ctx)
 	s.Require().NotNil(s.cancel)
-	hash, err = GetPullRequestMergeBase(s.ctx, "evergreen-ci", "conifer", "", "", 666)
+	hash, err = GetPullRequestMergeBase(s.ctx, coniferPR)
 	s.Error(err)
 	s.Empty(hash)
 }
@@ -412,24 +501,6 @@ func verifyGithubAPILimitHeader(header http.Header) (int64, error) {
 	return rem, nil
 }
 
-func TestValidatePR(t *testing.T) {
-	assert := assert.New(t)
-
-	prBody, err := os.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "..", "units", "testdata", "pull_request.json"))
-	assert.NoError(err)
-	assert.Len(prBody, 24706)
-	webhookInterface, err := github.ParseWebHook("pull_request", prBody)
-	assert.NoError(err)
-	prEvent, ok := webhookInterface.(*github.PullRequestEvent)
-	assert.True(ok)
-	pr := prEvent.GetPullRequest()
-
-	assert.NoError(ValidatePR(pr))
-
-	pr.Base = nil
-	assert.Error(ValidatePR(pr))
-}
-
 func TestParseGithubErrorResponse(t *testing.T) {
 	message := "my message"
 	url := "www.github.com"
@@ -506,4 +577,120 @@ func TestValidateCheckRunOutput(t *testing.T) {
 		"checkRun output 'This is my report' specifies an annotation 'Error Detector' with no annotation level"
 	require.NotNil(t, err)
 	assert.Equal(t, expectedError, err.Error())
+}
+
+func TestExtractPRNumberFromHeadRef(t *testing.T) {
+	for tName, tCase := range map[string]struct {
+		input    string
+		expected string
+	}{
+		"ValidHeadRef": {
+			input:    "refs/heads/gh-readonly-queue/main/pr-515-9cd8a2532bcddf58369aa82eb66ba88e2323c056",
+			expected: "515",
+		},
+		"ValidHeadRefWithMultipleDashesInSHA": {
+			input:    "refs/heads/gh-readonly-queue/main/pr-123-abc-def",
+			expected: "123",
+		},
+		"ValidHeadBranch": {
+			input:    "gh-readonly-queue/main/pr-789-xyz",
+			expected: "789",
+		},
+		"NoPrefix": {
+			input:    "main/pr-456-abc",
+			expected: "456",
+		},
+		"EmptyString": {
+			input:    "",
+			expected: "",
+		},
+		"NoPRPrefix": {
+			input:    "refs/heads/gh-readonly-queue/main/123-9cd8a2532bcddf58369aa82eb66ba88e2323c056",
+			expected: "",
+		},
+		"OnlyPRPrefix": {
+			input:    "pr-",
+			expected: "",
+		},
+		"InvalidFormat": {
+			input:    "some-random-string",
+			expected: "",
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			result := extractPRNumberFromHeadRef(tCase.input)
+			assert.Equal(t, tCase.expected, result)
+		})
+	}
+}
+
+// TestRunGitHubOpNoFallback verifies that when shouldFallback is false and the
+// external app fails, the error is returned directly without attempting the
+// internal app fallback.
+func TestRunGitHubOpNoFallback(t *testing.T) {
+	ctx := t.Context()
+
+	// An invalid private key causes token creation to fail locally, without any
+	// network calls. This simulates a failing external GitHub app.
+	invalidAuth := &githubapp.GithubAppAuth{
+		Id:         "test-project",
+		AppID:      12345,
+		PrivateKey: []byte("not-a-valid-rsa-key"),
+	}
+
+	opCalled := false
+	op := func(_ context.Context, _ *githubapp.GitHubClient) error {
+		opCalled = true
+		return nil
+	}
+
+	err := runGitHubOp(ctx, "owner", "repo", "caller", invalidAuth, false, op)
+	require.Error(t, err)
+	assert.False(t, opCalled, "op should not be called when token creation fails")
+	assert.Contains(t, err.Error(), "getting installation token with external GitHub app")
+}
+
+func TestBuildGithubHeadPRURL(t *testing.T) {
+	for tName, tCase := range map[string]struct {
+		org      string
+		repo     string
+		headRef  string
+		expected string
+	}{
+		"ValidHeadRef": {
+			org:      "evergreen-ci",
+			repo:     "evergreen",
+			headRef:  "refs/heads/gh-readonly-queue/main/pr-515-9cd8a2532bcddf58369aa82eb66ba88e2323c056",
+			expected: "https://github.com/evergreen-ci/evergreen/pull/515",
+		},
+		"ValidHeadRefWithDifferentOrg": {
+			org:      "mongodb",
+			repo:     "mongo",
+			headRef:  "refs/heads/gh-readonly-queue/master/pr-123-abc",
+			expected: "https://github.com/mongodb/mongo/pull/123",
+		},
+		"EmptyHeadRef": {
+			org:      "evergreen-ci",
+			repo:     "evergreen",
+			headRef:  "",
+			expected: "",
+		},
+		"InvalidHeadRef": {
+			org:      "evergreen-ci",
+			repo:     "evergreen",
+			headRef:  "refs/heads/main",
+			expected: "",
+		},
+		"NoPRNumber": {
+			org:      "evergreen-ci",
+			repo:     "evergreen",
+			headRef:  "refs/heads/gh-readonly-queue/main/123-abc",
+			expected: "",
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			result := BuildGithubHeadPRURL(tCase.org, tCase.repo, tCase.headRef)
+			assert.Equal(t, tCase.expected, result)
+		})
+	}
 }

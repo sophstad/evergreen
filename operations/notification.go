@@ -32,13 +32,17 @@ func notificationSlack() cli.Command {
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  joinFlagNames(targetFlagName, "t"),
-				Usage: "target of the message",
+				Usage: "target of the message (must be yourself or have special permissions)",
 			},
 			cli.StringFlag{
 				Name:  joinFlagNames(msgFlagName, "m"),
 				Usage: "message to send",
 			},
 		},
+		Before: mergeBeforeFuncs(
+			requireStringFlag(targetFlagName),
+			requireStringFlag(msgFlagName),
+		),
 		Action: func(c *cli.Context) error {
 			confPath := c.Parent().Parent().String(ConfFlagName)
 			target := c.String(targetFlagName)
@@ -47,7 +51,7 @@ func notificationSlack() cli.Command {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			apiSlack := model.APISlack{
+			apiSlack := &model.APISlack{
 				Target: utility.ToStringPtr(target),
 				Msg:    utility.ToStringPtr(msg),
 			}
@@ -62,7 +66,7 @@ func notificationSlack() cli.Command {
 			}
 			defer client.Close()
 
-			if err := client.SendNotification(ctx, "slack", apiSlack); err != nil {
+			if err := client.SendSlackNotification(ctx, apiSlack); err != nil {
 				return errors.Wrap(err, "sending Slack notification")
 			}
 
@@ -101,6 +105,11 @@ func notificationEmail() cli.Command {
 				Value: "",
 			},
 		},
+		Before: mergeBeforeFuncs(
+			requireStringSliceFlag(recipientsFlagName),
+			requireStringFlag(subjectFlagName),
+			requireStringFlag(bodyFlagName),
+		),
 		Action: func(c *cli.Context) error {
 			confPath := c.Parent().Parent().String(ConfFlagName)
 			recipients := c.StringSlice(recipientsFlagName)
@@ -110,7 +119,7 @@ func notificationEmail() cli.Command {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			apiEmail := model.APIEmail{
+			apiEmail := &model.APIEmail{
 				Subject:    utility.ToStringPtr(subject),
 				Recipients: recipients,
 				Body:       utility.ToStringPtr(body),
@@ -126,7 +135,7 @@ func notificationEmail() cli.Command {
 			}
 			defer client.Close()
 
-			if err := client.SendNotification(ctx, "email", apiEmail); err != nil {
+			if err := client.SendEmailNotification(ctx, apiEmail); err != nil {
 				return errors.Wrap(err, "sending email notification")
 			}
 

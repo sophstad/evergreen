@@ -228,49 +228,153 @@ tasks:
               destination:
                 path: "evergreen/smoke/${build_id}-${build_variant}/evergreen-${task_name}-${revision}-copy"
                 bucket: mciuploads
-      - command: timeout.update
-        params:
-          timeout_secs: 2700
-  # TODO (EVG-17658): changing the smoke container task will cause the smoke test to break unless you very carefully and
-  # manually modify the smoke test's testdata. EVG-17658 is intended to address this issue.
-  - name: container-task
-    commands:
+      # Cache round trip: first restore misses, save uploads, second restore
+      # hits and re-extracts the file even after it is deleted locally.
       - command: shell.exec
         params:
           script: |
-            set -o verbose
             set -o errexit
-            echo "container task"
+            mkdir -p cache-src
+            echo "cached-content-${revision}" > cache-src/cached-file
+      - command: cache.restore
+        display_name: "First cache.restore (expected miss)"
+        params:
+          name: smoke-cache
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+      - command: subprocess.exec
+        display_name: "Assert first cache.restore was a miss"
+        params:
+          binary: bash
+          include_expansions_in_env:
+            - smoke_cache_cache_hit
+          args:
+            - "-c"
+            - '[ "$smoke_cache_cache_hit" != "true" ]'
+      - command: cache.save
+        display_name: "cache.save (expected upload)"
+        params:
+          name: smoke-cache
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+          paths:
+            - cache-src
+      - command: shell.exec
+        display_name: "Remove cached file to prove restore re-fetches it"
+        params:
+          script: rm -rf cache-src
+      - command: cache.restore
+        display_name: "Second cache.restore (expected hit)"
+        params:
+          name: smoke-cache
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+      - command: subprocess.exec
+        display_name: "Assert second cache.restore was a hit and restored the file"
+        params:
+          binary: bash
+          include_expansions_in_env:
+            - smoke_cache_cache_hit
+          args:
+            - "-c"
+            - 'test "$smoke_cache_cache_hit" = "true" && grep -q "cached-content-${revision}" cache-src/cached-file'
+      # preserve_symlinks round trip: a relative symlink must survive save and
+      # restore as a symlink rather than being dereferenced into a regular file.
+      - command: shell.exec
+        params:
+          script: |
+            set -o errexit
+            mkdir -p cache-symlink-src
+            echo "symlink-content-${revision}" > cache-symlink-src/real.txt
+            ln -s real.txt cache-symlink-src/link.txt
+      - command: cache.restore
+        display_name: "First symlink cache.restore (expected miss)"
+        params:
+          name: smoke-cache-symlink
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+          preserve_symlinks: true
+      - command: cache.save
+        display_name: "Symlink cache.save (expected upload)"
+        params:
+          name: smoke-cache-symlink
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+          preserve_symlinks: true
+          paths:
+            - cache-symlink-src
+      - command: shell.exec
+        display_name: "Remove symlink dir to prove restore re-fetches it"
+        params:
+          script: rm -rf cache-symlink-src
+      - command: cache.restore
+        display_name: "Second symlink cache.restore (expected hit)"
+        params:
+          name: smoke-cache-symlink
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          aws_session_token: ${aws_token}
+          bucket: mciuploads
+          remote_path: evergreen/smoke/cache/${build_id}-${build_variant}
+          key_expansions:
+            - ${task_name}-${revision}
+          preserve_symlinks: true
+      - command: subprocess.exec
+        display_name: "Assert symlink cache.restore preserved the symlink"
+        params:
+          binary: bash
+          include_expansions_in_env:
+            - smoke_cache_symlink_cache_hit
+          args:
+            - "-c"
+            - 'test "$smoke_cache_symlink_cache_hit" = "true" && test -L cache-symlink-src/link.txt && [ "$(readlink cache-symlink-src/link.txt)" = "real.txt" ]'
+      - command: timeout.update
+        params:
+          timeout_secs: 2700
+  - name: repotracker_task
+    commands:
+      - command: shell.exec
+        params:
+          script: echo hello world
 
 buildvariants:
   - name: localhost
     display_name: Host smoke test
     run_on:
       - localhost
-    patch_only: true
     tasks:
+      # These tasks will run in the smoke test patch to verify core Evergreen functionality.
       - name: host_smoke_test_task_group
+        patch_only: true
       - name: host_smoke_test_generate_task
-  # TODO (EVG-17658): changing the smoke container task will cause the smoke test to break unless you very carefully and
-  # manually modify the smoke test's testdata. EVG-17658 is intended to address this issue.
-  - name: pod_bv
-    display_name: Container smoke test
-    run_on:
-      - container
-    tasks:
-      - name: container-task
-
-# TODO (EVG-17658): Refactor smoke tests to allow for faking agent creation
-# The following configuration is currently unused since the container task
-# smoke test does not rely on the repotracker job to create tasks for the version.
-# A real image will be used as a part of the above ticket.
-containers:
-  - name: container
-    working_dir: /
-    image: "fake_smoke_test_image"
-    resources:
-      cpu: 1024
-      memory_mb: 1024
-    system:
-      cpu_architecture: x86_64
-      operating_system: linux
+        patch_only: true
+      # This task only exists to ensure the repotracker has one runnable task.
+      - name: repotracker_task
+        patchable: false
+        # Do not activate the repotracker task because testing commits is not relevant to the smoke test.
+        activate: false

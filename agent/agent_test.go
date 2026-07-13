@@ -31,10 +31,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func init() {
-	grip.EmergencyPanic(errors.Wrap(command.RegisterCommand("command.mock", command.MockCommandFactory), "initializing mock command for testing"))
+	grip.EmergencyPanic(context.Background(), errors.Wrap(command.RegisterCommand("command.mock", command.MockCommandFactory), "initializing mock command for testing"))
 }
 
 const defaultProjYml = `
@@ -73,6 +74,36 @@ func TestAgentSuite(t *testing.T) {
 	suite.Run(t, new(AgentSuite))
 }
 
+func TestBuildTaskEndSpanAttributes(t *testing.T) {
+	t.Run("SystemUnresponsiveIncludesDisplayStatusAndStatusDetails", func(t *testing.T) {
+		detail := &apimodels.TaskEndDetail{
+			Status:      evergreen.TaskFailed,
+			Type:        evergreen.CommandTypeSystem,
+			Description: evergreen.TaskDescriptionHeartbeat,
+			TimedOut:    true,
+		}
+
+		attrs := taskEndSpanAttrMap(buildTaskEndSpanAttributes(&task.Task{}, detail))
+
+		assert.Equal(t, evergreen.TaskFailed, attrs[evergreen.TaskStatusOtelAttribute].AsString())
+		assert.Equal(t, evergreen.TaskSystemUnresponse, attrs[evergreen.TaskDisplayStatusOtelAttribute].AsString())
+		assert.Equal(t, evergreen.CommandTypeSystem, attrs[evergreen.TaskFailureTypeOtelAttribute].AsString())
+		assert.Equal(t, evergreen.TaskDescriptionHeartbeat, attrs[evergreen.TaskDescriptionOtelAttribute].AsString())
+	})
+
+	t.Run("NilDetailHasNoAttributes", func(t *testing.T) {
+		assert.Empty(t, buildTaskEndSpanAttributes(&task.Task{}, nil))
+	})
+}
+
+func taskEndSpanAttrMap(attrs []attribute.KeyValue) map[string]attribute.Value {
+	attrMap := map[string]attribute.Value{}
+	for _, attr := range attrs {
+		attrMap[string(attr.Key)] = attr.Value
+	}
+	return attrMap
+}
+
 func (s *AgentSuite) SetupSuite() {
 	s.suiteTmpDirName = s.T().TempDir()
 }
@@ -81,7 +112,7 @@ func (s *AgentSuite) TearDownSuite() {
 	if runtime.GOOS == "windows" {
 		// This is a hack to give extra time for processes in Windows to finish
 		// using the temporary working directory before the Go testing framework
-		// cna attempt to clean it up. When using (testing.T).TempDir, the Go
+		// can attempt to clean it up. When using (testing.T).TempDir, the Go
 		// testing framework will automatically clean up the directory at the
 		// end of the test, and will fail the test if it cannot clean it up.
 		// Furthermore, some agent tests are intentionally testing that the
@@ -162,8 +193,9 @@ func (s *AgentSuite) SetupTest() {
 			ID:     "task_id",
 			Secret: "task_secret",
 		},
-		taskConfig: taskConfig,
-		oomTracker: &mock.OOMTracker{},
+		taskConfig:      taskConfig,
+		oomTracker:      &mock.OOMTracker{},
+		resourceMonitor: newResourceMonitor(nil),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	s.canceler = cancel
@@ -313,7 +345,8 @@ func (s *AgentSuite) TestFinishTaskWithNormalCompletedTask() {
 	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
 
 	for _, status := range evergreen.TaskCompletedStatuses {
-		resp, err := s.a.finishTask(s.ctx, s.tc, status, "")
+		detail := s.a.endTaskResponse(s.ctx, s.tc, status, "")
+		resp, err := s.a.finishTask(s.ctx, s.tc, detail)
 		s.Equal(&apimodels.EndTaskResponse{}, resp)
 		s.NoError(err)
 		s.NoError(s.tc.logger.Close())
@@ -327,7 +360,8 @@ func (s *AgentSuite) TestFinishTaskWithAbnormallyCompletedTask() {
 	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
 
 	const status = evergreen.TaskSystemFailed
-	resp, err := s.a.finishTask(s.ctx, s.tc, status, "")
+	detail := s.a.endTaskResponse(s.ctx, s.tc, status, "")
+	resp, err := s.a.finishTask(s.ctx, s.tc, detail)
 	s.Equal(&apimodels.EndTaskResponse{}, resp)
 	s.NoError(err)
 
@@ -346,7 +380,8 @@ func (s *AgentSuite) TestFinishTaskWithAbnormallyCompletedTask() {
 
 func (s *AgentSuite) TestFinishTaskEndTaskError() {
 	s.mockCommunicator.EndTaskShouldFail = true
-	resp, err := s.a.finishTask(s.ctx, s.tc, evergreen.TaskSucceeded, "")
+	detail := s.a.endTaskResponse(s.ctx, s.tc, evergreen.TaskSucceeded, "")
+	resp, err := s.a.finishTask(s.ctx, s.tc, detail)
 	s.Nil(resp)
 	s.Error(err)
 }
@@ -1513,6 +1548,96 @@ post:
 	s.Equal(pids, s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Pids)
 }
 
+func (s *AgentSuite) TestOOMTrackerRunsForSuccessStatusWithFailedDetailStatus() {
+	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
+	s.a.opts.CloudProvider = "provider"
+	s.tc.taskConfig.Project.OomTracker = true
+
+	pids := []int{1, 2, 3}
+	lines := []string{"line 1", "line 2", "line 3"}
+	s.tc.oomTracker = &mock.OOMTracker{
+		Lines: lines,
+		PIDs:  pids,
+	}
+	// Simulate the task status being overridden to failed via the HTTP endpoint
+	// while the originally computed status is still successful.
+	s.tc.setUserEndTaskResponse(&triggerEndTaskResp{Status: evergreen.TaskFailed})
+
+	detail := s.a.endTaskResponse(s.ctx, s.tc, evergreen.TaskSucceeded, "")
+	_, err := s.a.finishTask(s.ctx, s.tc, detail)
+	s.NoError(err)
+	s.Require().NotNil(s.mockCommunicator.EndTaskResult.Detail.OOMTracker)
+	s.True(s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Detected)
+	s.Equal(pids, s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Pids)
+}
+
+func (s *AgentSuite) TestOOMTrackerRunsForTimedOutTaskWithSucceededStatus() {
+	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
+	s.a.opts.CloudProvider = "provider"
+	s.tc.taskConfig.Project.OomTracker = true
+
+	pids := []int{1, 2, 3}
+	lines := []string{"line 1", "line 2", "line 3"}
+	s.tc.oomTracker = &mock.OOMTracker{
+		Lines: lines,
+		PIDs:  pids,
+	}
+	// Task timed out but the final status is still succeeded (e.g. a non-failing
+	// timeout phase). The OOM check must still run because a timeout can indicate
+	// an OOM kill even when the task is ultimately marked as succeeded.
+	s.tc.setTimedOut(true, globals.ExecTimeout)
+
+	detail := s.a.endTaskResponse(s.ctx, s.tc, evergreen.TaskSucceeded, "")
+	_, err := s.a.finishTask(s.ctx, s.tc, detail)
+	s.NoError(err)
+	s.Require().NotNil(s.mockCommunicator.EndTaskResult.Detail.OOMTracker)
+	s.True(s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Detected)
+	s.Equal(pids, s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Pids)
+}
+
+func (s *AgentSuite) TestOOMTrackerSkippedWhenUserOverridesToSucceeded() {
+	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
+	s.a.opts.CloudProvider = "provider"
+	s.tc.taskConfig.Project.OomTracker = true
+
+	pids := []int{1, 2, 3}
+	lines := []string{"line 1", "line 2", "line 3"}
+	s.tc.oomTracker = &mock.OOMTracker{
+		Lines: lines,
+		PIDs:  pids,
+	}
+	// Agent computed a failure, but the user HTTP endpoint explicitly overrode
+	// the status to succeeded. The OOM check should respect the final status and
+	// not run.
+	s.tc.setUserEndTaskResponse(&triggerEndTaskResp{Status: evergreen.TaskSucceeded})
+
+	detail := s.a.endTaskResponse(s.ctx, s.tc, evergreen.TaskFailed, "")
+	_, err := s.a.finishTask(s.ctx, s.tc, detail)
+	s.NoError(err)
+	s.Nil(s.mockCommunicator.EndTaskResult.Detail.OOMTracker)
+}
+
+func (s *AgentSuite) TestOOMTrackerRunsForFailedStatusWithNoUserOverride() {
+	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{}
+	s.a.opts.CloudProvider = "provider"
+	s.tc.taskConfig.Project.OomTracker = true
+
+	pids := []int{1, 2, 3}
+	lines := []string{"line 1", "line 2", "line 3"}
+	s.tc.oomTracker = &mock.OOMTracker{
+		Lines: lines,
+		PIDs:  pids,
+	}
+	// No user override: agent-computed failure should trigger the OOM check.
+	// This is the positive companion to TestOOMTrackerSkippedWhenUserOverridesToSucceeded.
+	detail := s.a.endTaskResponse(s.ctx, s.tc, evergreen.TaskFailed, "")
+	_, err := s.a.finishTask(s.ctx, s.tc, detail)
+	s.NoError(err)
+	s.Require().NotNil(s.mockCommunicator.EndTaskResult.Detail.OOMTracker)
+	s.True(s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Detected)
+	s.Equal(pids, s.mockCommunicator.EndTaskResult.Detail.OOMTracker.Pids)
+}
+
 func (s *AgentSuite) TestFinishPrevTaskWithoutTaskGroup() {
 	const buildID = "build_id"
 	const versionID = "not_a_task_group_version"
@@ -1769,7 +1894,7 @@ task_groups:
 	// Fake out the data so that the previous task already set up the task
 	// group, made the task group directory, and the next task is part of the
 	// same task group.
-	_, err := s.a.createTaskDirectory(s.tc, s.tc.taskConfig.WorkDir)
+	_, err := s.a.createTaskDirectory(context.Background(), s.tc, s.tc.taskConfig.WorkDir)
 	s.Require().NoError(err)
 	s.tc.ranSetupGroup = true
 	s.tc.taskConfig.Task.TaskGroup = taskGroup
@@ -3142,6 +3267,6 @@ func checkMockLogs(t *testing.T, mc *client.Mock, taskID string, logsToFind []st
 	}
 
 	if displayLogs {
-		grip.Infof("Logs for task '%s':\n%s\n", taskID, strings.Join(allLogs, "\n"))
+		grip.Infof(t.Context(), "Logs for task '%s':\n%s\n", taskID, strings.Join(allLogs, "\n"))
 	}
 }

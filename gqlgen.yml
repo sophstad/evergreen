@@ -19,6 +19,9 @@ directives:
 models:
   AdminSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAdminSettings
+    fields:
+      serviceFlagsList:
+        resolver: true
   AdminSettingsInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAdminSettings
   AmboyConfig:
@@ -64,6 +67,10 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAuthConfig
   AuthConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAuthConfig
+  OktaServiceConfig:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIOktaServiceConfig
+  OktaServiceConfigInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIOktaServiceConfig
   PreferredAuthType:
     model: github.com/99designs/gqlgen/graphql.String
     enum_values:
@@ -89,10 +96,6 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAWSConfig
   AWSConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAWSConfig
-  AWSPodConfig:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIAWSPodConfig
-  AWSPodConfigInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIAWSPodConfig
   AWSVPCConfig:
     model: github.com/evergreen-ci/evergreen/rest/model.APIAWSVPCConfig
   AWSVPCConfigInput:
@@ -100,7 +103,7 @@ models:
   BannerTheme:
     model: github.com/evergreen-ci/evergreen.BannerTheme
   BetaFeatures:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIBetaFeatures
+    model: github.com/evergreen-ci/evergreen.BetaFeatures
   BetaFeaturesInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIBetaFeatures
   BooleanMap:
@@ -171,10 +174,6 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APIContainerPoolsConfig
   ContainerPoolsConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIContainerPoolsConfig
-  ContainerResources:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIContainerResources
-  ContainerResourcesInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIContainerResources
   CopyDistroInput:
     model: github.com/evergreen-ci/evergreen/rest/model.CopyDistroOpts
   CopyProjectInput:
@@ -183,12 +182,24 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APICostConfig
   CostConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APICostConfig
+  EBSCostConfig:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIEBSCostConfig
+  EBSCostConfigInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIEBSCostConfig
   CostData:
     model: github.com/evergreen-ci/evergreen/rest/model.APICostData
   CostDataInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APICostData
   CreateProjectInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIProjectRef
+  DebugSpawnHostsConfig:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIDebugSpawnHostsConfig
+  DebugSpawnHostsConfigInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIDebugSpawnHostsConfig
+  DiagnosticsConfig:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIDiagnosticsConfig
+  DiagnosticsConfigInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIDiagnosticsConfig
   DispatcherSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APIDispatcherSettings
   DispatcherSettingsInput:
@@ -214,41 +225,6 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APIEC2Key
   EC2KeyInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIEC2Key
-  ECSConfig:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSConfig
-  ECSConfigInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSConfig
-  ECSCapacityProvider:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSCapacityProvider
-  ECSCapacityProviderInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSCapacityProvider
-  ECSClusterConfig:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSClusterConfig
-  ECSClusterConfigInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIECSClusterConfig
-  ECSArchitecture:
-    model: github.com/99designs/gqlgen/graphql.String
-    enum_values:
-      ECS_ARCH_AMD64:
-        value: github.com/evergreen-ci/evergreen.ECSArchAMD64
-      ECS_ARCH_ARM64:
-        value: github.com/evergreen-ci/evergreen.ECSArchARM64
-  ECSOperatingSystem:
-    model: github.com/99designs/gqlgen/graphql.String
-    enum_values:
-      ECSOSLinux:
-        value: github.com/evergreen-ci/evergreen.ECSOSLinux
-      ECSOSWindows:
-        value: github.com/evergreen-ci/evergreen.ECSOSWindows
-  ECSWindowsVersion:
-    model: github.com/99designs/gqlgen/graphql.String
-    enum_values:
-      ECS_WINDOWS_SERVER_2016:
-        value: github.com/evergreen-ci/evergreen.ECSWindowsServer2016
-      ECS_WINDOWS_SERVER_2019:
-        value: github.com/evergreen-ci/evergreen.ECSWindowsServer2019
-      ECS_WINDOWS_SERVER_2022:
-        value: github.com/evergreen-ci/evergreen.ECSWindowsServer2022
   EnvVar:
     model: github.com/evergreen-ci/evergreen/rest/model.APIEnvVar
   EnvVarInput:
@@ -272,6 +248,8 @@ models:
         value: github.com/evergreen-ci/evergreen.HostAllocatorNoFeedback
       DEFAULT:
         value: github.com/evergreen-ci/evergreen.HostAllocatorUseDefaultFeedback
+  AssociatedLink:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIAssociatedLink
   File:
     model: github.com/evergreen-ci/evergreen/rest/model.APIFile
   FileDiff:
@@ -493,10 +471,6 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APILoggerConfig
   LoggerConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APILoggerConfig
-  LogkeeperBuild:
-    model: github.com/evergreen-ci/plank.Build
-  LogkeeperTest:
-    model: github.com/evergreen-ci/plank.Test
   LogMessage:
     model: github.com/evergreen-ci/evergreen/apimodels.LogMessage
   MergeQueue:
@@ -567,21 +541,25 @@ models:
   ParserProjectS3ConfigInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIParserProjectS3Config
   ParsleyFilter:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIParsleyFilter
+    model: github.com/evergreen-ci/evergreen/model/parsley.Filter
   ParsleyFilterInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIParsleyFilter
-  ParsleySettings:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIParsleySettings
-  ParsleySettingsInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIParsleySettings
   Patch:
     model: github.com/evergreen-ci/evergreen/rest/model.APIPatch
     fields:
-      projectIdentifier:
+      cost:
+        resolver: true
+      predictedCost:
         resolver: true
       includedLocalModules:
         resolver: true
       parameters:
+        resolver: true
+  Patches:
+    fields:
+      filteredPatchCount:
+        resolver: true
+      patches:
         resolver: true
   IncludedLocalModule:
     model: github.com/evergreen-ci/evergreen/rest/model.APILocalModuleInclude
@@ -620,16 +598,6 @@ models:
     enum_values:
       TUNABLE:
         value: github.com/evergreen-ci/evergreen.PlannerVersionTunable
-  Pod:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIPod
-  PodEventLogEntry:
-    model: github.com/evergreen-ci/evergreen/rest/model.PodAPIEventLogEntry
-  PodEventLogData:
-    model: github.com/evergreen-ci/evergreen/rest/model.PodAPIEventData
-  PodLifecycleConfig:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIPodLifecycleConfig
-  PodLifecycleConfigInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIPodLifecycleConfig
   PreconditionScript:
     model: github.com/evergreen-ci/evergreen/rest/model.APIPreconditionScript
   PreconditionScriptInput:
@@ -680,6 +648,8 @@ models:
     model: github.com/evergreen-ci/evergreen/model.ProjectHealthView
   ProjectInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIProjectRef
+  ProjectLite:
+    model: github.com/evergreen-ci/evergreen/model.ProjectRef
   ProjectSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APIProjectSettings
     fields:
@@ -715,12 +685,14 @@ models:
         value: github.com/evergreen-ci/evergreen.ProviderNameDocker
       EC2_FLEET:
         value: github.com/evergreen-ci/evergreen.ProviderNameEc2Fleet
-      EC2_ON_DEMAND:
-        value: github.com/evergreen-ci/evergreen.ProviderNameEc2OnDemand
       STATIC:
         value: github.com/evergreen-ci/evergreen.ProviderNameStatic
   PublicKey:
     model: github.com/evergreen-ci/evergreen/rest/model.APIPubKey
+  RateLimitConfig:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIRateLimitConfig
+  RateLimitConfigInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIRateLimitConfig
   ReleaseModeConfig:
     model: github.com/evergreen-ci/evergreen/rest/model.APIReleaseModeConfig
   ReleaseModeConfigInput:
@@ -812,18 +784,10 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APISESConfig
   SearchReturnInfo:
     model: github.com/evergreen-ci/evergreen/thirdparty.SearchReturnInfo
-  SecretsManagerConfig:
-    model: github.com/evergreen-ci/evergreen/rest/model.APISecretsManagerConfig
-  SecretsManagerConfigInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APISecretsManagerConfig
   Selector:
     model: github.com/evergreen-ci/evergreen/rest/model.APISelector
   SelectorInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APISelector
-  ServiceFlags:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIServiceFlags
-  ServiceFlagsInput:
-    model: github.com/evergreen-ci/evergreen/rest/model.APIServiceFlags
   SingleTaskDistroConfig:
     model: github.com/evergreen-ci/evergreen/rest/model.APISingleTaskDistroConfig
   SingleTaskDistroConfigInput:
@@ -908,11 +872,13 @@ models:
         resolver: true
       estimatedStart:
         resolver: true
+      taskCost:
+        resolver: true
+      executionSteps:
+        resolver: true
       executionTasksFull:
         resolver: true
       patchMetadata:
-        resolver: true
-      projectIdentifier:
         resolver: true
       reliesOn:
         resolver: true
@@ -922,14 +888,21 @@ models:
         resolver: true
       project:
         resolver: true
+      version:
+        resolver: true
   TaskAnnotationSettings:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskAnnotationSettings
+  TaskExecutionStep:
+    model: github.com/evergreen-ci/evergreen/model.TaskExecutionStep
   TaskAnnotationSettingsInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskAnnotationSettings
   TaskContainerCreationOpts:
     model: github.com/evergreen-ci/evergreen/rest/model.APIPodTaskContainerCreationOptions
   Cost:
     model: github.com/evergreen-ci/evergreen/model/cost.Cost
+    fields:
+      total:
+        resolver: true
   TaskEndDetail:
     model: github.com/evergreen-ci/evergreen/rest/model.ApiTaskEndDetail
   TaskEventLogData:
@@ -960,16 +933,24 @@ models:
         resolver: true
   TaskLogLinks:
     model: github.com/evergreen-ci/evergreen/rest/model.LogLinks
+  TaskHostOverrides:
+    model: github.com/evergreen-ci/evergreen/rest/model.APITaskHostOverrides
+  TaskHostOverridesInput:
+    model: github.com/evergreen-ci/evergreen/rest/model.APITaskHostOverrides
   TaskSpecifier:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskSpecifier
   TaskSpecifierInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskSpecifier
   TaskStats:
     model: github.com/evergreen-ci/evergreen/model/task.TaskStats
+  TaskQuarantineEntry:
+    model: github.com/evergreen-ci/evergreen/rest/model.APITaskQuarantineEntry
   TaskQueueItem:
     model: github.com/evergreen-ci/evergreen/rest/model.APITaskQueueItem
   TestLog:
     model: github.com/evergreen-ci/evergreen/rest/model.TestLogs
+  TestQuarantineEntry:
+    model: github.com/evergreen-ci/evergreen/rest/model.APITestQuarantineEntry
   TestResult:
     model: github.com/evergreen-ci/evergreen/rest/model.APITest
   TestSelectionSettings:
@@ -1005,6 +986,11 @@ models:
         resolver: true
       subscriptions:
         resolver: true
+  UserLite:
+    model: github.com/evergreen-ci/evergreen/model/user.DBUser
+    fields:
+      displayName:
+        fieldName: "DispName"
   UserServiceFlags:
     model: github.com/evergreen-ci/evergreen/rest/model.APIServiceFlags
   UserSettings:
@@ -1015,6 +1001,8 @@ models:
     model: github.com/evergreen-ci/evergreen/rest/model.APIUseSpruceOptions
   UseSpruceOptionsInput:
     model: github.com/evergreen-ci/evergreen/rest/model.APIUseSpruceOptions
+  VariantQuarantineStatus:
+    model: github.com/evergreen-ci/evergreen/rest/model.APIVariantQuarantineStatus
   VariantTask:
     model: github.com/evergreen-ci/evergreen/rest/model.VariantTask
   VariantTaskInput:
@@ -1022,6 +1010,15 @@ models:
   Version:
     model: github.com/evergreen-ci/evergreen/rest/model.APIVersion
     fields:
+      cost:
+        resolver: true
+      status:
+        resolver: true
+  VersionLite:
+    model: github.com/evergreen-ci/evergreen/model.Version
+    fields:
+      order:
+        fieldName: "RevisionOrderNumber"
       status:
         resolver: true
   VersionToRestart:

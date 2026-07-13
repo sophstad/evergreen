@@ -37,6 +37,14 @@ input SortOrder {
   Key: TaskSortCategory!
 }
 
+input RefreshGitHubStatusesInput {
+  versionId: String! @requireProjectAccess(permission: TASKS, access: EDIT)
+}
+
+type RefreshGitHubStatusesPayload {
+  success: Boolean!
+}
+
 ###### TYPES ######
 """
 Version models a commit within a project.
@@ -46,13 +54,14 @@ type Version {
   activated: Boolean
   author: String!
   authorEmail: String!
-  baseTaskStatuses: [String!]!
   baseVersion: Version
   branch: String!
   buildVariants(options: BuildVariantOptions!): [GroupedBuildVariant!]
   buildVariantStats(options: BuildVariantOptions!): [GroupedTaskStatusCount!]
   childVersions: [Version!]
+  cost: Cost
   createTime: Time!
+  ingestTime: Time
   errors: [String!]!
   externalLinksForMetadata: [ExternalLinkForMetadata!]!
   finishTime: Time
@@ -65,9 +74,8 @@ type Version {
   order: Int!
   parameters: [Parameter!]!
   patch: Patch
+  predictedCost: Cost
   previousVersion: Version
-  project: String!
-  projectIdentifier: String!
   projectMetadata: Project
   repo: String!
   requester: String!
@@ -79,11 +87,11 @@ type Version {
   taskStatuses: [String!]!
   taskStatusStats(options: BuildVariantOptions!): TaskStats
   upstreamProject: UpstreamProject
-  user: User!
+  user: User! @deprecated(reason: "Use userLite instead.")
+  userLite: UserLite!
   versionTiming: VersionTiming
   warnings: [String!]!
   waterfallBuilds: [WaterfallBuild!]
-  predictedCost: Cost
 }
 
 type VersionTasks {
@@ -148,4 +156,33 @@ type ExternalLinkForMetadata {
 type GitTag {
   tag: String!
   pusher: String!
+}
+
+"""
+VersionLite replaces Version by sidestepping the APIVersion layer. It does not contain all Version fields at this time.
+"""
+type VersionLite {
+  id: String!
+  activated: Boolean
+  baseVersion: VersionLite
+  branch: String!
+  childVersions: [VersionLite!]
+  cost: Cost
+  createTime: Time!
+  ingestTime: Time
+  errors: [String!]!
+  finishTime: Time
+  ignored: Boolean!
+  isPatch: Boolean!
+  message: String!
+  order: Int!
+  project: ProjectLite
+  repo: String!
+  requester: String!
+  revision: String!
+  startTime: Time
+  status: String!
+  taskStatusStats: TaskStats
+  user: UserLite!
+  warnings: [String!]!
 }

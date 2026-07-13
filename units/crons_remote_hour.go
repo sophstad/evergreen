@@ -46,14 +46,16 @@ func (j *cronsRemoteHourJob) Run(ctx context.Context) {
 	}
 
 	ops := []amboy.QueueOperation{
+		PopulateRetryFailedLogMoveJobsForOldTasks(j.env),
+		PopulateRetryFailedLogMoveJobs(j.env),
 		PopulateCacheHistoricalTaskDataJob(2),
+		PopulateTaskHostExpirationExtendJob(),
 		PopulateSpawnhostExpirationCheckJob(),
 		PopulateCloudCleanupJob(j.env),
 		PopulateVolumeExpirationCheckJob(),
 		PopulateVolumeExpirationJob(),
 		PopulateUnstickVolumesJob(),
 		PopulateDuplicateTaskCheckJobs(),
-		PopulatePodResourceCleanupJobs(),
 		PopulateUnexpirableSpawnHostStatsJob(),
 		PopulateDistroAutoTuneJobs(),
 	}
@@ -70,7 +72,7 @@ func (j *cronsRemoteHourJob) Run(ctx context.Context) {
 
 	j.ErrorCount = catcher.Len()
 
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"queue": "service",
 		"id":    j.ID(),
 		"type":  j.Type().Name,

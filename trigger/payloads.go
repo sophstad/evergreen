@@ -450,10 +450,11 @@ func makeCommonPayload(sub *event.Subscription, eventAttributes event.Attributes
 
 func getFailedTestsFromTemplate(t task.Task) ([]testresult.TestResult, error) {
 	results := []testresult.TestResult{}
+	settings := evergreen.GetEnvironment().Settings()
 	for i := range t.LocalTestResults {
 		if t.LocalTestResults[i].Status == evergreen.TestFailedStatus {
 			testResult := t.LocalTestResults[i]
-			testResult.LogURL = testResult.GetLogURL(evergreen.GetEnvironment(), evergreen.LogViewerHTML)
+			testResult.LogURL = testResult.GetLogURL(settings.Api.URL, settings.Ui.ParsleyUrl, evergreen.LogViewerHTML)
 			results = append(results, testResult)
 		}
 	}
@@ -486,8 +487,4 @@ func versionLink(i versionLinkInput) string {
 
 func hostLink(uiBase, hostID string) string {
 	return fmt.Sprintf("%s/host/%s", uiBase, hostID)
-}
-
-func podLink(uiBase, podID string) string {
-	return fmt.Sprintf("%s/pod/%s", uiBase, podID)
 }

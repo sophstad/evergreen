@@ -55,6 +55,8 @@ should be part of a Guild, as this is refreshed every day and better
 supports employees moving teams. Guilds can also dynamically add users
 who match certain characteristics.
 
+To verify what permissions have been granted to a specific user, use the [permission-details API endpoint](../API/REST-V2-Usage#tag/users/paths/~1users~1{user_id}~1permission-details/get).
+
 ## Project Settings
 
 The Project Settings file displays information about the Project itself,
@@ -82,7 +84,7 @@ Evergreen.
 
 Admins can also set the branch project to inherit values from a
 repo-level project settings configuration. This can be learned about at
-['Using Repo Level Settings'](Repo-Level-Settings).
+[Using Repo Level Settings](../Project-Configuration/Repo-Level-Settings).
 
 #### Spawn Host Script Path
 
@@ -128,6 +130,19 @@ while still allowing for other kinds of versions (periodic builds, patches, etc)
 
 Additionally, admins can **Force Repotracker Run** to check for new commits if needed
 (Evergreen occasionally misses commits due to misconfiguration or GitHub outages).
+(Users for the project can also trigger the repotracker via an undocumented rest route.)
+
+The repotracker does not guarantee every commit runs their corresponding version, please see [run every mainline commit](#run-every-mainline-commit) for more details.
+
+**Important: Do not rewrite commit history on tracked branches.** The repotracker polls
+the GitHub API for commits on the tracked branch and processes all commits between the
+branch HEAD and the last commit it has seen. If the commit history on a tracked branch is
+modified — for example, by force-pushing rebased commits, or by merging another branch
+while preserving its commit history — the repotracker will treat any previously unseen
+commits as new and create versions for them. This can result in unexpected versions being
+created and activated for commits that were not originally part of the tracked branch. To avoid
+this, use squash merges or other strategies that do not rewrite the commit history
+of the tracked branch.
 
 ### Access and Admin Settings
 
@@ -151,11 +166,15 @@ file via an expansion.
 Options:
 
 - Checking **private** makes the variable redacted so the value won't be
-  visible on the projects page or by API routes. Additionally, private
-  variables will be redacted from task logs. After saving them, private
-  variables cannot be retrieved.
-- Checking **admin only** ensures that the variable can only be used
-  by admins and mainline commits.
+  visible on the projects page or by API routes. Note that private
+  variables may still be accessible on [debug spawn hosts](../Hosts/Debug-Spawn-Hosts.md) by users,
+  since these hosts run tasks on behalf of the user, which requires fetching expansions as part of that
+  process. For values that must not be accessible even on debug hosts, use **admin only** instead, as these will be restricted even on debug spawn hosts.
+  Additionally, private variables will be redacted from task logs. After
+  saving them, private variables cannot be retrieved.
+- Checking **admin only** restricts the variable so it is only available
+  to tasks in mainline commits, periodic builds, or trigger versions, or
+  to tasks activated by a project admin.
 
 Project variables have some limitations:
 
@@ -168,6 +187,13 @@ Project variables have some limitations:
 - A project variable's value cannot exceed 8 KB in length. If you need to store
   a value longer than 8 KB, you can store it in multiple variables and
   concatenate them together in a script when your task runs.
+
+#### Admin Only
+
+Admin-only variables are injected into a task's environment only when the task
+belongs to a mainline commit, periodic build, or trigger version, or when the
+task was activated by a user with project admin permissions. Patches and PRs
+activated by non-admin users will not have access to these variables.
 
 ### Aliases
 
@@ -209,7 +235,7 @@ Aliases can also be defined locally as shown [here](../CLI#local-aliases).
 
 ### GitHub Pull Request Testing
 
-Definitions for this section exist under the "GitHub" tab.
+Definitions for this section exist under the GitHub "Pull Request Testing" tab.
 
 Enabling "Automated Testing" will have Evergreen automatically create a patch for
 each pull request opened in the repository as well as each subsequent
@@ -250,16 +276,28 @@ on your project's branch you want to accept as the merge base via the 'Oldest Al
 
 ### GitHub Commit Checks
 
-Definitions for this section exist under the "GitHub" tab.
+Definitions for this section exist under the GitHub "Commit Checks" tab.
 
 This supports GitHub checks on commits (i.e. to be visible at
 `https://github.com/<owner>/<repo>/commits`). Task/variant
 regexes/tags are required, and GitHub statuses will be sent with only
 the status of those tasks on the mainline commit version.
 
+### Run Every Mainline Commit
+
+Definitions for this section exist under the "General Settings" tab.
+
+Although a version gets created for every commit on a project with the repotracker, it does not necessarily activate each version. Evergreen runs a job periodically that activates the latest repotracker version. This is to avoid running unnecessary versions if there are a lot of commits in a short period of time. If you would like to activate every version created by the repotracker, you can enable "Run Every Mainline Commit". This will ensure that every version created by the repotracker gets activated and runs its tasks.
+
+#### Interaction with batchtime and cron
+
+"Run Every Mainline Commit" does not override batchtime and cron. Batchtime will still result in only the latest task or build variant being activated after the specified batchtime. Cron will still result in only the latest task or build variant being activated at the specified cron time.
+
+![run-every-mainline-commit-project-setting.png](../images/run-every-mainline-commit-project-setting.png)
+
 ### Triggering Versions With Git Tags
 
-Definitions for this section exist under the "GitHub" tab.
+Definitions for this section exist under the GitHub "Git Tags" tab.
 
 This allows for versions to be created automatically from pushed git tags,
 and these versions will have the following properties:
@@ -306,7 +344,7 @@ one of the above fields.
 
 If you'd like for Git Tag triggered versions to be associated with the pusher,
 ensure that they've set their GitHub username in
-[their Evergreen preferences](https://spruce.mongodb.com/preferences/profile).
+[their Evergreen preferences](https://spruce.corp.mongodb.com/preferences/profile).
 
 ##### Add aliases to determine what tasks will run
 
@@ -503,7 +541,13 @@ performance of tasks and tests.
 
 ### Project-Level Notifications
 
-Project admins can set up notifications for when some events happen within the project. Admins can set up events when:
+Project admins can subscribe to notifications for when some events happen within the project.
+
+Subscriptions defined at the repo level apply to all untracked branches and all branches that are attached to the repo.
+**These are merged with project-level subscriptions**, meaning users could receive duplicate notifications if both the repo and branch
+are subscribed to the same event.
+
+Admins can set up events when:
 
 - Any version/build/task finishes/fails - these can be filtered by build initiator (commit, patch, PR,
   periodic build).
@@ -697,7 +741,7 @@ patch_aliases:
 
 ### Merge Queue Aliases
 
-These apply to the [GitHub merge queue integration](../Merge-Queue).
+These apply to the [GitHub merge queue integration](../Project-Configuration/Merge-Queue).
 
 ```yaml
 commit_queue_aliases:
@@ -779,18 +823,36 @@ task_annotation_settings:
 
 ## Test Selection Settings
 
-Test selection is an experimental feature to help projects reduce testing that provides low signal. For example, if you
-submit a patch for your change but one of the tests fails due to a known issue that's not related to your change, then
-the test did not need to run because it's giving a false negative signal about your patch's mergeability. This can
-improve the signal of a project's tests, reduce time for versions to finish, and save on the cost of running low-signal
-tasks.
+Test selection is a feature to help projects reduce testing that provides low signal. For example, if you submit a patch
+for your change but one of the tests fails due to a known issue that's not related to your change, then the test did not
+need to run because it's giving a false negative signal about your patch's mergeability. This can improve the signal of
+a project's tests, reduce time for versions to finish, and save on the cost of running low-signal tasks.
 
 To allow any test selection features to be used in your project, first go to "Test Selection" -> "Project-Level Test
-Selection" and enable it. Doing this will allow any test selection features to be used. Patches in the project may use
-the [test selection command](Project-Commands#test_selectionget) (note: only supported in patches currently, non-patch
-versions will not have test selection features enabled).
+Selection" and enable it. Doing this is necessary to allow any test selection features to be used. Patch tasks in the
+project may use the [test selection command](Project-Commands#test_selectionget).
 
 To enable test selection by default for all patch tasks, go to "Test Selection" -> "Task-Level Test Selection" and
 enable it. Doing this will enable the usage of the [test selection command](Project-Commands#test_selectionget) in all
 patch tasks by default. This default can still be overridden by choosing specific variants/tasks in which to enable test
-selection from [the CLI](../CLI.md#test-selection).
+selection when submitting a manual patch from [the CLI](../CLI.md#test-selection).
+
+Test selection can appear enabled on mainline commit versions when these project and task settings are enabled. However,
+the [test selection command](Project-Commands#test_selectionget) only requests selected tests for patch tasks. On
+mainline commits and other non-patch versions, the command writes an empty test list, so no tests are excluded.
+
+## GitHub App Settings
+
+Project and repo settings include a GitHub App Settings tab where you can save a GitHub App ID and private key. These
+credentials allow Evergreen to act on behalf of your GitHub App for certain features.
+
+![github_app_creds.png](../images/github_app_creds.png)
+
+Configuring a GitHub App is required or recommended for the following:
+
+- **[GitHub check runs](Github-Integrations#github-check-runs)**: Required to define more than 10 check runs in a
+  project. The app must have `checks:write` permission.
+- **[Dynamic GitHub access tokens](Github-Integrations#dynamic-github-access-tokens)**: Required to use the
+  `github.generate_token` command to generate short-lived GitHub tokens.
+- **[Included files](Project-Configuration-Files#include)**: Recommended. Using a GitHub App for included file
+  retrieval reduces pressure on shared GitHub API rate limits.

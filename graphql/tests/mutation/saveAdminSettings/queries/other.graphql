@@ -75,12 +75,12 @@ mutation SaveAdminSettingsOther {
         collectorEndpoint: "https://collector.example.com"
         collectorInternalEndpoint: "https://internal-collector.example.com"
         collectorAPIKey: "test-api-key"
+        traceUrlTemplate: "https://tracing.example.com/trace?trace_id=%s"
       }
       projectCreation: {
         totalProjectLimit: 100
         repoProjectLimit: 50
         repoExceptions: [{ owner: "test-owner", repo: "test-repo" }]
-        jiraProject: "TEST"
       }
       githubCheckRun: { checkRunLimit: 10 }
       releaseMode: {
@@ -92,6 +92,9 @@ mutation SaveAdminSettingsOther {
         financeFormula: 0.01
         savingsPlanDiscount: 0.01
         onDemandDiscount: 0.01
+      }
+      debugSpawnHosts: {
+        setupScript: "echo setup"
       }
     }
   ) {
@@ -168,6 +171,7 @@ mutation SaveAdminSettingsOther {
       collectorEndpoint
       collectorInternalEndpoint
       collectorAPIKey
+      traceUrlTemplate
     }
     projectCreation {
       totalProjectLimit
@@ -176,7 +180,6 @@ mutation SaveAdminSettingsOther {
         owner
         repo
       }
-      jiraProject
     }
     githubCheckRun {
       checkRunLimit
@@ -190,6 +193,9 @@ mutation SaveAdminSettingsOther {
       financeFormula
       savingsPlanDiscount
       onDemandDiscount
+    }
+    debugSpawnHosts {
+      setupScript
     }
   }
 }

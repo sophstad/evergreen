@@ -2,8 +2,6 @@ package cloud
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +15,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/registry"
 	docker "github.com/docker/docker/client"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model/distro"
@@ -39,7 +36,6 @@ type DockerClient interface {
 	RemoveImage(context.Context, *host.Host, string) error
 	RemoveContainer(context.Context, *host.Host, string) error
 	StartContainer(context.Context, *host.Host, string) error
-	AttachToContainer(context.Context, *host.Host, string, host.DockerOptions) (*types.HijackedResponse, error)
 	ListImages(context.Context, *host.Host) ([]image.Summary, error)
 }
 
@@ -177,7 +173,7 @@ func (c *dockerClientImpl) EnsureImageDownloaded(ctx context.Context, h *host.Ho
 	start := time.Now()
 	dockerClient, err := c.generateClient(h)
 	if err != nil {
-		return "", errors.Wrap(err, "Failed to generate docker client")
+		return "", errors.Wrap(err, "generating docker client")
 	}
 
 	// Extract image name from url
@@ -186,7 +182,7 @@ func (c *dockerClientImpl) EnsureImageDownloaded(ctx context.Context, h *host.Ho
 
 	// Check if image already exists on host
 	_, _, err = dockerClient.ImageInspectWithRaw(ctx, imageName)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"operation":     "EnsureImageDownloaded",
 		"details":       "ImageInspectWithRaw",
 		"host_id":       h.Id,
@@ -198,38 +194,24 @@ func (c *dockerClientImpl) EnsureImageDownloaded(ctx context.Context, h *host.Ho
 	} else if strings.Contains(err.Error(), "No such image") {
 		if options.Method == distro.DockerImageBuildTypeImport {
 			err = c.importImage(ctx, h, imageName, options.Image)
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"operation":     "EnsureImageDownloaded",
 				"details":       "import image",
 				"options_image": options.Image,
 				"host_id":       h.Id,
 				"duration_secs": time.Since(start).Seconds(),
 			})
-			return imageName, errors.Wrap(err, "error importing image")
-		} else if options.Method == distro.DockerImageBuildTypePull {
-			image := options.Image
-			if options.RegistryName != "" {
-				image = fmt.Sprintf("%s/%s", options.RegistryName, imageName)
-			}
-			err = c.pullImage(ctx, h, image, options.RegistryUsername, options.RegistryPassword)
-			grip.Info(message.Fields{
-				"operation":     "EnsureImageDownloaded",
-				"details":       "pull image",
-				"options_image": options.Image,
-				"host_id":       h.Id,
-				"duration_secs": time.Since(start).Seconds(),
-			})
-			return imageName, errors.Wrap(err, "error pulling image")
+			return imageName, errors.Wrap(err, "importing image")
 		}
-		return imageName, errors.Errorf("unrecognized image build method: %s", options.Method)
+		return imageName, errors.Errorf("unrecognized image build method: '%s'", options.Method)
 	}
-	return "", errors.Wrapf(err, "Error inspecting image %s", imageName)
+	return "", errors.Wrapf(err, "inspecting image '%s'", imageName)
 }
 
 func (c *dockerClientImpl) importImage(ctx context.Context, h *host.Host, name, url string) error {
 	dockerClient, err := c.generateImportClient(h)
 	if err != nil {
-		return errors.Wrap(err, "Error changing http client timeout")
+		return errors.Wrap(err, "changing HTTP client timeout")
 	}
 
 	// Image does not exist, import from remote tarball
@@ -237,44 +219,13 @@ func (c *dockerClientImpl) importImage(ctx context.Context, h *host.Host, name, 
 	var resp io.ReadCloser
 	resp, err = dockerClient.ImageImport(ctx, source, name, image.ImportOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "Error importing image from %s", url)
+		return errors.Wrapf(err, "importing image from '%s'", url)
 	}
 
 	// Wait until ImageImport finishes
 	_, err = io.ReadAll(resp)
 	return errors.Wrap(err, "reading ImportImage response")
 
-}
-
-func (c *dockerClientImpl) pullImage(ctx context.Context, h *host.Host, url, username, password string) error {
-	dockerClient, err := c.generateImportClient(h)
-	if err != nil {
-		return errors.Wrap(err, "Error changing http client timeout")
-	}
-
-	var auth string
-	if username != "" {
-		authConfig := registry.AuthConfig{
-			Username: username,
-			Password: password,
-		}
-		var jsonBytes []byte
-		jsonBytes, err = json.Marshal(authConfig)
-		if err != nil {
-			return errors.Wrap(err, "error marshaling auth config")
-		}
-		auth = base64.URLEncoding.EncodeToString(jsonBytes)
-	}
-
-	resp, err := dockerClient.ImagePull(ctx, url, image.PullOptions{RegistryAuth: auth})
-	if err != nil {
-		return errors.Wrap(err, "error pulling image from registry")
-	}
-	_, err = io.ReadAll(resp)
-	if err != nil {
-		return errors.Wrap(err, "error reading image pull response")
-	}
-	return errors.Wrap(err, "Error changing http client timeout")
 }
 
 // BuildImageWithAgent takes a base image and builds a new image on the specified
@@ -287,7 +238,7 @@ func (c *dockerClientImpl) BuildImageWithAgent(ctx context.Context, s3URLPrefix 
 	if err != nil {
 		return "", errors.Wrap(err, "Failed to generate docker client")
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"operation": "BuildImageWithAgent",
 		"details":   "generateclient",
 		"duration":  time.Since(start),
@@ -328,24 +279,24 @@ func (c *dockerClientImpl) BuildImageWithAgent(ctx context.Context, s3URLPrefix 
 	// build the image
 	resp, err := dockerClient.ImageBuild(ctx, nil, options)
 	if err != nil {
-		return "", errors.Wrapf(err, "Error building Docker image from base image %s", baseImage)
+		return "", errors.Wrapf(err, "building Docker image from base image '%s'", baseImage)
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"operation": "BuildImageWithAgent",
 		"details":   "ImageBuild",
 		"duration":  time.Since(start),
 		"host_id":   h.Id,
 		"span":      time.Since(start).String(),
 	})
-	grip.Info(msg)
+	grip.Info(ctx, msg)
 
 	// wait for ImageBuild to complete -- success response otherwise returned
 	// before building from Dockerfile is over, and next ContainerCreate will fail
 	_, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return "", errors.Wrap(err, "Error reading ImageBuild response")
+		return "", errors.Wrap(err, "reading ImageBuild response")
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"operation": "BuildImageWithAgent",
 		"details":   "ReadAll",
 		"duration":  time.Since(start),
@@ -368,9 +319,7 @@ func (c *dockerClientImpl) CreateContainer(ctx context.Context, parentHost, cont
 		baseName := path.Base(containerHost.DockerOptions.Image)
 		provisionedImage = strings.TrimSuffix(baseName, filepath.Ext(baseName))
 	}
-	if !containerHost.DockerOptions.SkipImageBuild {
-		provisionedImage = fmt.Sprintf(provisionedImageTag, provisionedImage)
-	}
+	provisionedImage = fmt.Sprintf(provisionedImageTag, provisionedImage)
 
 	var agentCmdParts []string
 	if containerHost.DockerOptions.Command != "" {
@@ -379,7 +328,7 @@ func (c *dockerClientImpl) CreateContainer(ctx context.Context, parentHost, cont
 		// Generate the host secret for container if none exists.
 		if containerHost.Secret == "" {
 			if err = containerHost.CreateSecret(ctx, false); err != nil {
-				return errors.Wrapf(err, "creating secret for %s", containerHost.Id)
+				return errors.Wrapf(err, "creating secret for '%s'", containerHost.Id)
 			}
 		}
 		// Build path to Evergreen executable.
@@ -400,21 +349,13 @@ func (c *dockerClientImpl) CreateContainer(ctx context.Context, parentHost, cont
 		Env:   containerHost.DockerOptions.EnvironmentVars,
 	}
 	networkConf := &network.NetworkingConfig{}
-	hostConf := &container.HostConfig{
-		PublishAllPorts: containerHost.DockerOptions.PublishPorts,
-		ExtraHosts:      containerHost.DockerOptions.ExtraHosts,
-	}
-	if len(containerHost.DockerOptions.StdinData) != 0 {
-		containerConf.AttachStdin = true
-		containerConf.StdinOnce = true
-		containerConf.OpenStdin = true
-	}
+	hostConf := &container.HostConfig{}
 
-	grip.Info(makeDockerLogMessage("ContainerCreate", parentHost.Id, message.Fields{"image": containerConf.Image}))
+	grip.Info(ctx, makeDockerLogMessage("ContainerCreate", parentHost.Id, message.Fields{"image": containerConf.Image}))
 
 	// Build container
 	if _, err := dockerClient.ContainerCreate(ctx, containerConf, hostConf, networkConf, nil, containerHost.Id); err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":   "Docker create API call failed",
 			"container": containerHost.Id,
 			"parent":    parentHost.Id,
@@ -524,26 +465,6 @@ func (c *dockerClientImpl) StartContainer(ctx context.Context, h *host.Host, con
 	}
 
 	return nil
-}
-
-func (c *dockerClientImpl) AttachToContainer(ctx context.Context, h *host.Host, containerID string, opts host.DockerOptions) (*types.HijackedResponse, error) {
-	if len(opts.StdinData) == 0 {
-		return nil, nil
-	}
-	dockerClient, err := c.generateClient(h)
-	if err != nil {
-		return nil, errors.Wrap(err, "generating Docker client")
-	}
-
-	stream, err := dockerClient.ContainerAttach(ctx, containerID, container.AttachOptions{
-		Stream: true,
-		Stdin:  true,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "attaching stdin to container")
-	}
-
-	return &stream, nil
 }
 
 func makeDockerLogMessage(name, parent string, data any) message.Fields {

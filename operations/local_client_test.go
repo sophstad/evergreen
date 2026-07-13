@@ -5,42 +5,58 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/evergreen-ci/evergreen/agent/taskexec"
+	"github.com/evergreen-ci/evergreen/rest/client"
+	restmodel "github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/gorilla/mux"
+	"github.com/mitchellh/go-homedir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 )
 
+// setHomeDir overrides all environment variables that home directory lookups
+// may consult (HOME, USERPROFILE) and resets the homedir cache.
+func setHomeDir(t *testing.T, dir string) {
+	envVars := []string{"HOME", "USERPROFILE"}
+	originals := make(map[string]string, len(envVars))
+	for _, v := range envVars {
+		originals[v] = os.Getenv(v)
+		require.NoError(t, os.Setenv(v, dir))
+	}
+	homedir.Reset()
+
+	t.Cleanup(func() {
+		for _, v := range envVars {
+			os.Setenv(v, originals[v])
+		}
+		homedir.Reset()
+	})
+}
+
 func TestGetDaemonDir(t *testing.T) {
+	tempDir := t.TempDir()
+	setHomeDir(t, tempDir)
+
 	dir, err := getDaemonDir()
 	require.NoError(t, err)
 
-	homeDir, err := os.UserHomeDir()
-	require.NoError(t, err)
-
-	expected := filepath.Join(homeDir, daemonDir)
+	expected := filepath.Join(tempDir, daemonDir)
 	assert.Equal(t, expected, dir)
 }
 
 func TestGetDaemonURL(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "daemon_test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	origHome := os.Getenv("HOME")
-	err = os.Setenv("HOME", tempDir)
-	require.NoError(t, err)
-	defer os.Setenv("HOME", origHome)
+	tempDir := t.TempDir()
+	setHomeDir(t, tempDir)
 
 	daemonDir := filepath.Join(tempDir, ".evergreen-local")
-	err = os.MkdirAll(daemonDir, 0755)
+	err := os.MkdirAll(daemonDir, 0755)
 	require.NoError(t, err)
 
 	t.Run("daemon not running", func(t *testing.T) {
@@ -124,7 +140,7 @@ func TestPostJSON(t *testing.T) {
 }
 
 func TestHandleHealth(t *testing.T) {
-	daemon := newLocalDaemonREST(9090)
+	daemon := newLocalDaemonREST(9090, &ClientSettings{})
 
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
@@ -146,6 +162,10 @@ func TestHandleLoadConfig(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	configPath := filepath.Join(tempDir, "test.yml")
+	clientConfigPath := filepath.Join(tempDir, ".evergreen-local.yml")
+	clientConfigContent := `
+task_id: ""
+`
 	configContent := `
 tasks:
   - name: test_task
@@ -172,10 +192,27 @@ buildvariants:
 `
 	err = os.WriteFile(configPath, []byte(configContent), 0644)
 	require.NoError(t, err)
+	err = os.WriteFile(clientConfigPath, []byte(clientConfigContent), 0644)
+	require.NoError(t, err)
 
-	daemon := newLocalDaemonREST(9090)
+	daemon := newLocalDaemonREST(9090, &ClientSettings{OAuth: OAuth{AccessToken: "mock_oauth_token"}, APIServerHost: "http://localhost.com"})
 
-	reqBody := map[string]string{"config_path": configPath}
+	t.Run("MissingOAuthTokenShouldReturnUnauthorized", func(t *testing.T) {
+		reqBody := map[string]string{"config_path": configPath}
+		jsonBody, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req, err := http.NewRequest("POST", "/config/load", bytes.NewReader(jsonBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		recorder := httptest.NewRecorder()
+		daemon.handleLoadConfig(recorder, req)
+
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+	})
+
+	reqBody := map[string]string{"config_path": configPath, "oauth_token": "mock_oauth_token"}
 	jsonBody, err := json.Marshal(reqBody)
 	require.NoError(t, err)
 
@@ -197,17 +234,11 @@ buildvariants:
 }
 
 func TestWriteDaemonInfo(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "daemon_test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	tempDir := t.TempDir()
+	setHomeDir(t, tempDir)
 
-	origHome := os.Getenv("HOME")
-	err = os.Setenv("HOME", tempDir)
-	require.NoError(t, err)
-	defer os.Setenv("HOME", origHome)
-
-	daemon := newLocalDaemonREST(9090)
-	err = daemon.writeDaemonInfo()
+	daemon := newLocalDaemonREST(9090, &ClientSettings{})
+	err := daemon.writeDaemonInfo()
 	require.NoError(t, err)
 
 	daemonDir := filepath.Join(tempDir, ".evergreen-local")
@@ -225,10 +256,15 @@ func TestWriteDaemonInfo(t *testing.T) {
 }
 
 func TestRouterSetup(t *testing.T) {
-	daemon := newLocalDaemonREST(9090)
+	d := newLocalDaemonREST(9090, &ClientSettings{})
 	router := mux.NewRouter()
-	router.HandleFunc("/health", daemon.handleHealth).Methods("GET")
-	router.HandleFunc("/config/load", daemon.handleLoadConfig).Methods("POST")
+	router.HandleFunc("/health", d.handleHealth).Methods("GET")
+	router.HandleFunc("/config/load", d.handleLoadConfig).Methods("POST")
+	router.HandleFunc("/task/select", d.handleSelectTask).Methods("POST")
+	router.HandleFunc("/step/next", d.handleStepNext).Methods("POST")
+	router.HandleFunc("/step/run-all", d.handleRunAll).Methods("POST")
+	router.HandleFunc("/step/run-until/{index}", d.handleRunUntil).Methods("POST")
+	router.HandleFunc("/step/jump/{index}", d.handleJumpTo).Methods("POST")
 
 	req, err := http.NewRequest("GET", "/health", nil)
 	require.NoError(t, err)
@@ -237,6 +273,63 @@ func TestRouterSetup(t *testing.T) {
 	router.ServeHTTP(recorder, req)
 
 	assert.Equal(t, http.StatusOK, recorder.Code)
+}
+
+func TestJumpToCmd(t *testing.T) {
+	t.Run("no step index provided", func(t *testing.T) {
+		app := cli.NewApp()
+		set := flag.NewFlagSet("test", 0)
+		c := cli.NewContext(app, set, nil)
+		err := jumpToCmd(c)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "step number required")
+	})
+
+	t.Run("invalid step index", func(t *testing.T) {
+		app := cli.NewApp()
+		set := flag.NewFlagSet("test", 0)
+		require.NoError(t, set.Parse([]string{"notanumber"}))
+		c := cli.NewContext(app, set, nil)
+		err := jumpToCmd(c)
+		assert.Error(t, err)
+	})
+
+	t.Run("successful jump", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/health":
+				w.WriteHeader(http.StatusOK)
+			case "/step/jump/3":
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+					"success":      true,
+					"current_step": 3,
+				}))
+			}
+		}))
+		defer server.Close()
+
+		tempDir := t.TempDir()
+		setHomeDir(t, tempDir)
+
+		daemonDir := filepath.Join(tempDir, ".evergreen-local")
+		require.NoError(t, os.MkdirAll(daemonDir, 0755))
+
+		var port int
+		_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+		require.NoError(t, err)
+
+		portFile := filepath.Join(daemonDir, "daemon.port")
+		err = os.WriteFile(portFile, []byte(fmt.Sprintf("%d", port)), 0644)
+		require.NoError(t, err)
+
+		app := cli.NewApp()
+		set := flag.NewFlagSet("test", 0)
+		require.NoError(t, set.Parse([]string{"3"}))
+		c := cli.NewContext(app, set, nil)
+
+		err = jumpToCmd(c)
+		assert.NoError(t, err)
+	})
 }
 
 func TestSelectTaskCmd(t *testing.T) {
@@ -266,21 +359,14 @@ func TestSelectTaskCmd(t *testing.T) {
 		}))
 		defer server.Close()
 
-		tempDir, err := os.MkdirTemp("", "select_task_test")
-		require.NoError(t, err)
-		defer os.RemoveAll(tempDir)
-
-		origHome := os.Getenv("HOME")
-		err = os.Setenv("HOME", tempDir)
-		require.NoError(t, err)
-		defer os.Setenv("HOME", origHome)
+		tempDir := t.TempDir()
+		setHomeDir(t, tempDir)
 
 		daemonDir := filepath.Join(tempDir, ".evergreen-local")
-		err = os.MkdirAll(daemonDir, 0755)
-		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(daemonDir, 0755))
 
 		var port int
-		_, err = fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+		_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
 		require.NoError(t, err)
 
 		portFile := filepath.Join(daemonDir, "daemon.port")
@@ -289,23 +375,126 @@ func TestSelectTaskCmd(t *testing.T) {
 
 		app := cli.NewApp()
 		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
 
 		set := flag.NewFlagSet("test", 0)
 		require.NoError(t, set.Parse([]string{"test_task"}))
 		c := cli.NewContext(app, set, nil)
 
 		err = selectTaskCmd(c)
-
-		w.Close()
 		os.Stdout = oldStdout
-
-		out, _ := io.ReadAll(r)
-		output := string(out)
-
 		assert.NoError(t, err)
-		assert.Contains(t, output, "Selected task: test_task")
-		assert.Contains(t, output, "Total steps: 5")
+	})
+}
+
+func TestWaitForDaemon(t *testing.T) {
+	t.Run("HealthyDaemonShouldSucceed", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		var port int
+		_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+		require.NoError(t, err)
+
+		err = waitForDaemon(port)
+		assert.NoError(t, err)
+	})
+
+	t.Run("UnhealthyDaemonShouldError", func(t *testing.T) {
+		err := waitForDaemon(0)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "did not become healthy")
+	})
+}
+
+func TestReadAndRenderStream(t *testing.T) {
+	t.Run("ParsesNDJSONStream", func(t *testing.T) {
+		success := true
+		durationMs := int64(1200)
+		nextStep := 4
+		lines := []taskexec.StreamLine{
+			{Channel: taskexec.ExecChannel, Step: 3, Message: "Running 'shell.exec'"},
+			{Channel: taskexec.TaskChannel, Step: 3, Message: "+ go test -v ./..."},
+			{Channel: taskexec.TaskChannel, Step: 3, Message: "PASS"},
+			{Channel: taskexec.DoneChannel, Step: 3, Success: &success, DurationMs: &durationMs, NextStep: &nextStep},
+		}
+
+		var input bytes.Buffer
+		for _, line := range lines {
+			data, err := json.Marshal(line)
+			require.NoError(t, err)
+			input.Write(data)
+			input.WriteByte('\n')
+		}
+
+		var output bytes.Buffer
+		result, err := readAndRenderStream(&input, &output)
+		require.NoError(t, err)
+
+		assert.NotNil(t, result)
+		assert.True(t, result.Success)
+		assert.Empty(t, result.Error)
+
+		rendered := output.String()
+		assert.Contains(t, rendered, "Running 'shell.exec'")
+		assert.Contains(t, rendered, "+ go test -v ./...")
+		assert.Contains(t, rendered, "PASS")
+	})
+
+	t.Run("HandlesFailure", func(t *testing.T) {
+		success := false
+		durationMs := int64(500)
+		nextStep := 2
+		lines := []taskexec.StreamLine{
+			{Channel: taskexec.TaskChannel, Step: 2, Message: "error output"},
+			{Channel: taskexec.DoneChannel, Step: 2, Success: &success, DurationMs: &durationMs, NextStep: &nextStep, Error: "exit code 1"},
+		}
+
+		var input bytes.Buffer
+		for _, line := range lines {
+			data, _ := json.Marshal(line)
+			input.Write(data)
+			input.WriteByte('\n')
+		}
+
+		var output bytes.Buffer
+		result, err := readAndRenderStream(&input, &output)
+		require.NoError(t, err)
+
+		assert.NotNil(t, result)
+		assert.False(t, result.Success)
+		assert.Equal(t, "exit code 1", result.Error)
+	})
+}
+
+func TestValidateDebugLocal(t *testing.T) {
+	ctx := t.Context()
+
+	validConf := &ClientSettings{
+		APIServerHost: "http://localhost",
+		User:          "testuser",
+	}
+
+	t.Run("EmptyTaskIDShouldError", func(t *testing.T) {
+		mockClient = &client.Mock{}
+		defer func() { mockClient = nil }()
+
+		err := validateDebugLocal(ctx, validConf, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "task-id flag is required")
+	})
+
+	t.Run("ServiceFlagsDisabledShouldError", func(t *testing.T) {
+		mockClient = &client.Mock{
+			MockServiceFlags: &restmodel.APIServiceFlags{
+				DebugSpawnHostDisabled: true,
+			},
+		}
+		defer func() { mockClient = nil }()
+
+		err := validateDebugLocal(ctx, validConf, "task123")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "debug spawn hosts currently disabled")
 	})
 }

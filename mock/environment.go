@@ -23,6 +23,7 @@ import (
 	"github.com/mongodb/grip/send"
 	"github.com/mongodb/jasper"
 	"github.com/pkg/errors"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -49,6 +50,7 @@ type Environment struct {
 	roleManager             gimlet.RoleManager
 	userManager             gimlet.UserManager
 	userManagerInfo         evergreen.UserManagerInfo
+	redisClient             *redis.Client
 	Clients                 evergreen.ClientConfig
 	shutdownSequenceStarted bool
 	versionID               string
@@ -187,7 +189,7 @@ func BootstrapCredentialsCollection(ctx context.Context, client *mongo.Client, d
 
 	depot, err := certdepot.BootstrapDepotWithMongoClient(ctx, client, bootstrapConfig)
 	if err != nil {
-		return nil, errors.Wrapf(err, "could not bootstrap %s collection", evergreen.CredentialsCollection)
+		return nil, errors.Wrapf(err, "could not bootstrap '%s' collection", evergreen.CredentialsCollection)
 	}
 	return depot, nil
 }
@@ -245,6 +247,15 @@ func (e *Environment) Client() *mongo.Client {
 	return e.MongoClient
 }
 
+// SecondaryReadClient returns the same client as Client() in the mock —
+// tests run against a single-node MongoDB, so there is no real secondary.
+// This satisfies the interface without requiring test-specific config.
+func (e *Environment) SecondaryReadClient() *mongo.Client {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.MongoClient
+}
+
 func (e *Environment) DB() *mongo.Database {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -275,6 +286,20 @@ func (e *Environment) CertificateDepot() certdepot.Depot {
 	defer e.mu.RUnlock()
 
 	return e.Depot
+}
+
+func (e *Environment) RedisClient() *redis.Client {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return e.redisClient
+}
+
+func (e *Environment) SetRedisClient(client *redis.Client) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.redisClient = client
 }
 
 func (e *Environment) SetParameterManager(pm *parameterstore.ParameterManager) {
@@ -344,7 +369,7 @@ func (e *Environment) Close(ctx context.Context) error {
 			continue
 		}
 
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":      "calling closer",
 			"closer":       name,
 			"timeout_secs": time.Since(deadline),

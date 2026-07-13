@@ -44,9 +44,10 @@ var (
 	IsClusterKey             = bsonutil.MustHaveTag(Distro{}, "IsCluster")
 	IceCreamSettingsKey      = bsonutil.MustHaveTag(Distro{}, "IceCreamSettings")
 	// ImageID is not equivalent to AMI. It is the identifier of the base image for the distro.
-	ImageIDKey          = bsonutil.MustHaveTag(Distro{}, "ImageID")
-	SingleTaskDistroKey = bsonutil.MustHaveTag(Distro{}, "SingleTaskDistro")
-	CostDataKey         = bsonutil.MustHaveTag(Distro{}, "CostData")
+	ImageIDKey           = bsonutil.MustHaveTag(Distro{}, "ImageID")
+	SingleTaskDistroKey  = bsonutil.MustHaveTag(Distro{}, "SingleTaskDistro")
+	CostDataKey          = bsonutil.MustHaveTag(Distro{}, "CostData")
+	TaskHostOverridesKey = bsonutil.MustHaveTag(Distro{}, "TaskHostOverrides")
 
 	// bson fields for the CostData struct
 	CostDataOnDemandRateKey    = bsonutil.MustHaveTag(CostData{}, "OnDemandRate")
@@ -103,6 +104,16 @@ func distroDB() *mongo.Database {
 // FindOneId returns one Distro by Id.
 func FindOneId(ctx context.Context, id string) (*Distro, error) {
 	return FindOne(ctx, ById(id))
+}
+
+// HasAnyByIdOrAlias returns whether at least one distro exists whose ID is in
+// ids or whose aliases contain any of ids.
+func HasAnyByIdOrAlias(ctx context.Context, ids []string) (bool, error) {
+	d, err := FindOne(ctx, byIdsOrAliases(ids), options.FindOne().SetProjection(bson.M{IdKey: 1}))
+	if err != nil {
+		return false, errors.Wrap(err, "finding distro by ID or alias")
+	}
+	return d != nil, nil
 }
 
 func FindOne(ctx context.Context, query bson.M, options ...*options.FindOneOptions) (*Distro, error) {
@@ -168,6 +179,17 @@ func ById(id string) bson.M {
 	return bson.M{IdKey: id}
 }
 
+// byIdsOrAliases returns a query that matches any distro whose ID is in ids or
+// whose aliases contain any of ids.
+func byIdsOrAliases(ids []string) bson.M {
+	return bson.M{
+		"$or": []bson.M{
+			{IdKey: bson.M{"$in": ids}},
+			{AliasesKey: bson.M{"$in": ids}},
+		},
+	}
+}
+
 // BySpawnAllowed returns a query that contains the SpawnAllowed selector.
 func BySpawnAllowed() bson.M {
 	return bson.M{SpawnAllowedKey: true}
@@ -207,6 +229,8 @@ func ByIds(ids []string) bson.M {
 	return bson.M{IdKey: bson.M{"$in": ids}}
 }
 
+// FindByIdWithDefaultSettings finds a distro by ID with only the provider
+// settings for the default EC2 region.
 func FindByIdWithDefaultSettings(ctx context.Context, id string) (*Distro, error) {
 	d, err := FindOneId(ctx, id)
 	if err != nil {
@@ -231,7 +255,7 @@ func FindByCanAutoTune(ctx context.Context) ([]Distro, error) {
 	autoTuneMaxHostsKey := bsonutil.GetDottedKeyName(HostAllocatorSettingsKey, hostAllocatorAutoTuneMaxHostsKey)
 	q := bson.M{
 		DisabledKey:         bson.M{"$ne": true},
-		ProviderKey:         bson.M{"$in": []string{evergreen.ProviderNameEc2Fleet, evergreen.ProviderNameEc2OnDemand}},
+		ProviderKey:         evergreen.ProviderNameEc2Fleet,
 		SingleTaskDistroKey: bson.M{"$ne": true},
 		autoTuneMaxHostsKey: true,
 	}

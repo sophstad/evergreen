@@ -224,6 +224,18 @@ func (m *mockManager) ModifyHost(ctx context.Context, host *host.Host, changes h
 		}
 	}
 
+	if changes.ExtendExpireOnByDay {
+		newExpireOn, err := host.NextExpireOnTagValue()
+		if err != nil {
+			return errors.Wrap(err, "computing new expire-on tag value")
+		}
+		if err = host.BumpExpireOnTag(ctx, newExpireOn); err != nil {
+			return errors.Wrap(err, "bumping expire-on tag in DB")
+		}
+		instance.Tags = host.InstanceTags
+		m.Instances[host.Id] = instance
+	}
+
 	return nil
 }
 
@@ -243,10 +255,6 @@ func (m *mockManager) getOrDefaultInstanceStatus(ctx context.Context, hostID str
 		return StatusNonExistent
 	}
 	return instance.Status
-}
-
-func (m *mockManager) SetPortMappings(context.Context, *host.Host, *host.Host) error {
-	return nil
 }
 
 // get instance DNS

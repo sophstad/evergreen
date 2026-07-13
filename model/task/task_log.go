@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model/log"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/mongodb/grip/send"
 	"github.com/pkg/errors"
 )
@@ -72,7 +74,11 @@ type TaskLogGetOptions struct {
 }
 
 // NewTaskLogSender returns a new task log sender for the given task run.
-func NewTaskLogSender(ctx context.Context, task Task, senderOpts EvergreenSenderOptions, logType TaskLogType) (send.Sender, error) {
+func NewTaskLogSender(ctx context.Context, task *Task, senderOpts EvergreenSenderOptions, logType TaskLogType) (send.Sender, error) {
+	if task == nil {
+		return nil, nil
+	}
+
 	output, ok := task.GetTaskOutputSafe()
 	if !ok {
 		// We know there task cannot have task output, likely because
@@ -89,15 +95,22 @@ func NewTaskLogSender(ctx context.Context, task Task, senderOpts EvergreenSender
 		return nil, errors.Wrap(err, "getting log service")
 	}
 
-	senderOpts.appendLines = func(ctx context.Context, lines []log.LogLine) error {
-		return svc.Append(ctx, getLogName(task, logType, output.TaskLogs.ID()), 0, lines)
+	logName := getLogName(*task, logType, output.TaskLogs.ID())
+	senderOpts.appendLines = func(ctx context.Context, lines []log.LogLine) (int64, int, error) {
+		return svc.Append(ctx, logName, 0, lines)
 	}
+	senderOpts.LogType = string(logType)
+	senderOpts.LogKey = logName
 
 	return newEvergreenSender(ctx, fmt.Sprintf("%s-%s", task.Id, logType), senderOpts)
 }
 
 // AppendTaskLogs appends log lines to the specified task log for the given task run.
-func AppendTaskLogs(ctx context.Context, task Task, logType TaskLogType, lines []log.LogLine) error {
+func AppendTaskLogs(ctx context.Context, task *Task, logType TaskLogType, lines []log.LogLine) error {
+	if task == nil {
+		return nil
+	}
+
 	output, ok := task.GetTaskOutputSafe()
 	if !ok {
 		// We know there task cannot have task output, likely because
@@ -114,7 +127,16 @@ func AppendTaskLogs(ctx context.Context, task Task, logType TaskLogType, lines [
 		return errors.Wrap(err, "getting log service")
 	}
 
-	return svc.Append(ctx, getLogName(task, logType, output.TaskLogs.ID()), 0, lines)
+	logName := getLogName(*task, logType, output.TaskLogs.ID())
+	uploadBytes, puts, err := svc.Append(ctx, logName, 0, lines)
+	if puts > 0 {
+		task.S3Usage.IncrementLogs(puts, uploadBytes, string(logType), logName)
+	}
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // getTaskLogs returns task logs belonging to the specified task run.
@@ -188,4 +210,105 @@ func getBucketConfigForProject(project string, originalBucketConfig evergreen.Bu
 		return env.Settings().Buckets.LogBucketLongRetention
 	}
 	return originalBucketConfig
+}
+
+// GetS3LogUsageFromS3 reconstructs log S3 usage for the crash path, when the agent never
+// reached teardown. PutRequests are approximated as 1 PUT per stored chunk; multipart
+// uploads that issued multiple PUTs against a single object are not counted. Best-effort.
+func (t *Task) GetS3LogUsageFromS3(ctx context.Context) (s3usage.LogMetrics, error) {
+	output, ok := t.GetTaskOutputSafe()
+	if !ok {
+		return s3usage.LogMetrics{}, nil
+	}
+
+	bucketConfig := getBucketConfigForProject(t.Project, output.TaskLogs.BucketConfig)
+	bucket, err := newBucket(ctx, bucketConfig, nil)
+	if err != nil {
+		return s3usage.LogMetrics{}, errors.Wrap(err, "creating log bucket")
+	}
+
+	id := output.TaskLogs.ID()
+	// The LCP of the agent, system, and task log type prefixes covers all three in a single ListObjectsV2 call.
+	prefix := fmt.Sprintf("%s/%s/%d/%s", t.Project, t.Id, t.Execution, id)
+	it, err := bucket.List(ctx, prefix)
+	if err != nil {
+		return s3usage.LogMetrics{}, errors.Wrap(err, "listing log chunks")
+	}
+
+	agentLogName := getLogName(*t, TaskLogTypeAgent, id)
+	systemLogName := getLogName(*t, TaskLogTypeSystem, id)
+	taskLogName := getLogName(*t, TaskLogTypeTask, id)
+
+	var usage s3usage.LogMetrics
+	for it.Next(ctx) {
+		item := it.Item()
+		size := item.Size()
+		usage.PutRequests++
+		usage.UploadBytes += size
+
+		name := item.Name()
+		switch {
+		case strings.HasPrefix(name, agentLogName+"/"):
+			usage.Agent.Bytes += size
+			usage.Agent.PutRequests++
+			if usage.Agent.LogKey == "" {
+				usage.Agent.LogKey = agentLogName
+			}
+		case strings.HasPrefix(name, systemLogName+"/"):
+			usage.System.Bytes += size
+			usage.System.PutRequests++
+			if usage.System.LogKey == "" {
+				usage.System.LogKey = systemLogName
+			}
+		case strings.HasPrefix(name, taskLogName+"/"):
+			usage.Task.Bytes += size
+			usage.Task.PutRequests++
+			if usage.Task.LogKey == "" {
+				usage.Task.LogKey = taskLogName
+			}
+		}
+	}
+	if err := it.Err(); err != nil {
+		return s3usage.LogMetrics{}, errors.Wrap(err, "iterating log chunks")
+	}
+
+	// Test logs may be in a different bucket than task/agent/system logs.
+	if output.TestLogs.BucketConfig.Name != "" {
+		testBucketConfig := getBucketConfigForProject(t.Project, output.TestLogs.BucketConfig)
+		testBucket, err := newBucket(ctx, testBucketConfig, nil)
+		if err != nil {
+			return usage, errors.Wrap(err, "creating test log bucket")
+		}
+		testPrefix := fmt.Sprintf("%s/%s/%d/%s", t.Project, t.Id, t.Execution, output.TestLogs.ID())
+		testIt, err := testBucket.List(ctx, testPrefix)
+		if err != nil {
+			return usage, errors.Wrap(err, "listing test log chunks")
+		}
+		for testIt.Next(ctx) {
+			item := testIt.Item()
+			size := item.Size()
+			usage.PutRequests++
+			usage.UploadBytes += size
+			usage.Test.Bytes += size
+			usage.Test.PutRequests++
+			if usage.Test.LogKey == "" {
+				usage.Test.LogKey = testPrefix
+			}
+		}
+		if err := testIt.Err(); err != nil {
+			return usage, errors.Wrap(err, "iterating test log chunks")
+		}
+	}
+
+	return usage, nil
+}
+
+// LogBucketName returns the S3 bucket name for this task's logs, applying the
+// long-retention redirect if the project is in the long-retention list.
+func (t *Task) LogBucketName() string {
+	output, ok := t.GetTaskOutputSafe()
+	if !ok {
+		return ""
+	}
+	return getBucketConfigForProject(t.Project, output.TaskLogs.BucketConfig).Name
 }

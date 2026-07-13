@@ -14,6 +14,8 @@ import (
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -55,6 +57,9 @@ type githubMergeIntent struct {
 	// HeadCommit is the commit message of the head of the merge group.
 	HeadCommit string `bson:"head_commit"`
 
+	// HeadCommitDate is the timestamp of the head commit.
+	HeadCommitDate time.Time `bson:"head_commit_date,omitempty"`
+
 	// BaseSHA is the SHA of the base of the merge group.
 	BaseSHA string `bson:"base_hash"`
 
@@ -65,8 +70,23 @@ type githubMergeIntent struct {
 	Repo string `bson:"repo"`
 }
 
+// extractBaseBranchFromHeadRef extracts the base branch from a merge queue head ref.
+// A well-formed headRef should follow the format: refs/heads/gh-readonly-queue/<base-branch>/pr-<number>-<sha>.
+func extractBaseBranchFromHeadRef(headRef string) string {
+	split := strings.Split(headRef, "/")
+	if len(split) < 5 {
+		return ""
+	}
+
+	baseBranchSlice := []string{}
+	for i := 3; i < len(split)-1; i++ {
+		baseBranchSlice = append(baseBranchSlice, split[i])
+	}
+	return strings.Join(baseBranchSlice, "/")
+}
+
 // NewGithubIntent creates an Intent from a google/go-github MergeGroup.
-func NewGithubMergeIntent(msgDeliveryID string, caller string, mg *github.MergeGroupEvent) (Intent, error) {
+func NewGithubMergeIntent(ctx context.Context, msgDeliveryID string, caller string, mg *github.MergeGroupEvent) (Intent, error) {
 	catcher := grip.NewBasicCatcher()
 	if msgDeliveryID == "" {
 		catcher.Add(errors.New("message ID cannot be empty"))
@@ -98,7 +118,22 @@ func NewGithubMergeIntent(msgDeliveryID string, caller string, mg *github.MergeG
 		return nil, catcher.Resolve()
 	}
 
-	grip.Info(message.Fields{
+	baseBranch := extractBaseBranchFromHeadRef(mg.GetMergeGroup().GetHeadRef())
+	githubHeadPRURL := thirdparty.BuildGithubHeadPRURL(mg.GetOrg().GetLogin(), mg.GetRepo().GetName(), mg.GetMergeGroup().GetHeadRef())
+
+	baseAttrs := BuildMergeQueueSpanAttributes(
+		mg.GetOrg().GetLogin(),
+		mg.GetRepo().GetName(),
+		baseBranch,
+		mg.GetMergeGroup().GetHeadSHA(),
+		githubHeadPRURL,
+	)
+	baseAttrs = append(baseAttrs, attribute.String(MergeQueueAttrMsgID, msgDeliveryID))
+	_, span := tracer.Start(ctx, MergeQueueIntentCreatedSpan,
+		trace.WithAttributes(baseAttrs...))
+	defer span.End()
+
+	grip.Info(ctx, message.Fields{
 		"message":    "creating new merge intent for GitHub merge queue",
 		"DocumentID": msgDeliveryID,
 		"MsgID":      msgDeliveryID,
@@ -111,7 +146,8 @@ func NewGithubMergeIntent(msgDeliveryID string, caller string, mg *github.MergeG
 		"BaseSHA":    mg.GetMergeGroup().GetBaseSHA(),
 		"CalledBy":   caller,
 	})
-	return &githubMergeIntent{
+
+	intent := &githubMergeIntent{
 		DocumentID: msgDeliveryID,
 		MsgID:      msgDeliveryID,
 		IntentType: GithubMergeIntentType,
@@ -122,7 +158,25 @@ func NewGithubMergeIntent(msgDeliveryID string, caller string, mg *github.MergeG
 		HeadCommit: mg.GetMergeGroup().GetHeadCommit().GetMessage(),
 		BaseSHA:    mg.GetMergeGroup().GetBaseSHA(),
 		CalledBy:   caller,
-	}, nil
+	}
+	if headCommit := mg.GetMergeGroup().GetHeadCommit(); headCommit != nil {
+		if author := headCommit.GetAuthor(); author != nil {
+			if date := author.GetDate(); !date.Time.IsZero() {
+				intent.HeadCommitDate = date.Time
+			} else {
+				commit, err := thirdparty.GetCommitEvent(ctx, mg.GetOrg().GetLogin(), mg.GetRepo().GetName(), mg.GetMergeGroup().GetHeadSHA())
+				grip.Warning(ctx, message.WrapError(err, message.Fields{
+					"message": "failed to fetch commit from GitHub API",
+					"msg_id":  msgDeliveryID,
+					"sha":     mg.GetMergeGroup().GetHeadSHA(),
+				}))
+				if commit != nil && commit.Commit != nil && commit.Commit.Author != nil && commit.Commit.Author.Date != nil {
+					intent.HeadCommitDate = commit.Commit.Author.Date.Time
+				}
+			}
+		}
+	}
+	return intent, nil
 }
 
 // SetProcessed should be called by an amboy queue after creating a patch from an intent.
@@ -195,16 +249,9 @@ func (g *githubMergeIntent) GetCalledBy() string {
 func (g *githubMergeIntent) NewPatch() *Patch {
 	// merge_group.head_ref looks like this:
 	// refs/heads/gh-readonly-queue/main/pr-515-9cd8a2532bcddf58369aa82eb66ba88e2323c056
+	baseBranch := extractBaseBranchFromHeadRef(g.HeadRef)
+
 	split := strings.Split(g.HeadRef, "/")
-
-	// handle cases where base branch has a slash in it
-	baseBranchSlice := []string{}
-	for i := 3; i < len(split)-1; i++ {
-		baseBranchSlice = append(baseBranchSlice, split[i])
-	}
-	baseBranch := strings.Join(baseBranchSlice, "/")
-
-	// produce a branch name like gh-readonly-queue/main/pr-515-9cd8a2532bcddf58369aa82eb66ba88e2323c056
 	ghReadOnlyQueue := split[2]
 	lastElement := split[len(split)-1]
 	headBranch := strings.Join([]string{ghReadOnlyQueue, baseBranch, lastElement}, "/")
@@ -216,12 +263,14 @@ func (g *githubMergeIntent) NewPatch() *Patch {
 		Author:  evergreen.GithubMergeUser,
 		Githash: g.BaseSHA,
 		GithubMergeData: thirdparty.GithubMergeGroup{
-			Org:        g.Org,
-			Repo:       g.Repo,
-			BaseBranch: baseBranch,
-			HeadBranch: headBranch,
-			HeadSHA:    g.HeadSHA,
-			HeadCommit: g.HeadCommit,
+			Org:            g.Org,
+			Repo:           g.Repo,
+			BaseBranch:     baseBranch,
+			HeadBranch:     headBranch,
+			BaseSHA:        g.BaseSHA,
+			HeadSHA:        g.HeadSHA,
+			HeadCommit:     g.HeadCommit,
+			HeadCommitDate: g.HeadCommitDate,
 		},
 	}
 	return patchDoc

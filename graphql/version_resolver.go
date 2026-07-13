@@ -9,8 +9,10 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/build"
+	"github.com/evergreen-ci/evergreen/model/cost"
 	"github.com/evergreen-ci/evergreen/model/manifest"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
@@ -22,27 +24,14 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// BaseTaskStatuses is the resolver for the baseTaskStatuses field.
-func (r *versionResolver) BaseTaskStatuses(ctx context.Context, obj *restModel.APIVersion) ([]string, error) {
+// BaseVersion is the resolver for the baseVersion field.
+func (r *versionResolver) BaseVersion(ctx context.Context, obj *restModel.APIVersion) (*restModel.APIVersion, error) {
 	versionID := utility.FromStringPtr(obj.Id)
 	baseVersion, err := model.FindBaseVersionForVersion(ctx, versionID)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding base version for version '%s': %s", versionID, err.Error()))
 	}
 	if baseVersion == nil {
-		return nil, nil
-	}
-	statuses, err := task.GetBaseStatusesForActivatedTasks(ctx, versionID, baseVersion.Id)
-	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting base statuses for version '%s': %s", versionID, err.Error()))
-	}
-	return statuses, nil
-}
-
-// BaseVersion is the resolver for the baseVersion field.
-func (r *versionResolver) BaseVersion(ctx context.Context, obj *restModel.APIVersion) (*restModel.APIVersion, error) {
-	baseVersion, err := model.VersionFindOne(ctx, model.BaseVersionByProjectIdAndRevision(utility.FromStringPtr(obj.Project), utility.FromStringPtr(obj.Revision)))
-	if baseVersion == nil || err != nil {
 		return nil, nil
 	}
 
@@ -142,6 +131,17 @@ func (r *versionResolver) ChildVersions(ctx context.Context, obj *restModel.APIV
 	return nil, nil
 }
 
+// Cost is the field resolver for Version.cost. It applies RoundCost to all adjusted fields
+// so the GraphQL API returns clean values without floating-point noise.
+func (r *versionResolver) Cost(ctx context.Context, obj *restModel.APIVersion) (*cost.Cost, error) {
+	if obj.Cost == nil {
+		return nil, nil
+	}
+	rounded := obj.Cost.RoundedBase()
+	rounded.Total = cost.RoundCost(obj.Cost.AdjustedTotal())
+	return &rounded, nil
+}
+
 // ExternalLinksForMetadata is the resolver for the externalLinksForMetadata field.
 func (r *versionResolver) ExternalLinksForMetadata(ctx context.Context, obj *restModel.APIVersion) ([]*ExternalLinkForMetadata, error) {
 	projectID := utility.FromStringPtr(obj.Project)
@@ -156,8 +156,10 @@ func (r *versionResolver) ExternalLinksForMetadata(ctx context.Context, obj *res
 
 	for _, link := range pRef.ExternalLinks {
 		if utility.StringSliceContains(link.Requesters, utility.FromStringPtr(obj.Requester)) {
-			// replace {version_id} with the actual version id
+			// Replace {version_id} with the actual version ID.
 			formattedURL := strings.Replace(link.URLTemplate, "{version_id}", utility.FromStringPtr(obj.Id), -1)
+			// Replace {revision} with the actual revision.
+			formattedURL = strings.Replace(formattedURL, "{revision}", utility.FromStringPtr(obj.Revision), -1)
 			externalLinks = append(externalLinks, &ExternalLinkForMetadata{
 				URL:         formattedURL,
 				DisplayName: link.DisplayName,
@@ -253,14 +255,14 @@ func (r *versionResolver) PreviousVersion(ctx context.Context, obj *restModel.AP
 		apiVersion := restModel.APIVersion{}
 		apiVersion.BuildFromService(ctx, *previousVersion)
 		return &apiVersion, nil
-	} else {
-		return nil, nil
 	}
+
+	return nil, nil
 }
 
 // ProjectMetadata is the resolver for the projectMetadata field.
 func (r *versionResolver) ProjectMetadata(ctx context.Context, obj *restModel.APIVersion) (*restModel.APIProjectRef, error) {
-	apiProjectRef, err := getProjectMetadata(ctx, obj.Project, obj.Id)
+	apiProjectRef, err := getAPIProjectRef(ctx, obj.Project)
 	return apiProjectRef, err
 }
 
@@ -409,7 +411,7 @@ func (r *versionResolver) TaskStatusStats(ctx context.Context, obj *restModel.AP
 	}
 
 	versionID := utility.FromStringPtr(obj.Id)
-	stats, err := task.GetTaskStatsByVersion(ctx, versionID, opts)
+	stats, err := task.GetFilteredTaskStatsByVersion(ctx, versionID, opts)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting task status stats for version '%s': %s", versionID, err.Error()))
 	}
@@ -486,7 +488,7 @@ func (r *versionResolver) UpstreamProject(ctx context.Context, obj *restModel.AP
 			Revision: v.TriggerSHA,
 		}
 	}
-	upstreamProjectRef, err := model.FindBranchProjectRef(ctx, projectID)
+	upstreamProjectRef, err := model.FindBranchProjectRefSecondary(ctx, projectID)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching upstream project '%s': %s", projectID, err.Error()))
 	}
@@ -504,15 +506,26 @@ func (r *versionResolver) UpstreamProject(ctx context.Context, obj *restModel.AP
 
 // User is the resolver for the user field.
 func (r *versionResolver) User(ctx context.Context, obj *restModel.APIVersion) (*restModel.APIDBUser, error) {
-	versionId := utility.FromStringPtr(obj.Id)
-	authorId, err := model.GetVersionAuthorID(ctx, versionId)
-	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting author ID for version '%s': %s", versionId, err.Error()))
-	}
-	if authorId == "" {
-		return nil, nil
+	// userId, displayName, and emailAddress are always returned from the version document.
+	// Other fields require a database call.
+	requestedFields := graphql.CollectAllFields(ctx)
+	needsDBFetch := false
+	for _, field := range requestedFields {
+		if field != "userId" && field != "displayName" && field != "emailAddress" {
+			needsDBFetch = true
+			break
+		}
 	}
 
+	if !needsDBFetch {
+		return &restModel.APIDBUser{
+			UserID:       obj.AuthorID,
+			DisplayName:  obj.Author,
+			EmailAddress: obj.AuthorEmail,
+		}, nil
+	}
+
+	authorId := utility.FromStringPtr(obj.AuthorID)
 	currentUser := mustHaveUser(ctx)
 	if currentUser.Id == authorId {
 		apiUser := &restModel.APIDBUser{}
@@ -520,17 +533,27 @@ func (r *versionResolver) User(ctx context.Context, obj *restModel.APIVersion) (
 		return apiUser, nil
 	}
 
-	author, err := user.FindOneById(ctx, authorId)
+	dbUser, err := loaders.GetUser(ctx, authorId)
 	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()))
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()), err)
 	}
-	if author == nil {
-		return nil, nil
+	// This is most likely a reaped user, so just return their info from version
+	if dbUser == nil {
+		return &restModel.APIDBUser{
+			UserID:       obj.AuthorID,
+			DisplayName:  obj.Author,
+			EmailAddress: obj.AuthorEmail,
+		}, nil
 	}
 
 	apiUser := &restModel.APIDBUser{}
-	apiUser.BuildFromService(*author)
+	apiUser.BuildFromService(*dbUser)
 	return apiUser, nil
+}
+
+// UserLite is the resolver for the userLite field.
+func (r *versionResolver) UserLite(ctx context.Context, obj *restModel.APIVersion) (*user.DBUser, error) {
+	return getVersionAuthorDBUser(ctx, utility.FromStringPtr(obj.AuthorID), utility.FromStringPtr(obj.Author), utility.FromStringPtr(obj.AuthorEmail))
 }
 
 // VersionTiming is the resolver for the versionTiming field.
@@ -588,7 +611,7 @@ func (r *versionResolver) WaterfallBuilds(ctx context.Context, obj *restModel.AP
 		return nil, nil
 	}
 
-	parentWaterfall, ok := graphql.GetFieldContext(ctx).Parent.Parent.Parent.Result.(*Waterfall)
+	parentWaterfall, ok := getWaterfallFromContext(ctx)
 	if ok {
 		// If we can't find the activeVersionIds in the parent query, eagerly continue with this aggregation.
 		activeVersionIds := parentWaterfall.Pagination.ActiveVersionIds
@@ -597,7 +620,13 @@ func (r *versionResolver) WaterfallBuilds(ctx context.Context, obj *restModel.AP
 		}
 	}
 
-	builds, err := model.GetVersionBuilds(ctx, versionID)
+	// TODO DEVPROD-29422: this is only necessary because APIVersion doesn't include BuildIds, and GetAllWaterfallVersions projects out Version.BuildVariants for performance
+	v, err := model.VersionFindOneId(ctx, versionID)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding version '%s': %s", versionID, err.Error()))
+	}
+
+	builds, err := model.GetVersionBuilds(ctx, versionID, v.BuildIds)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting build variants for version '%s': %s", versionID, err.Error()))
 	}
@@ -609,7 +638,85 @@ func (r *versionResolver) WaterfallBuilds(ctx context.Context, obj *restModel.AP
 	return versionBuilds, nil
 }
 
+// BaseVersion is the resolver for the baseVersion field.
+func (r *versionLiteResolver) BaseVersion(ctx context.Context, obj *model.Version) (*model.Version, error) {
+	baseVersion, err := model.FindBaseVersionForVersion(ctx, obj.Id)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding base version for version '%s': %s", obj.Id, err.Error()))
+	}
+	return baseVersion, nil
+}
+
+// ChildVersions is the resolver for the childVersions field.
+func (r *versionLiteResolver) ChildVersions(ctx context.Context, obj *model.Version) ([]*model.Version, error) {
+	if !evergreen.IsPatchRequester(obj.Requester) {
+		return nil, nil
+	}
+	if err := data.ValidatePatchID(obj.Id); err != nil {
+		return nil, werrors.WithStack(err)
+	}
+	foundPatch, err := patch.FindOneId(ctx, obj.Id)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching patch '%s': %s", obj.Id, err.Error()))
+	}
+	if foundPatch == nil {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("patch '%s' not found", obj.Id))
+	}
+	childPatchIds := foundPatch.Triggers.ChildPatches
+	if len(childPatchIds) > 0 {
+		childVersions := make([]*model.Version, 0, len(childPatchIds))
+		for _, cp := range childPatchIds {
+			v, err := loaders.GetVersion(ctx, cp)
+			if err != nil {
+				return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching child version '%s' for patch '%s': %s", cp, obj.Id, err.Error()), err)
+			}
+			if v != nil {
+				childVersions = append(childVersions, v)
+			}
+		}
+		return childVersions, nil
+	}
+	return nil, nil
+}
+
+// IsPatch is the resolver for the isPatch field.
+func (r *versionLiteResolver) IsPatch(ctx context.Context, obj *model.Version) (bool, error) {
+	return evergreen.IsPatchRequester(obj.Requester), nil
+}
+
+// Project is the resolver for the project field.
+func (r *versionLiteResolver) Project(ctx context.Context, obj *model.Version) (*model.ProjectRef, error) {
+	projectRef, err := loaders.GetProject(ctx, obj.Identifier)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding merged project ref for project '%s': %s", obj.Identifier, err.Error()), err)
+	}
+	if projectRef == nil {
+		return nil, nil
+	}
+	return projectRef, nil
+}
+
+// Status is the resolver for the status field.
+func (r *versionLiteResolver) Status(ctx context.Context, obj *model.Version) (string, error) {
+	return getDisplayStatus(ctx, obj)
+}
+
+// TaskStatusStats is the resolver for the taskStatusStats field.
+func (r *versionLiteResolver) TaskStatusStats(ctx context.Context, obj *model.Version) (*task.TaskStats, error) {
+	includeNeverActivated := !evergreen.IsPatchRequester(obj.Requester)
+	return task.GetTaskStatsByVersion(ctx, obj.Id, includeNeverActivated)
+}
+
+// User is the resolver for the user field.
+func (r *versionLiteResolver) User(ctx context.Context, obj *model.Version) (*user.DBUser, error) {
+	return getVersionAuthorDBUser(ctx, obj.AuthorID, obj.Author, obj.AuthorEmail)
+}
+
 // Version returns VersionResolver implementation.
 func (r *Resolver) Version() VersionResolver { return &versionResolver{r} }
 
+// VersionLite returns VersionLiteResolver implementation.
+func (r *Resolver) VersionLite() VersionLiteResolver { return &versionLiteResolver{r} }
+
 type versionResolver struct{ *Resolver }
+type versionLiteResolver struct{ *Resolver }

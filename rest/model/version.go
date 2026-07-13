@@ -7,6 +7,8 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/cost"
+	"github.com/evergreen-ci/evergreen/model/patch"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/utility"
 )
 
@@ -15,6 +17,8 @@ type APIVersion struct {
 	Id *string `json:"version_id"`
 	// Time that the version was first created
 	CreateTime *time.Time `json:"create_time"`
+	// Time at which the version document was persisted in Evergreen. Will be null for versions created before this field was added.
+	IngestTime *time.Time `json:"ingest_time,omitempty"`
 	// Time at which tasks associated with this version started running
 	StartTime *time.Time `json:"start_time"`
 	// Time at which tasks associated with this version finished running
@@ -26,6 +30,8 @@ type APIVersion struct {
 	ProjectIdentifier *string `json:"project_identifier"`
 	// Author of the version
 	Author *string `json:"author"`
+	// Author ID is the Evergreen user ID associated with the version.
+	AuthorID *string `json:"author_id"`
 	// Email of the author of the version
 	AuthorEmail *string `json:"author_email"`
 	// Message left with the commit
@@ -57,6 +63,21 @@ type APIVersion struct {
 	Cost *cost.Cost `json:"cost,omitempty"`
 	// Aggregated predicted cost of all tasks in the version
 	PredictedCost *cost.Cost `json:"predicted_cost,omitempty"`
+	// Aggregated S3 upload metrics across all tasks in the version
+	S3Usage *APIVersionS3Usage `json:"s3_usage,omitempty"`
+}
+
+// APIVersionS3Usage holds aggregated S3 upload metrics for a version.
+// Logs only exposes puts and bytes since per-type breakdown is not aggregated at version level.
+type APIVersionS3Usage struct {
+	Artifacts s3usage.ArtifactMetrics `json:"artifacts,omitempty"`
+	Logs      APIVersionS3LogUsage    `json:"logs,omitempty"`
+}
+
+// APIVersionS3LogUsage holds aggregated S3 log upload metrics for a version.
+type APIVersionS3LogUsage struct {
+	PutRequests int   `json:"put_requests,omitempty"`
+	UploadBytes int64 `json:"upload_bytes,omitempty"`
 }
 
 type APIGitTag struct {
@@ -73,10 +94,12 @@ type buildDetail struct {
 func (apiVersion *APIVersion) BuildFromService(ctx context.Context, v model.Version) {
 	apiVersion.Id = utility.ToStringPtr(v.Id)
 	apiVersion.CreateTime = ToTimePtr(v.CreateTime)
+	apiVersion.IngestTime = ToTimePtr(v.IngestTime)
 	apiVersion.StartTime = ToTimePtr(v.StartTime)
 	apiVersion.FinishTime = ToTimePtr(v.FinishTime)
 	apiVersion.Revision = utility.ToStringPtr(v.Revision)
 	apiVersion.Author = utility.ToStringPtr(v.Author)
+	apiVersion.AuthorID = utility.ToStringPtr(v.AuthorID)
 	apiVersion.AuthorEmail = utility.ToStringPtr(v.AuthorEmail)
 	apiVersion.Message = utility.ToStringPtr(v.Message)
 	apiVersion.Status = utility.ToStringPtr(v.Status)
@@ -121,7 +144,7 @@ func (apiVersion *APIVersion) BuildFromService(ctx context.Context, v model.Vers
 	}
 
 	if v.Identifier != "" {
-		identifier, err := model.GetIdentifierForProject(ctx, v.Identifier)
+		identifier, err := model.GetIdentifierForProjectSecondary(ctx, v.Identifier)
 		if err == nil {
 			apiVersion.ProjectIdentifier = utility.ToStringPtr(identifier)
 		}
@@ -129,11 +152,42 @@ func (apiVersion *APIVersion) BuildFromService(ctx context.Context, v model.Vers
 
 	if !v.Cost.IsZero() {
 		versionCost := v.Cost
+		versionCost.Total = versionCost.AdjustedTotal()
 		apiVersion.Cost = &versionCost
 	}
 	if !v.PredictedCost.IsZero() {
 		predictedCost := v.PredictedCost
+		predictedCost.Total = predictedCost.AdjustedTotal()
 		apiVersion.PredictedCost = &predictedCost
+	}
+	if !v.S3Usage.IsZero() {
+		apiVersion.S3Usage = &APIVersionS3Usage{
+			Artifacts: v.S3Usage.Artifacts,
+			Logs: APIVersionS3LogUsage{
+				PutRequests: v.S3Usage.Logs.PutRequests,
+				UploadBytes: v.S3Usage.Logs.UploadBytes,
+			},
+		}
+	}
+	if apiVersion.IsPatchRequester() {
+		p, err := patch.FindOneId(ctx, v.Id)
+		if err != nil || p == nil {
+			return
+		}
+		if p.IsParent() && len(p.Triggers.ChildPatches) > 0 {
+			childPatches, err := patch.Find(ctx, patch.ByStringIds(p.Triggers.ChildPatches))
+			if err != nil {
+				return
+			}
+			for _, childPatch := range childPatches {
+				if !childPatch.StartTime.IsZero() && childPatch.StartTime.Before(utility.FromTimePtr(apiVersion.StartTime)) {
+					apiVersion.StartTime = ToTimePtr(childPatch.StartTime)
+				}
+				if !childPatch.FinishTime.IsZero() && childPatch.FinishTime.After(utility.FromTimePtr(apiVersion.FinishTime)) {
+					apiVersion.FinishTime = ToTimePtr(childPatch.FinishTime)
+				}
+			}
+		}
 	}
 }
 

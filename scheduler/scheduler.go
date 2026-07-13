@@ -16,10 +16,11 @@ import (
 )
 
 type TaskPlannerOptions struct {
-	ID                   string
-	IsSecondaryQueue     bool
-	IncludesDependencies bool
-	StartedAt            time.Time
+	ID                         string
+	IsSecondaryQueue           bool
+	IncludesDependencies       bool
+	StartedAt                  time.Time
+	MaxScheduledTasksPerDistro int
 }
 
 type TaskPlanner func(*distro.Distro, []task.Task, TaskPlannerOptions) ([]task.Task, error)
@@ -43,7 +44,7 @@ func runTunablePlanner(ctx context.Context, d *distro.Distro, tasks []task.Task,
 	info := GetDistroQueueInfo(ctx, d.Id, plan, d.GetTargetTime(), opts)
 	info.SecondaryQueue = opts.IsSecondaryQueue
 	info.PlanCreatedAt = opts.StartedAt
-	if err = PersistTaskQueue(ctx, d.Id, plan, info); err != nil {
+	if err = PersistTaskQueue(ctx, d.Id, plan, info, opts.MaxScheduledTasksPerDistro); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
@@ -55,7 +56,7 @@ const RunnerName = "scheduler"
 // GetDistroQueueInfo returns the distroQueueInfo for the given set of tasks having set the task.ExpectedDuration for each task.
 func GetDistroQueueInfo(ctx context.Context, distroID string, tasks []task.Task, maxDurationThreshold time.Duration, opts TaskPlannerOptions) model.DistroQueueInfo {
 	var distroExpectedDuration, distroDurationOverThreshold time.Duration
-	var distroCountDurationOverThreshold, distroCountWaitOverThreshold, numTasksDepsMet int
+	var distroCountDurationOverThreshold, distroCountWaitOverThreshold, numTasksDepsMet, numMergeQueueTasks, numLargeParserProjectTasks int
 	var isSecondaryQueue bool
 	taskGroupInfosMap := make(map[string]*model.TaskGroupInfo)
 	depCache := make(map[string]task.Task, len(tasks))
@@ -98,6 +99,13 @@ func GetDistroQueueInfo(ctx context.Context, distroID string, tasks []task.Task,
 		dependenciesMet := checkDependenciesMet(ctx, &task, depCache)
 		if dependenciesMet {
 			numTasksDepsMet++
+			if evergreen.IsGithubMergeQueueRequester(task.Requester) {
+				numMergeQueueTasks++
+				info.CountDepFilledMergeQueueTasks++
+			}
+			if task.CachedProjectStorageMethod == evergreen.ProjectStorageMethodS3 {
+				numLargeParserProjectTasks++
+			}
 		}
 		if !opts.IncludesDependencies || dependenciesMet {
 			task.ExpectedDuration = duration
@@ -139,15 +147,17 @@ func GetDistroQueueInfo(ctx context.Context, distroID string, tasks []task.Task,
 	}
 
 	distroQueueInfo := model.DistroQueueInfo{
-		Length:                     len(tasks),
-		LengthWithDependenciesMet:  numTasksDepsMet,
-		ExpectedDuration:           distroExpectedDuration,
-		MaxDurationThreshold:       maxDurationThreshold,
-		CountDurationOverThreshold: distroCountDurationOverThreshold,
-		DurationOverThreshold:      distroDurationOverThreshold,
-		CountWaitOverThreshold:     distroCountWaitOverThreshold,
-		TaskGroupInfos:             taskGroupInfos,
-		SecondaryQueue:             isSecondaryQueue,
+		Length:                           len(tasks),
+		LengthWithDependenciesMet:        numTasksDepsMet,
+		ExpectedDuration:                 distroExpectedDuration,
+		MaxDurationThreshold:             maxDurationThreshold,
+		CountDepFilledMergeQueueTasks:    numMergeQueueTasks,
+		CountDurationOverThreshold:       distroCountDurationOverThreshold,
+		DurationOverThreshold:            distroDurationOverThreshold,
+		CountWaitOverThreshold:           distroCountWaitOverThreshold,
+		NumQueuedLargeParserProjectTasks: numLargeParserProjectTasks,
+		TaskGroupInfos:                   taskGroupInfos,
+		SecondaryQueue:                   isSecondaryQueue,
 	}
 
 	return distroQueueInfo
@@ -162,49 +172,22 @@ func checkDependenciesMet(ctx context.Context, t *task.Task, cache map[string]ta
 
 }
 
-// SpawnHosts calls out to the embedded Manager to spawn hosts, and takes in a map of
-// distro -> number of hosts to spawn for the distro. It returns a map of distro -> hosts spawned.
-// The pool parameter is assumed to be the one from the distro passed in.
-func SpawnHosts(ctx context.Context, d distro.Distro, newHostsNeeded int, pool *evergreen.ContainerPool) ([]host.Host, error) {
+// CreateIntentHosts creates task intent hosts for a distro. It returns the created hosts.
+func CreateIntentHosts(ctx context.Context, d distro.Distro, newHostsNeeded int) ([]host.Host, error) {
 	startTime := time.Now()
 
 	if newHostsNeeded == 0 {
 		return []host.Host{}, nil
 	}
-	numHostsToSpawn := newHostsNeeded
 	hostsSpawned := []host.Host{}
 
 	if ctx.Err() != nil {
 		return nil, errors.New("scheduling run canceled")
 	}
 
-	// if distro is container distro, check if there are enough parent hosts to support new containers
-	if pool != nil {
-		hostOptions, err := getCreateOptionsFromDistro(d)
-		if err != nil {
-			return nil, errors.Wrapf(err, "getting Docker options from distro '%s'", d.Id)
-		}
-		newContainers, newParents, err := host.MakeContainersAndParents(ctx, d, pool, newHostsNeeded, *hostOptions)
-		if err != nil {
-			return nil, errors.Wrapf(err, "creating container intents for distro '%s'", d.Id)
-		}
-		hostsSpawned = append(hostsSpawned, newContainers...)
-		hostsSpawned = append(hostsSpawned, newParents...)
-		grip.Info(message.Fields{
-			"runner":             RunnerName,
-			"distro":             d.Id,
-			"pool":               pool.Id,
-			"pool_distro":        pool.Distro,
-			"num_new_parents":    len(newParents),
-			"num_new_containers": len(newContainers),
-			"operation":          "spawning new parents",
-			"duration_secs":      time.Since(startTime).Seconds(),
-		})
-	} else { // create intent documents for regular hosts
-		for i := 0; i < numHostsToSpawn; i++ {
-			intent := generateIntentHost(d)
-			hostsSpawned = append(hostsSpawned, *intent)
-		}
+	for i := 0; i < newHostsNeeded; i++ {
+		intent := generateIntentHost(d)
+		hostsSpawned = append(hostsSpawned, *intent)
 	}
 
 	if err := host.InsertMany(ctx, hostsSpawned); err != nil {
@@ -217,7 +200,7 @@ func SpawnHosts(ctx context.Context, d distro.Distro, newHostsNeeded int, pool *
 	}
 	event.LogManyHostsCreated(ctx, hostIDs)
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"runner":        RunnerName,
 		"distro":        d.Id,
 		"operation":     "spawning instances",
@@ -225,23 +208,6 @@ func SpawnHosts(ctx context.Context, d distro.Distro, newHostsNeeded int, pool *
 		"num_hosts":     len(hostsSpawned),
 	})
 	return hostsSpawned, nil
-}
-
-func getCreateOptionsFromDistro(d distro.Distro) (*host.CreateOptions, error) {
-	dockerOptions := &host.DockerOptions{}
-	if err := dockerOptions.FromDistroSettings(d, ""); err != nil {
-		return nil, errors.Wrapf(err, "getting Docker options from distro '%s'", d.Id)
-	}
-	if err := dockerOptions.Validate(); err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	hostOptions := host.CreateOptions{
-		Distro:        d,
-		UserName:      evergreen.User,
-		DockerOptions: *dockerOptions,
-	}
-	return &hostOptions, nil
 }
 
 // generateIntentHost creates a host intent document for a regular host
@@ -273,7 +239,7 @@ func underwaterUnschedule(ctx context.Context, distroID string) error {
 				}
 			}
 		}
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":  "unscheduled stale tasks",
 			"distro":   distroID,
 			"runner":   RunnerName,

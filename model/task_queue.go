@@ -38,6 +38,8 @@ type TaskGroupInfo struct {
 	// CountWaitOverThreshold represents the number of tasks in the group that have been waiting for over the distro queue's MaxDurationThreshold
 	// since their dependencies were met
 	CountWaitOverThreshold int `bson:"count_wait_over_threshold" json:"count_wait_over_threshold"`
+	// CountDepFilledMergeQueueTasks represents the number of merge queue tasks that are in the queue.
+	CountDepFilledMergeQueueTasks int `bson:"count_merge_tasks" json:"count_merge_tasks"`
 	// DurationOverThreshold represents the sum of the expected durations of tasks in the group
 	// that have their dependencies met and are expected to take over the distro queue's MaxDurationThreshold
 	DurationOverThreshold time.Duration `bson:"duration_over_threshold" json:"duration_over_threshold"`
@@ -48,6 +50,8 @@ type DistroQueueInfo struct {
 	Length int `bson:"length" json:"length"`
 	// LengthWithDependenciesMet represents the number of tasks waiting in the queue with their dependencies met
 	LengthWithDependenciesMet int `bson:"length_with_dependencies_met" json:"length_with_dependencies_met"`
+	// CountDepFilledMergeQueueTasks represents the number of merge queue tasks that are in the queue.
+	CountDepFilledMergeQueueTasks int `bson:"count_merge_tasks" json:"count_merge_tasks"`
 	// ExpectedDuration represents the sum of the expected runtime of all tasks waiting in the queue with their dependencies met
 	ExpectedDuration time.Duration `bson:"expected_duration" json:"expected_duration"`
 	// MaxDurationThreshold is the target length of time the host allocator aims to complete dependency-fulfilled tasks in the queue
@@ -62,6 +66,8 @@ type DistroQueueInfo struct {
 	DurationOverThreshold time.Duration `bson:"duration_over_threshold" json:"duration_over_threshold"`
 	// CountWaitOverThreshold represents the number of tasks that have been waiting the MaxDurationThreshold since their dependencies were met
 	CountWaitOverThreshold int `bson:"count_wait_over_threshold" json:"count_wait_over_threshold"`
+	// NumQueuedLargeParserProjectTasks is the number of dependency-met tasks in this queue that use S3 for their parser project.
+	NumQueuedLargeParserProjectTasks int `bson:"num_queued_large_parser_project_tasks" json:"num_queued_large_parser_project_tasks"`
 	// TaskGroupInfos is a list of info that contains the same information as in this struct, but granularized to be only for tasks in
 	// a specific group (standalone tasks are included as well, denoted by an empty string for the group name)
 	TaskGroupInfos []TaskGroupInfo `bson:"task_group_infos" json:"task_group_infos"`
@@ -143,6 +149,9 @@ type TaskQueueItem struct {
 	Dependencies          []string                   `bson:"dependencies" json:"dependencies"`
 	DependenciesMet       bool                       `bson:"dependencies_met" json:"dependencies_met"`
 	ActivatedBy           string                     `bson:"activated_by" json:"activated_by"`
+	// queueIndex is the item's position in the scheduler-sorted queue. It is set when building the DAG
+	// and used as a tiebreaker for nodes at the same topological level to preserve the scheduler's composite ranking.
+	queueIndex int `bson:"-" json:"-"`
 }
 
 // must not no-lint these values
@@ -236,7 +245,7 @@ func updateTaskQueue(ctx context.Context, distro string, taskQueue []TaskQueueIt
 // and modifies the queue info.
 // This is in contrast to RemoveTaskQueues, which simply deletes these documents.
 func ClearTaskQueue(ctx context.Context, distroId string) error {
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message": "clearing task queue",
 		"distro":  distroId,
 	})
@@ -262,7 +271,7 @@ func ClearTaskQueue(ctx context.Context, distroId string) error {
 	}
 	// Want to at least try to clear even in the case of an error
 	if aliasCount == 0 && err == nil {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message": "secondary task queue not found, skipping",
 			"distro":  distroId,
 		})
@@ -281,14 +290,15 @@ func ClearTaskQueue(ctx context.Context, distroId string) error {
 // for a cleared queue.
 func clearQueueInfo(distroQueueInfo DistroQueueInfo) DistroQueueInfo {
 	return DistroQueueInfo{
-		Length:                     0,
-		ExpectedDuration:           time.Duration(0),
-		MaxDurationThreshold:       distroQueueInfo.MaxDurationThreshold,
-		PlanCreatedAt:              distroQueueInfo.PlanCreatedAt,
-		CountDurationOverThreshold: 0,
-		CountWaitOverThreshold:     0,
-		TaskGroupInfos:             []TaskGroupInfo{},
-		SecondaryQueue:             distroQueueInfo.SecondaryQueue,
+		Length:                        0,
+		ExpectedDuration:              time.Duration(0),
+		MaxDurationThreshold:          distroQueueInfo.MaxDurationThreshold,
+		PlanCreatedAt:                 distroQueueInfo.PlanCreatedAt,
+		CountDurationOverThreshold:    0,
+		CountWaitOverThreshold:        0,
+		CountDepFilledMergeQueueTasks: 0,
+		TaskGroupInfos:                []TaskGroupInfo{},
+		SecondaryQueue:                distroQueueInfo.SecondaryQueue,
 	}
 }
 
@@ -428,7 +438,9 @@ func FindMinimumQueuePositionForTask(ctx context.Context, taskId string) (int, e
 
 func FindAllTaskQueues(ctx context.Context) ([]TaskQueue, error) {
 	taskQueues := []TaskQueue{}
-	err := db.FindAllQ(ctx, TaskQueuesCollection, db.Query(bson.M{}), &taskQueues)
+	// Exclude the queue field to avoid fetching potentially thousands of task items.
+	q := db.Query(bson.M{}).WithoutFields(taskQueueQueueKey)
+	err := db.FindAllQ(ctx, TaskQueuesCollection, q, &taskQueues)
 	return taskQueues, err
 }
 

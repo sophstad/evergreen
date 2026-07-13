@@ -30,7 +30,7 @@ func CreateVolume(ctx context.Context, env evergreen.Environment, volume *host.V
 }
 
 func GetEC2ManagerForVolume(ctx context.Context, vol *host.Volume) (Manager, error) {
-	provider := evergreen.ProviderNameEc2OnDemand
+	provider := evergreen.ProviderNameEc2Fleet
 	// WARNING: We unfortunately have to hard-code variables for E2E testing.
 	// Note that this should be avoided when possible, but is necessary in this case.
 	if os.Getenv(evergreen.SettingsOverride) != "" {
@@ -139,7 +139,7 @@ func DetachVolume(ctx context.Context, volumeId string) (int, error) {
 	}
 	if h == nil {
 		if err = host.UnsetVolumeHost(ctx, vol.ID); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"message": fmt.Sprintf("can't clear host '%s' from volume '%s'", vol.Host, vol.ID),
 				"route":   "graphql/util",
 				"action":  "DetachVolume",

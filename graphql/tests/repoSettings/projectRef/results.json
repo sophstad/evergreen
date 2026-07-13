@@ -26,11 +26,6 @@
               "buildBaronSettings": {
                 "ticketCreateProject": "EVG",
                 "ticketSearchProjects": ["EVG"],
-                "bfSuggestionFeaturesURL": "",
-                "bfSuggestionPassword": "",
-                "bfSuggestionServer": "",
-                "bfSuggestionTimeoutSecs": 0,
-                "bfSuggestionUsername": "",
                 "ticketCreateIssueType": ""
               },
               "taskAnnotationSettings": {
@@ -38,19 +33,7 @@
                   "endpoint": "endpoint",
                   "secret": "shh"
                 }
-              },
-              "containerSizeDefinitions": [
-                {
-                  "name": "size1",
-                  "cpu": 1,
-                  "memoryMb": 1024
-                },
-                {
-                  "name": "size2",
-                  "cpu": 2,
-                  "memoryMb": 2048
-                }
-              ]
+              }
             }
           }
         }

@@ -3,14 +3,14 @@ name := evergreen
 buildDir := bin
 nodeDir := public
 packages := $(name) agent agent-command agent-executor agent-globals agent-util agent-taskexec agent-internal agent-internal-client agent-internal-redactor agent-internal-taskoutput agent-internal-testutil operations cloud cloud-userdata
-packages += db util units graphql thirdparty thirdparty-docker auth scheduler model validator service repotracker mock
-packages += model-annotations model-patch model-artifact model-host model-pod model-pod-definition model-pod-dispatcher model-build model-event model-task model-user model-distro model-manifest model-testresult model-log model-testlog model-parsley
-packages += model-commitqueue model-cache model-githubapp model-hoststat model-cost model-s3lifecycle
+packages += db util units graphql graphql-loaders thirdparty thirdparty-docker auth scheduler model validator service repotracker mock
+packages += model-annotations model-patch model-artifact model-host model-build model-event model-task model-user model-distro model-manifest model-testresult model-log model-testlog model-parsley
+packages += model-commitqueue model-cache model-githubapp model-hoststat model-cost model-s3lifecycle model-s3usage model-ec2mount model-ec2settings model-ec2instancereferenceprice
 packages += rest-client rest-data rest-route rest-model trigger model-alertrecord model-notification model-taskstats model-reliability
-packages += taskoutput cloud-parameterstore cloud-parameterstore-fakeparameter
+packages += taskoutput cloud-parameterstore cloud-parameterstore-fakeparameter ratelimit
 lintOnlyPackages := api apimodels testutil model-manifest model-testutil model-testresult-testutil service-testutil service-graphql db-mgo db-mgo-bson db-mgo-internal-json rest
-lintOnlyPackages += smoke-internal smoke-internal-host smoke-internal-container smoke-internal-agentmonitor smoke-internal-endpoint thirdparty-clients-fws
-testOnlyPackages := service-graphql smoke-internal-host smoke-internal-container smoke-internal-agentmonitor smoke-internal-endpoint # has only test files so can't undergo all operations
+lintOnlyPackages += smoke-internal smoke-internal-host smoke-internal-agentmonitor smoke-internal-endpoint thirdparty-clients-fws
+testOnlyPackages := service-graphql smoke-internal-host smoke-internal-agentmonitor smoke-internal-endpoint # has only test files so can't undergo all operations
 orgName := evergreen-ci
 orgPath := github.com/$(orgName)
 projectPath := $(orgPath)/$(name)
@@ -83,7 +83,7 @@ endif
 
 clientBuildDir := clients
 macOSPlatforms := $(if $(STAGING_ONLY),,darwin_amd64 darwin_arm64)
-linuxPlatforms := linux_amd64 $(if $(STAGING_ONLY),,linux_s390x linux_arm64 linux_ppc64le)
+linuxPlatforms := linux_amd64 linux_arm64 $(if $(STAGING_ONLY),,linux_s390x linux_ppc64le)
 windowsPlatforms := windows_amd64
 unixBinaryBasename := evergreen
 windowsBinaryBasename := evergreen.exe
@@ -154,7 +154,6 @@ set-smoke-vars:$(buildDir)/.load-smoke-data $(buildDir)/set-project-var $(buildD
 	@$(buildDir)/set-project-var -dbName mci_smoke -key aws_secret -value $(AWS_SECRET_ACCESS_KEY)
 	@$(buildDir)/set-project-var -dbName mci_smoke -key aws_token -value $(AWS_SESSION_TOKEN)
 	@$(buildDir)/set-var -dbName=mci_smoke -collection=hosts -id=localhost -key=agent_revision -value=$(agentVersion)
-	@$(buildDir)/set-var -dbName=mci_smoke -collection=pods -id=localhost -key=agent_version -value=$(agentVersion)
 
 # set-smoke-git-config is necessary for the smoke test to submit a manual patch because the patch command uses git
 # metadata.
@@ -247,9 +246,11 @@ phony += lint build test coverage coverage-html list-tests
 # start module management targets
 mod-tidy:
 	$(gobin) mod tidy
+mod-download:
+	$(gobin) mod download
 verify-mod-tidy:
 	$(gobin) run cmd/verify-mod-tidy/verify-mod-tidy.go -goBin="$(gobin)"
-phony += mod-tidy verify-mod-tidy
+phony += mod-tidy mod-download verify-mod-tidy
 # end module management targets
 
 # convenience targets for runing tests and coverage tasks on a
@@ -337,7 +338,7 @@ gqlgen:
 	$(gobin) run cmd/gqlgen/generate_secret_fields.go
 
 govul-install:
-	$(gobin) install golang.org/x/vuln/cmd/govulncheck@latest
+	$(gobin) install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
 swaggo:
 	$(MAKE) swaggo-format swaggo-build swaggo-render
@@ -346,7 +347,7 @@ swaggo-install:
 	$(gobin) install github.com/swaggo/swag/cmd/swag@latest
 
 swaggo-format:
-	swag fmt -g service/service.go
+	swag fmt -g service/service.go --exclude thirdparty/clients,graphql
 
 swaggo-build:
 	swag init -g service/service.go -o $(buildDir) --outputTypes json --parseDependency --parseInternal

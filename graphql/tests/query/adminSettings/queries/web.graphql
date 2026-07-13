@@ -6,9 +6,21 @@ query Web {
       corpUrl
     }
 
+    rateLimit {
+      elevatedUserIds
+      graphqlComplexityLimit
+      graphqlServiceBurst
+      graphqlServicePerHour
+      graphqlUserBurst
+      graphqlUserPerHour
+      restServiceBurst
+      restServicePerHour
+      restUserBurst
+      restUserPerHour
+    }
+
     ui {
       url
-      helpUrl
       uiv2Url
       parsleyUrl
       httpListenAddr
@@ -23,7 +35,6 @@ query Web {
       stagingEnvironment
       betaFeatures {
         spruceWaterfallEnabled
-        parsleyAIEnabled
       }
     }
     disabledGQLQueries

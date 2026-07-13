@@ -57,17 +57,7 @@
       buildBaronSettings {
         ticketCreateProject
         ticketSearchProjects
-        bfSuggestionFeaturesURL
-        bfSuggestionPassword
-        bfSuggestionServer
-        bfSuggestionTimeoutSecs
-        bfSuggestionUsername
         ticketCreateIssueType
-      }
-      containerSizeDefinitions {
-        name
-        cpu
-        memoryMb
       }
       taskAnnotationSettings {
         fileTicketWebhook {

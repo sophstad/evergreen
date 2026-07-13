@@ -35,6 +35,9 @@ query Runners {
       generateTaskFactor
       numDependentsFactor
       stepbackTaskFactor
+      translateProjectConcurrencyLimit
+      translateProjectCacheBytesLimit
+      translateProjectCacheTTLSeconds
       hostAllocator
       hostAllocatorRoundingRule
       hostAllocatorFeedbackRule
@@ -49,11 +52,6 @@ query Runners {
       numNewRepoRevisionsToFetch
       maxRepoRevisionsToSearch
       maxConcurrentRequests
-    }
-    podLifecycle {
-      maxParallelPodRequests
-      maxPodDefinitionCleanupRate
-      maxSecretCleanupRate
     }
   }
 }

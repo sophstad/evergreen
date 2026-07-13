@@ -7,9 +7,12 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/model/host"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/mongodb/amboy"
 	"github.com/mongodb/amboy/job"
 	"github.com/mongodb/amboy/registry"
+	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 )
 
 const spawnHostTerminationJobName = "spawnhost-termination"
@@ -37,15 +40,16 @@ func makeSpawnHostTerminationJob() *spawnHostTerminationJob {
 	return j
 }
 
-// NewSpawnHostTerminationJob returns a job to terminate a spawn host.
-func NewSpawnHostTerminationJob(h *host.Host, user, ts string) amboy.Job {
+// NewSpawnHostTerminationJob returns a job to terminate a spawn host
+// with the given source indicating why it is being terminated.
+func NewSpawnHostTerminationJob(h *host.Host, user, ts string, source evergreen.ModifySpawnHostSource) amboy.Job {
 	j := makeSpawnHostTerminationJob()
 	j.SetID(fmt.Sprintf("%s.%s.%s", spawnHostTerminationJobName, h.Id, ts))
 	j.SetScopes([]string{fmt.Sprintf("%s.%s", spawnHostStatusChangeScopeName, h.Id)})
 	j.SetEnqueueAllScopes(true)
 	j.CloudHostModification.HostID = h.Id
 	j.CloudHostModification.UserID = user
-	j.CloudHostModification.Source = evergreen.ModifySpawnHostManual
+	j.CloudHostModification.Source = source
 	return j
 }
 
@@ -53,7 +57,11 @@ func (j *spawnHostTerminationJob) Run(ctx context.Context) {
 	defer j.MarkComplete()
 
 	terminateCloudHost := func(ctx context.Context, mgr cloud.Manager, h *host.Host, user string) error {
-		if err := mgr.TerminateInstance(ctx, h, user, "user requested spawn host termination"); err != nil {
+		reason := "user requested spawn host termination"
+		if j.CloudHostModification.Source == evergreen.ModifySpawnHostProjectSettings {
+			reason = "project disabled debug spawn hosts"
+		}
+		if err := mgr.TerminateInstance(ctx, h, user, reason); err != nil {
 			return err
 		}
 
@@ -62,5 +70,34 @@ func (j *spawnHostTerminationJob) Run(ctx context.Context) {
 	if err := j.CloudHostModification.modifyHost(ctx, terminateCloudHost); err != nil {
 		j.AddError(err)
 		return
+	}
+
+	h := j.CloudHostModification.host
+	if h != nil && h.IsDebug {
+		fields := message.Fields{
+			"message":       "debug spawn host terminated",
+			"dashboard":     "debug spawn hosts",
+			"host_id":       h.Id,
+			"host_tag":      h.Tag,
+			"distro":        h.Distro.Id,
+			"user":          h.StartedBy,
+			"instance_type": h.InstanceType,
+			"source":        string(j.CloudHostModification.Source),
+			"created_at":    h.CreationTime,
+			"terminated_at": h.TerminationTime,
+		}
+		if !h.CreationTime.IsZero() && !h.TerminationTime.IsZero() {
+			fields["lifetime_secs"] = h.TerminationTime.Sub(h.CreationTime).Seconds()
+		}
+		if h.ProvisionOptions != nil {
+			fields["task_id"] = h.ProvisionOptions.TaskId
+			fields["setup_step_number"] = h.ProvisionOptions.SetupStepNumber
+		}
+		if h.ProvisionOptions != nil && h.ProvisionOptions.TaskId != "" {
+			if t, err := task.FindOneId(ctx, h.ProvisionOptions.TaskId); err == nil && t != nil {
+				fields["project"] = t.Project
+			}
+		}
+		grip.Info(ctx, fields)
 	}
 }

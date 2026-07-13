@@ -12,13 +12,11 @@ import (
 // BetaFeatures represents beta tests, which may be active or inactive.
 type BetaFeatures struct {
 	SpruceWaterfallEnabled bool `bson:"spruce_waterfall_enabled" json:"spruce_waterfall_enabled"`
-	ParsleyAIEnabled       bool `bson:"parsley_ai_enabled" json:"parsley_ai_enabled"`
 }
 
 // UIConfig holds relevant settings for the UI server.
 type UIConfig struct {
 	Url                       string       `bson:"url" json:"url" yaml:"url"`
-	HelpUrl                   string       `bson:"help_url" json:"help_url" yaml:"helpurl"`
 	UIv2Url                   string       `bson:"uiv2_url" json:"uiv2_url" yaml:"uiv2_url"`
 	ParsleyUrl                string       `bson:"parsley_url" json:"parsley_url" yaml:"parsley_url"`
 	HttpListenAddr            string       `bson:"http_listen_addr" json:"http_listen_addr" yaml:"httplistenaddr"`
@@ -44,7 +42,6 @@ func (c *UIConfig) Set(ctx context.Context) error {
 	return errors.Wrapf(setConfigSection(ctx, c.SectionId(), bson.M{
 		"$set": bson.M{
 			"url":                          c.Url,
-			"help_url":                     c.HelpUrl,
 			"uiv2_url":                     c.UIv2Url,
 			"parsley_url":                  c.ParsleyUrl,
 			"http_listen_addr":             c.HttpListenAddr,

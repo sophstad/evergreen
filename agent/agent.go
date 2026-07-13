@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	agentutil "github.com/evergreen-ci/evergreen/agent/util"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/model"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/thirdparty/docker"
 	"github.com/evergreen-ci/evergreen/util"
@@ -28,6 +31,7 @@ import (
 	"github.com/mongodb/grip/recovery"
 	"github.com/mongodb/grip/send"
 	"github.com/mongodb/jasper"
+	"github.com/mongodb/jasper/options"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -37,7 +41,10 @@ import (
 	"google.golang.org/grpc"
 )
 
-const hostAttribute = "evergreen.host"
+const (
+	hostAttribute = "evergreen.host"
+	ps            = "ps"
+)
 
 var (
 	shouldExitAttribute = fmt.Sprintf("%s.should_exit", hostAttribute)
@@ -70,11 +77,8 @@ type Options struct {
 	// Mode determines which mode the agent will run in.
 	Mode globals.Mode
 	// HostID and HostSecret only apply in host mode.
-	HostID     string
-	HostSecret string
-	// PodID and PodSecret only apply in pod mode.
-	PodID                  string
-	PodSecret              string
+	HostID                 string
+	HostSecret             string
 	StatusPort             int
 	LogPrefix              string
 	LogOutput              globals.LogOutputType
@@ -97,9 +101,6 @@ type Options struct {
 func (o *Options) AddLoggableInfo(msg message.Fields) message.Fields {
 	if o.HostID != "" {
 		msg["host_id"] = o.HostID
-	}
-	if o.PodID != "" {
-		msg["pod_id"] = o.PodID
 	}
 	return msg
 }
@@ -133,8 +134,6 @@ func New(ctx context.Context, opts Options, serverURL string) (*Agent, error) {
 	switch opts.Mode {
 	case globals.HostMode:
 		comm = client.NewHostCommunicator(serverURL, opts.HostID, opts.HostSecret)
-	case globals.PodMode:
-		comm = client.NewPodCommunicator(serverURL, opts.PodID, opts.PodSecret)
 	default:
 		return nil, errors.Errorf("unrecognized agent mode '%s'", opts.Mode)
 	}
@@ -153,7 +152,7 @@ func newWithCommunicator(ctx context.Context, opts Options, comm client.Communic
 		msg := opts.AddLoggableInfo(message.Fields{
 			"message": "error getting agent setup data",
 		})
-		grip.Alert(message.WrapError(err, msg))
+		grip.Alert(ctx, message.WrapError(err, msg))
 	}
 	if setupData != nil {
 		opts.SetupData = *setupData
@@ -192,7 +191,7 @@ func (a *Agent) Close(ctx context.Context) {
 			continue
 		}
 
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message": "calling closer",
 			"index":   idx,
 			"closer":  closer.name,
@@ -201,7 +200,7 @@ func (a *Agent) Close(ctx context.Context) {
 		catcher.Add(closer.closerFn(ctx))
 	}
 
-	grip.Error(message.WrapError(catcher.Resolve(), message.Fields{
+	grip.Error(ctx, message.WrapError(catcher.Resolve(), message.Fields{
 		"message": "calling agent closers",
 		"host_id": a.opts.HostID,
 	}))
@@ -244,14 +243,14 @@ func (a *Agent) loop(ctx context.Context) error {
 		if tc.logger != nil {
 			// If the logger from the task is still open and the agent is
 			// shutting down, close the logger to flush the remaining logs.
-			grip.Error(errors.Wrap(tc.logger.Close(), "closing logger"))
+			grip.Error(ctx, errors.Wrap(tc.logger.Close(), "closing logger"))
 		}
 	}()
 
 	for {
 		select {
 		case <-ctx.Done():
-			grip.Info("Agent loop canceled.")
+			grip.Info(ctx, "Agent loop canceled.")
 			return nil
 		case <-timer.C:
 			var previousTaskGroup string
@@ -293,7 +292,7 @@ func (a *Agent) loop(ctx context.Context) error {
 						sleepTime = estimatedDurationLeft / 2
 					}
 				}
-				grip.Debugf("Agent found no task to run, sleeping %s.", sleepTime)
+				grip.Debugf(ctx, "Agent found no task to run, sleeping %s.", sleepTime)
 				timer.Reset(sleepTime)
 				agentSleepInterval = agentSleepInterval * 2
 				if agentSleepInterval > globals.MaxAgentSleepInterval {
@@ -324,7 +323,7 @@ func (a *Agent) processNextTask(ctx context.Context, nt *apimodels.NextTaskRespo
 		span.RecordError(errors.New(msg), trace.WithAttributes(
 			attribute.Bool(shouldExitAttribute, nt.ShouldExit),
 		))
-		grip.Notice(msg)
+		grip.Notice(ctx, msg)
 		return processNextResponse{shouldExit: true}, nil
 	}
 	if nt.ShouldTeardownGroup {
@@ -337,7 +336,7 @@ func (a *Agent) processNextTask(ctx context.Context, nt *apimodels.NextTaskRespo
 			err = a.comm.DisableHost(ctx, a.opts.HostID, apimodels.DisableInfo{Reason: "Single task distro ran a task"})
 			if err != nil {
 				span.RecordError(err, trace.WithAttributes(attribute.String("task.id", tc.task.ID)), trace.WithStackTrace(true))
-				grip.Critical(message.WrapError(err, message.Fields{
+				grip.Critical(ctx, message.WrapError(err, message.Fields{
 					"message":    "error disabling host after task group completion",
 					"task":       tc.task.ID,
 					"host":       a.opts.HostID,
@@ -382,7 +381,7 @@ func (a *Agent) processNextTask(ctx context.Context, nt *apimodels.NextTaskRespo
 		msg := "task response missing secret"
 		span.SetStatus(codes.Error, msg)
 		span.RecordError(errors.New(msg), trace.WithAttributes(attribute.String("task.id", tc.task.ID)))
-		grip.Critical(message.Fields{
+		grip.Critical(ctx, message.Fields{
 			"message": msg,
 			"task":    tc.task.ID,
 		})
@@ -396,7 +395,7 @@ func (a *Agent) processNextTask(ctx context.Context, nt *apimodels.NextTaskRespo
 	if err != nil {
 		span.SetStatus(codes.Error, "error running task")
 		span.RecordError(err, trace.WithAttributes(attribute.String("task.id", tc.task.ID)), trace.WithStackTrace(true))
-		grip.Critical(message.WrapError(err, message.Fields{
+		grip.Critical(ctx, message.WrapError(err, message.Fields{
 			"message": "error running task",
 			"task":    tc.task.ID,
 		}))
@@ -435,7 +434,7 @@ func (a *Agent) finishPrevTask(ctx context.Context, nextTask *apimodels.NextTask
 		a.runTeardownGroupCommands(ctx, tc)
 	}
 	if tc.logger != nil {
-		grip.Error(errors.Wrap(tc.logger.Close(), "closing the previous logger producer"))
+		grip.Error(ctx, errors.Wrap(tc.logger.Close(), "closing the previous logger producer"))
 	}
 	a.jasper.Clear(ctx)
 	return shouldSetupGroup, taskDirectory
@@ -444,7 +443,10 @@ func (a *Agent) finishPrevTask(ctx context.Context, nextTask *apimodels.NextTask
 // setupTask does some initial setup that the task needs before running such as initializing the logger, loading the task config
 // data and setting the task directory.
 func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskContext, nt *apimodels.NextTaskResponse, shouldSetupGroup bool, taskDirectory string) (tc *taskContext, shouldExit bool, err error) {
+	setupCtx, span := a.tracer.Start(setupCtx, "setup-task")
+	defer span.End()
 	if initialTC == nil {
+		logger := client.NewSingleChannelLogHarness("default", a.defaultLogger)
 		tc = &taskContext{
 			task: client.TaskData{
 				ID:     nt.TaskId,
@@ -452,7 +454,7 @@ func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskCon
 			},
 			ranSetupGroup: !shouldSetupGroup,
 			oomTracker:    jasper.NewOOMTracker(),
-			logger:        client.NewSingleChannelLogHarness("default", a.defaultLogger),
+			logger:        logger,
 		}
 	} else {
 		tc = initialTC
@@ -462,7 +464,7 @@ func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskCon
 	// the task failed during initial task setup.
 	factory, ok := command.GetCommandFactory("setup.initial")
 	if !ok {
-		grip.Alert(errors.New("setup.initial command is not registered"))
+		grip.Alert(setupCtx, errors.New("setup.initial command is not registered"))
 	}
 	if factory != nil {
 		tc.setCurrentCommand(factory())
@@ -484,26 +486,35 @@ func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskCon
 		return a.handleSetupError(setupCtx, tc, errors.Wrap(err, "making task config"))
 	}
 	tc.taskConfig = taskConfig
+	tc.s3Usage.Init()
+	tc.taskConfig.S3Usage = &tc.s3Usage
+	if tc.taskConfig.BackgroundCommandFailureEnabled {
+		// Buffered to bound accumulation between drain cycles after each foreground command.
+		tc.backgroundFailures = make(chan error, 10)
+		tc.taskConfig.BackgroundFailures = tc.backgroundFailures
+	}
 
 	if err := a.startLogging(agentCtx, tc); err != nil {
 		tc.logger = client.NewSingleChannelLogHarness("agent.error", a.defaultLogger)
 		return a.handleSetupError(setupCtx, tc, errors.Wrap(err, "setting up logger producer"))
 	}
 
+	tc.resourceMonitor = newResourceMonitor(tc.logger.Execution())
+
 	var taskGroupDirMissing bool
 	if tc.ranSetupGroup {
 		if _, err := os.Stat(taskDirectory); os.IsNotExist(err) {
 			taskGroupDirMissing = true
-			tc.logger.Execution().Noticef("Task directory '%s' was already created by a previous task group task, but is missing for this task group task (possibly because it was deleted by a command in a previous task group task), re-creating it.", taskDirectory)
+			tc.logger.Execution().Noticef(setupCtx, "Task directory '%s' was already created by a previous task group task, but is missing for this task group task (possibly because it was deleted by a command in a previous task group task), re-creating it.", taskDirectory)
 		}
 		tmpDir := filepath.Join(taskDirectory, "tmp")
 		if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 			taskGroupDirMissing = true
-			tc.logger.Execution().Noticef("Task temporary directory '%s' was already created by a previous task group task, but is missing for this task group task (possibly because it was deleted by a command in a previous task group task), re-creating it.", tmpDir)
+			tc.logger.Execution().Noticef(setupCtx, "Task temporary directory '%s' was already created by a previous task group task, but is missing for this task group task (possibly because it was deleted by a command in a previous task group task), re-creating it.", tmpDir)
 		}
 	}
 	if !tc.ranSetupGroup || taskGroupDirMissing {
-		taskDirectory, err = a.createTaskDirectory(tc, taskDirectory)
+		taskDirectory, err = a.createTaskDirectory(setupCtx, tc, taskDirectory)
 		if err != nil {
 			return a.handleSetupError(setupCtx, tc, errors.Wrap(err, "creating task directory"))
 		}
@@ -524,6 +535,7 @@ func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskCon
 			Redacted:           tc.taskConfig.Redacted,
 			InternalRedactions: tc.taskConfig.InternalRedactions,
 		},
+		S3Usage: tc.taskConfig.S3Usage,
 	}
 	tc.taskConfig.TaskOutputDir = taskoutput.NewDirectory(opts)
 	if err := tc.taskConfig.TaskOutputDir.Setup(); err != nil {
@@ -535,33 +547,34 @@ func (a *Agent) setupTask(agentCtx, setupCtx context.Context, initialTC *taskCon
 		tc.setCurrentCommand(factory())
 	}
 
-	tc.logger.Task().Infof("Task logger initialized (agent version '%s' from Evergreen build revision '%s').", evergreen.AgentVersion, evergreen.BuildRevision)
-	tc.logger.Execution().Info("Execution logger initialized.")
-	tc.logger.System().Info("System logger initialized.")
+	tc.logger.Task().Infof(setupCtx, "Task logger initialized (agent version '%s' from Evergreen build revision '%s').", evergreen.AgentVersion, evergreen.BuildRevision)
+	tc.logger.Execution().Info(setupCtx, "Execution logger initialized.")
+	tc.logger.System().Info(setupCtx, "System logger initialized.")
 
-	tc.logger.Execution().Error(errors.Wrap(tc.getDeviceNames(setupCtx), "getting device names for disks"))
+	tc.logger.Execution().Error(setupCtx, errors.Wrap(tc.getDeviceNames(setupCtx), "getting device names for disks"))
 
 	if err := setupCtx.Err(); err != nil {
 		return a.handleSetupError(setupCtx, tc, errors.Wrap(err, "making task config"))
 	}
 
 	hostname, err := os.Hostname()
-	tc.logger.Execution().Info(errors.Wrap(err, "getting hostname"))
+	tc.logger.Execution().Info(setupCtx, errors.Wrap(err, "getting hostname"))
 	if hostname != "" {
-		tc.logger.Execution().Infof("Hostname is '%s'.", hostname)
+		tc.logger.Execution().Infof(setupCtx, "Hostname is '%s'.", hostname)
 	}
-	tc.logger.Task().Infof("Starting task '%s', execution %d.", tc.taskConfig.Task.Id, tc.taskConfig.Task.Execution)
+	tc.logger.Task().Infof(setupCtx, "Starting task '%s', execution %d.", tc.taskConfig.Task.Id, tc.taskConfig.Task.Execution)
 
 	return tc, shouldExit, nil
 }
 
 func (a *Agent) handleSetupError(ctx context.Context, tc *taskContext, err error) (*taskContext, bool, error) {
 	catcher := grip.NewBasicCatcher()
-	grip.Error(err)
+	grip.Error(ctx, err)
 	catcher.Wrap(err, "handling setup error")
-	tc.logger.Execution().Error(err)
-	grip.Infof("Task complete: '%s'.", tc.task.ID)
-	shouldExit, err := a.handleTaskResponse(ctx, tc, evergreen.TaskSystemFailed, err.Error())
+	tc.logger.Execution().Error(ctx, err)
+	grip.Infof(ctx, "Task complete: '%s'.", tc.task.ID)
+	detail := a.endTaskResponse(ctx, tc, evergreen.TaskSystemFailed, err.Error())
+	shouldExit, err := a.handleTaskResponse(ctx, tc, detail)
 	catcher.Wrap(err, "handling task response")
 	return tc, shouldExit, catcher.Resolve()
 }
@@ -602,49 +615,44 @@ type taskInfo struct {
 // fetchTaskInfo gets the Project, Task, ExpansionAndVars, and DisplayTaskInfo. It stores them inside
 // a TaskConfigOptions struct- it does not set any of its other fields.
 func (a *Agent) fetchTaskInfo(ctx context.Context, tc *taskContext) (*taskInfo, error) {
+	ctx, span := a.tracer.Start(ctx, "fetch-task-info")
+	defer span.End()
+
 	opts := &taskInfo{}
 	var err error
+
+	ctx, getProjectSpan := a.tracer.Start(ctx, "get-project")
 	opts.project, err = a.comm.GetProject(ctx, tc.task)
+	getProjectSpan.End()
 	if err != nil {
 		return nil, errors.Wrap(err, "getting project")
 	}
 
+	ctx, getTaskSpan := a.tracer.Start(ctx, "get-task")
 	opts.task, err = a.comm.GetTask(ctx, tc.task)
+	getTaskSpan.End()
 	if err != nil {
 		return nil, errors.Wrap(err, "getting task")
 	}
 
+	// Reset S3Usage for this execution to avoid accumulating from previous restarts
+	opts.task.S3Usage = s3usage.S3Usage{}
+
+	ctx, getExpansionsSpan := a.tracer.Start(ctx, "get-expansions-and-vars")
 	opts.expansionsAndVars, err = a.comm.GetExpansionsAndVars(ctx, tc.task)
+	getExpansionsSpan.End()
 	if err != nil {
 		return nil, errors.Wrap(err, "getting expansions and variables")
 	}
 
+	ctx, getDisplayTaskSpan := a.tracer.Start(ctx, "get-display-task-info")
 	opts.displayTaskInfo, err = a.comm.GetDisplayTaskInfoFromExecution(ctx, tc.task)
+	getDisplayTaskSpan.End()
 	if err != nil {
 		return nil, errors.Wrap(err, "getting task's display task info")
 	}
 
-	// GetExpansionsAndVars does not include build variant expansions or project
-	// parameters, so load them from the project.
-	for _, bv := range opts.project.BuildVariants {
-		if bv.Name == opts.task.BuildVariant {
-			opts.expansionsAndVars.Expansions.Update(bv.Expansions)
-			break
-		}
-	}
-	opts.expansionsAndVars.Expansions.Update(opts.expansionsAndVars.Vars)
-	for _, param := range opts.project.Parameters {
-		// If the key doesn't exist, the value will default to "" anyway; this
-		// prevents an un-specified project parameter from overwriting
-		// lower-priority expansions.
-		if param.Value != "" {
-			opts.expansionsAndVars.Expansions.Put(param.Key, param.Value)
-		}
-	}
-	// Overwrite any empty values here since these parameters were explicitly
-	// user-specified.
-	opts.expansionsAndVars.Expansions.Update(opts.expansionsAndVars.Parameters)
-
+	agentutil.AddVariantAndParameterExpansions(opts.expansionsAndVars, opts.project, opts.task.BuildVariant)
 	return opts, nil
 }
 
@@ -654,14 +662,14 @@ func (a *Agent) startLogging(ctx context.Context, tc *taskContext) error {
 	// If the agent is logging to a file, this will re-initialize the sender to
 	// log to a new file for the new task.
 	sender, err := a.GetSender(ctx, a.opts.LogOutput, a.opts.LogPrefix, tc.taskConfig.Task.Id, tc.taskConfig.Task.Execution)
-	grip.Error(errors.Wrap(err, "getting sender"))
-	grip.Error(errors.Wrap(grip.SetSender(sender), "setting sender"))
+	grip.Error(ctx, errors.Wrap(err, "getting sender"))
+	grip.Error(ctx, errors.Wrap(grip.SetSender(sender), "setting sender"))
 
 	if tc.logger != nil {
-		grip.Error(errors.Wrap(tc.logger.Close(), "closing the logger producer"))
+		grip.Error(ctx, errors.Wrap(tc.logger.Close(), "closing the logger producer"))
 	}
 	taskLogDir := filepath.Join(a.opts.WorkingDirectory, taskLogDirectory)
-	grip.Error(errors.Wrapf(os.RemoveAll(taskLogDir), "removing task log directory '%s'", taskLogDir))
+	grip.Error(ctx, errors.Wrapf(os.RemoveAll(taskLogDir), "removing task log directory '%s'", taskLogDir))
 	tc.logger, err = a.makeLoggerProducer(ctx, tc, "")
 
 	return errors.Wrap(err, "making the logger producer")
@@ -680,7 +688,7 @@ func (a *Agent) runTask(ctx context.Context, tcInput *taskContext, nt *apimodels
 		if pErr == nil {
 			return
 		}
-		err = a.logPanic(tc, pErr, err, op)
+		err = a.logPanic(ctx, tc, pErr, err, op)
 	}()
 
 	// Setup occurs before the task is actually running, so it's not abortable. If setup is taking
@@ -693,9 +701,22 @@ func (a *Agent) runTask(ctx context.Context, tcInput *taskContext, nt *apimodels
 		return tc, shouldExit, errors.Wrap(err, "setting up task")
 	}
 
-	defer a.killProcs(ctx, tc, false, "task is finished")
+	defer func() {
+		if err := a.killProcs(ctx, tc, false, "task is finished"); err != nil {
+			// If the task is finished but the agent can't clean up all the
+			// processes/Docker artifacts for the next task, disable the host.
+			// Otherwise, the next task will start with lingering state from the
+			// prior task.
+			tc.logger.Execution().Criticalf(ctx, "Unable to clean up processes/Docker artifacts for finished task, disabling this host. Error: %s", err.Error())
+			if disableErr := a.comm.DisableHost(ctx, a.opts.HostID, apimodels.DisableInfo{
+				Reason: "could not clean up processes/Docker artifacts after task is finished",
+			}); disableErr != nil {
+				tc.logger.Execution().Criticalf(ctx, "Unable to disable unhealthy host that has leftover processes/Docker artifacts. Error: %s", disableErr.Error())
+			}
+		}
+	}()
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message": "running task",
 		"task_id": tc.task.ID,
 	})
@@ -706,17 +727,23 @@ func (a *Agent) runTask(ctx context.Context, tcInput *taskContext, nt *apimodels
 	tc.traceID = span.SpanContext().TraceID().String()
 
 	shutdown, err := a.startMetrics(tskCtx, tc.taskConfig)
-	grip.Error(errors.Wrap(err, "starting metrics collection"))
+	grip.Error(ctx, errors.Wrap(err, "starting metrics collection"))
 	if shutdown != nil {
 		defer shutdown(ctx)
 	}
+
+	go func() {
+		defer recovery.LogStackTraceAndContinue("resource monitor")
+		tc.resourceMonitor.start(tskCtx)
+	}()
 
 	tc.setHeartbeatTimeout(heartbeatTimeoutOptions{})
 	preAndMainCtx, preAndMainCancel := context.WithCancel(tskCtx)
 	go a.startHeartbeat(tskCtx, preAndMainCancel, tc)
 
 	status := a.runPreAndMain(preAndMainCtx, tc)
-	shouldExit, err = a.handleTaskResponse(tskCtx, tc, status, "")
+	detail := a.endTaskResponse(tskCtx, tc, status, "")
+	shouldExit, err = a.handleTaskResponse(tskCtx, tc, detail)
 	return tc, shouldExit, err
 }
 
@@ -731,12 +758,12 @@ func (a *Agent) runPreAndMain(ctx context.Context, tc *taskContext) (status stri
 		if pErr == nil {
 			return
 		}
-		_ = a.logPanic(tc, pErr, nil, op)
+		_ = a.logPanic(ctx, tc, pErr, nil, op)
 		status = evergreen.TaskSystemFailed
 	}()
 
 	if ctx.Err() != nil {
-		tc.logger.Execution().Infof("Stopping task execution during setup: %s", ctx.Err())
+		tc.logger.Execution().Infof(ctx, "Stopping task execution during setup: %s", ctx.Err())
 		return evergreen.TaskSystemFailed
 	}
 
@@ -756,25 +783,30 @@ func (a *Agent) runPreAndMain(ctx context.Context, tc *taskContext) (status stri
 	}
 	go a.startTimeoutWatcher(timeoutWatcherCtx, execTimeoutCancel, timeoutOpts)
 
-	tc.logger.Execution().Infof("Setting heartbeat timeout to type '%s'.", globals.ExecTimeout)
+	tc.logger.Execution().Infof(ctx, "Setting heartbeat timeout to type '%s'.", globals.ExecTimeout)
 	tc.setHeartbeatTimeout(heartbeatTimeoutOptions{
 		startAt:    time.Now(),
 		getTimeout: tc.getExecTimeout,
 		kind:       globals.ExecTimeout,
 	})
 	defer func() {
-		tc.logger.Execution().Infof("Resetting heartbeat timeout from type '%s' back to default.", globals.ExecTimeout)
+		tc.logger.Execution().Infof(ctx, "Resetting heartbeat timeout from type '%s' back to default.", globals.ExecTimeout)
 		tc.setHeartbeatTimeout(heartbeatTimeoutOptions{})
 	}()
 
-	// set up the system stats collector
+	// Set up the system stats collector.
+	statsCmds := []string{"uptime", "df -h"}
+
+	// Add ps command if configured in YAML or expansion (for backward compatibility) when default ps logging is not disabled.
+	if psCmd := tc.getPSCommand(); psCmd != "" {
+		statsCmds = append(statsCmds, psCmd)
+	}
+
 	statsCollector := NewSimpleStatsCollector(
 		tc.logger,
 		a.jasper,
 		globals.DefaultStatsInterval,
-		"uptime",
-		"df -h",
-		"${ps|ps}",
+		statsCmds...,
 	)
 	// Running the `df` command on Unix systems displays inode
 	// statistics without the `-i` flag by default. However, we need
@@ -797,31 +829,42 @@ func (a *Agent) runPreAndMain(ctx context.Context, tc *taskContext) (status stri
 	statsCollector.logStats(execTimeoutCtx, tc.taskConfig.Expansions)
 
 	if execTimeoutCtx.Err() != nil {
-		tc.logger.Execution().Infof("Stopping task execution after setup: %s", execTimeoutCtx.Err())
+		tc.logger.Execution().Infof(ctx, "Stopping task execution after setup: %s", execTimeoutCtx.Err())
 		return evergreen.TaskSystemFailed
 	}
 
 	// notify API server that the task has been started.
-	tc.logger.Execution().Info("Reporting task started.")
+	tc.logger.Execution().Info(ctx, "Reporting task started.")
 	if err := a.comm.StartTask(execTimeoutCtx, tc.task, tc.traceID, tc.diskDevices); err != nil {
-		tc.logger.Execution().Error(errors.Wrap(err, "marking task started"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(err, "marking task started"))
 		return evergreen.TaskSystemFailed
 	}
 
-	a.killProcs(execTimeoutCtx, tc, false, "task is starting")
+	_ = a.killProcs(execTimeoutCtx, tc, false, "task is starting")
 
 	if err := a.runPreTaskCommands(execTimeoutCtx, tc); err != nil {
 		return evergreen.TaskFailed
 	}
 
 	if tc.oomTrackerEnabled(a.opts.CloudProvider) {
-		tc.logger.Execution().Info("OOM tracker clearing system messages.")
+		tc.logger.Execution().Info(ctx, "OOM tracker clearing system messages.")
 		if err := tc.oomTracker.Clear(execTimeoutCtx); err != nil {
-			tc.logger.Execution().Error(errors.Wrap(err, "clearing OOM tracker system messages"))
+			tc.logger.Execution().Error(ctx, errors.Wrap(err, "clearing OOM tracker system messages"))
 		}
 	}
 
 	if err := a.runTaskCommands(execTimeoutCtx, tc); err != nil {
+		return evergreen.TaskFailed
+	}
+
+	count, msgs := drainBackgroundFailures(ctx, tc.backgroundFailures, tc.logger.Task())
+	if count > 0 {
+		span := trace.SpanFromContext(ctx)
+		span.SetAttributes(
+			attribute.Bool(backgroundCommandFailureAttribute, true),
+			attribute.Int(backgroundCommandFailureCountAttribute, count),
+			attribute.StringSlice(backgroundCommandFailuresAttribute, msgs),
+		)
 		return evergreen.TaskFailed
 	}
 
@@ -835,7 +878,7 @@ func (a *Agent) runPreTaskCommands(ctx context.Context, tc *taskContext) error {
 	if !tc.ranSetupGroup {
 		setupGroup, err := tc.getSetupGroup()
 		if err != nil {
-			tc.logger.Execution().Error(errors.Wrap(err, "fetching setup-group commands"))
+			tc.logger.Execution().Error(ctx, errors.Wrap(err, "fetching setup-group commands"))
 			return nil
 		}
 
@@ -850,7 +893,7 @@ func (a *Agent) runPreTaskCommands(ctx context.Context, tc *taskContext) error {
 
 	pre, err := tc.getPre()
 	if err != nil {
-		tc.logger.Execution().Error(errors.Wrap(err, "fetching pre-task commands"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(err, "fetching pre-task commands"))
 		return nil
 	}
 
@@ -873,13 +916,13 @@ func (a *Agent) runTaskCommands(ctx context.Context, tc *taskContext) error {
 
 	if task == nil {
 		err := errors.Errorf("unable to find task '%s' in project '%s'", tc.taskConfig.Task.DisplayName, tc.taskConfig.Task.Project)
-		tc.logger.Execution().Error(err)
+		tc.logger.Execution().Error(ctx, err)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
 		err = errors.Wrap(err, "canceled before running task commands")
-		tc.logger.Execution().Error(err)
+		tc.logger.Execution().Error(ctx, err)
 		return err
 	}
 
@@ -899,7 +942,7 @@ func (a *Agent) runTaskCommands(ctx context.Context, tc *taskContext) error {
 func (a *Agent) runTaskTimeoutCommands(ctx context.Context, tc *taskContext) {
 	timeout, err := tc.getTimeout()
 	if err != nil {
-		tc.logger.Execution().Error(errors.Wrap(err, "fetching task-timeout commands"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(err, "fetching task-timeout commands"))
 		return
 	}
 	if timeout.commands != nil {
@@ -907,6 +950,109 @@ func (a *Agent) runTaskTimeoutCommands(ctx context.Context, tc *taskContext) {
 		// already logged the error, and the timeout commands cannot cause the
 		// task to fail since the task has already timed out.
 		_ = a.runCommandsInBlock(ctx, tc, *timeout)
+	}
+}
+
+// runDefaultTimeoutHandler extracts and logs PIDs of running processes when a task times out.
+func (a *Agent) runDefaultTimeoutHandler(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail) {
+	tc.logger.Execution().Info(ctx, "Running default timeout handler to collect process information.")
+
+	var currentCmdPID int
+	var currentCmdName string
+	if currentCmd := tc.getCurrentCommand(); currentCmd != nil {
+		currentCmdName = currentCmd.FullDisplayName()
+		tc.logger.Execution().Infof(ctx, "Current command at timeout: %s", currentCmdName)
+	}
+
+	var runningPIDs []int
+	var processDetails []string
+
+	if a.jasper == nil {
+		return
+	}
+	procs, err := a.jasper.List(ctx, options.Running)
+	if err != nil {
+		tc.logger.Execution().Error(ctx, errors.Wrap(err, "listing running processes during timeout"))
+		return
+	}
+	tc.logger.Execution().Infof(ctx, "Found %d running processes managed by Jasper", len(procs))
+	for _, proc := range procs {
+		info := proc.Info(ctx)
+		if info.PID > 0 {
+			runningPIDs = append(runningPIDs, info.PID)
+
+			detail := fmt.Sprintf("PID %d: ID=%s, Running=%v",
+				info.PID, info.ID, info.IsRunning)
+			if !info.StartAt.IsZero() {
+				detail += fmt.Sprintf(", StartTime=%s", info.StartAt.Format(time.RFC3339))
+				detail += fmt.Sprintf(", RunningFor=%v", time.Since(info.StartAt))
+			}
+			if info.Complete {
+				detail += fmt.Sprintf(", Complete=true, ExitCode=%d", info.ExitCode)
+			}
+			if info.Options.WorkingDirectory != "" {
+				detail += fmt.Sprintf(", WorkingDir=%s", info.Options.WorkingDirectory)
+			}
+			if tags := proc.GetTags(); len(tags) > 0 {
+				detail += fmt.Sprintf(", Tags=%v", tags)
+			}
+			if len(info.Options.Args) > 0 {
+				detail += fmt.Sprintf(", Command Args=%v", info.Options.Args)
+			}
+
+			processDetails = append(processDetails, detail)
+
+			if currentCmdName != "" && info.IsRunning {
+				for _, tag := range proc.GetTags() {
+					if tag == currentCmdName {
+						currentCmdPID = info.PID
+						break
+					}
+				}
+			}
+		}
+	}
+	childPIDs := getDescendantPIDs(ctx, runningPIDs, tc.logger, a.tracer)
+
+	if len(runningPIDs) > 0 {
+		tc.logger.Execution().Infof(ctx, "Process PIDs at timeout: %v", runningPIDs)
+		tc.logger.Execution().Info(ctx, "Detailed process information:")
+		for _, detail := range processDetails {
+			tc.logger.Execution().Info(ctx, detail)
+		}
+
+		if currentCmdPID > 0 {
+			tc.logger.Execution().Infof(ctx, "Suspected current command PID: %d", currentCmdPID)
+		}
+
+		if len(childPIDs) > 0 {
+			tc.logger.Execution().Infof(ctx, "Descendant child PIDs: %v", childPIDs)
+		}
+
+		tc.logger.Task().Infof(ctx, "Default timeout handler collected %d process PIDs for debugging.", len(runningPIDs))
+	} else {
+		tc.logger.Execution().Info(ctx, "No running processes found during timeout")
+	}
+	if detail.TimeoutProcessInfo == nil {
+		detail.TimeoutProcessInfo = &apimodels.TimeoutProcessInfo{
+			CurrentCommand:    currentCmdName,
+			CurrentCommandPID: currentCmdPID,
+			RunningPIDs:       runningPIDs,
+			ChildPIDs:         childPIDs,
+			Timestamp:         time.Now(),
+		}
+		pidStrings := make([]string, len(runningPIDs))
+		for i, pid := range runningPIDs {
+			pidStrings[i] = strconv.Itoa(pid)
+		}
+		delimitedPids := strings.Join(pidStrings, ",")
+		childPIDStrings := make([]string, len(childPIDs))
+		for i, pid := range childPIDs {
+			childPIDStrings[i] = strconv.Itoa(pid)
+		}
+		tc.taskConfig.NewExpansions.Put("timed_out_command_pid", strconv.Itoa(currentCmdPID))
+		tc.taskConfig.NewExpansions.Put("timed_out_pids", delimitedPids)
+		tc.taskConfig.NewExpansions.Put("timed_out_child_pids", strings.Join(childPIDStrings, ","))
 	}
 }
 
@@ -921,12 +1067,14 @@ func (a *Agent) runPostOrTeardownTaskCommands(ctx context.Context, tc *taskConte
 	ctx, span := a.tracer.Start(ctx, "post-task-commands")
 	defer span.End()
 
-	a.killProcs(ctx, tc, false, "post-task or teardown-task commands are starting")
-	defer a.killProcs(ctx, tc, false, "post-task or teardown-task commands are finished")
+	_ = a.killProcs(ctx, tc, false, "post-task or teardown-task commands are starting")
+	defer func() {
+		_ = a.killProcs(ctx, tc, false, "post-task or teardown-task commands are finished")
+	}()
 
 	post, err := tc.getPost()
 	if err != nil {
-		tc.logger.Execution().Error(errors.Wrap(err, "fetching post-task or teardown-task commands"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(err, "fetching post-task or teardown-task commands"))
 		return nil
 	}
 
@@ -947,7 +1095,9 @@ func (a *Agent) runTeardownGroupCommands(ctx context.Context, tc *taskContext) {
 	// Only killProcs if tc.taskConfig is not nil. This avoids passing an
 	// empty working directory to killProcs, and is okay because this
 	// killProcs is only for the processes run in runTeardownGroupCommands.
-	defer a.killProcs(ctx, tc, true, "teardown group commands are finished")
+	defer func() {
+		_ = a.killProcs(ctx, tc, true, "teardown group commands are finished")
+	}()
 
 	defer func() {
 		if tc.logger != nil {
@@ -956,21 +1106,23 @@ func (a *Agent) runTeardownGroupCommands(ctx context.Context, tc *taskContext) {
 			flushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			_ = tc.logger.Flush(flushCtx)
 			cancel()
-			grip.Error(tc.logger.Close())
+			grip.Error(ctx, tc.logger.Close())
 		}
+		// Snapshot avoids racing with senders still shutting down.
+		grip.Error(ctx, errors.Wrap(a.comm.ReportS3Usage(ctx, tc.task, tc.s3Usage.Snapshot(), true), "reporting S3 usage"))
 	}()
-	defer a.clearGlobalFiles(tc)
+	defer a.clearGlobalFiles(ctx, tc)
 
 	teardownGroup, err := tc.getTeardownGroup()
 	if err != nil {
 		if tc.logger != nil {
-			tc.logger.Execution().Error(errors.Wrap(err, "fetching teardown-group commands"))
+			tc.logger.Execution().Error(ctx, errors.Wrap(err, "fetching teardown-group commands"))
 		}
 		return
 	}
 
 	if teardownGroup.commands != nil {
-		a.killProcs(ctx, tc, true, "teardown group commands are starting")
+		_ = a.killProcs(ctx, tc, true, "teardown group commands are starting")
 		ctx = utility.ContextWithAttributes(ctx, tc.taskConfig.TaskAttributes())
 		ctx, span := a.tracer.Start(ctx, "teardown_group")
 		defer span.End()
@@ -985,13 +1137,13 @@ func (a *Agent) runTeardownGroupCommands(ctx context.Context, tc *taskContext) {
 	}
 }
 
-func (a *Agent) handleTaskResponse(ctx context.Context, tc *taskContext, status string, systemFailureDescription string) (bool, error) {
-	resp, err := a.finishTask(ctx, tc, status, systemFailureDescription)
+func (a *Agent) handleTaskResponse(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail) (bool, error) {
+	resp, err := a.finishTask(ctx, tc, detail)
 	if err != nil {
 		return false, errors.Wrap(err, "marking task complete")
 	}
 	if resp == nil {
-		grip.Error("Response was nil, indicating a 409 or an empty response from the API server.")
+		grip.Error(ctx, "Response was nil, indicating a 409 or an empty response from the API server.")
 		return false, nil
 	}
 	if resp.ShouldExit {
@@ -1000,52 +1152,62 @@ func (a *Agent) handleTaskResponse(ctx context.Context, tc *taskContext, status 
 	return false, errors.WithStack(err)
 }
 
-func (a *Agent) handleTimeoutAndOOM(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail, status string) {
-	if tc.hadTimedOut() && ctx.Err() == nil {
-		status = evergreen.TaskFailed
+func (a *Agent) handleTimeoutAndOOM(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail) {
+	if detail.TimedOut && ctx.Err() == nil {
 		a.runTaskTimeoutCommands(ctx, tc)
 	}
 
-	if tc.oomTrackerEnabled(a.opts.CloudProvider) && status == evergreen.TaskFailed {
+	// The OOM check follows the final reported status, so if a user endpoint
+	// overrode a failed task to succeeded, the check is intentionally skipped
+	// unless the task timed out.
+	if tc.oomTrackerEnabled(a.opts.CloudProvider) && (detail.Status == evergreen.TaskFailed || detail.TimedOut) {
 		startTime := time.Now()
 		oomCtx, oomCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer oomCancel()
-		tc.logger.Execution().Error(errors.Wrap(tc.oomTracker.Check(oomCtx), "checking for OOM killed processes"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(tc.oomTracker.Check(oomCtx), "checking for OOM killed processes"))
 		if lines, pids := tc.oomTracker.Report(); len(lines) > 0 {
-			tc.logger.Execution().Debugf("Found an OOM kill (in %.3f seconds).", time.Since(startTime).Seconds())
-			tc.logger.Execution().Debug(strings.Join(lines, "\n"))
+			tc.logger.Execution().Debugf(ctx, "Found an OOM kill (in %.3f seconds).", time.Since(startTime).Seconds())
+			tc.logger.Execution().Debug(ctx, strings.Join(lines, "\n"))
 			detail.OOMTracker = &apimodels.OOMTrackerInfo{
 				Detected: true,
 				Pids:     pids,
 			}
 		} else {
-			tc.logger.Execution().Debugf("Found no OOM kill (in %.3f seconds).", time.Since(startTime).Seconds())
+			tc.logger.Execution().Debugf(ctx, "Found no OOM kill (in %.3f seconds).", time.Since(startTime).Seconds())
 		}
+	}
+
+	if rcInfo := tc.resourceMonitor.report(); rcInfo != nil {
+		tc.logger.Execution().Infof(ctx, "Resource constraint detected: CPU constrained=%t (peak %.1f%%), memory constrained=%t (peak %.1f%%).",
+			rcInfo.CPUConstrained, rcInfo.PeakCPUPercent, rcInfo.MemoryConstrained, rcInfo.PeakMemoryPercent)
+		detail.ResourceConstraints = rcInfo
 	}
 }
 
 // finishTask finishes up a running task. It runs any post-task command blocks
 // such as timeout and post, then sends the final end task response.
-func (a *Agent) finishTask(ctx context.Context, tc *taskContext, status string, systemFailureDescription string) (*apimodels.EndTaskResponse, error) {
-	detail := a.endTaskResponse(ctx, tc, status, systemFailureDescription)
+func (a *Agent) finishTask(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail) (*apimodels.EndTaskResponse, error) {
+	if detail.TimedOut {
+		a.runDefaultTimeoutHandler(ctx, tc, detail)
+	}
 	switch detail.Status {
 	case evergreen.TaskSucceeded:
-		a.handleTimeoutAndOOM(ctx, tc, detail, status)
+		a.handleTimeoutAndOOM(ctx, tc, detail)
 
-		tc.logger.Task().Info("Task completed - SUCCESS.")
+		tc.logger.Task().Info(ctx, "Task completed - SUCCESS.")
 		if err := a.runPostOrTeardownTaskCommands(ctx, tc); err != nil {
-			tc.logger.Task().Info("Post task completed - FAILURE. Overall task status changed to FAILED.")
+			tc.logger.Task().Info(ctx, "Post task completed - FAILURE. Overall task status changed to FAILED.")
 			setEndTaskFailureDetails(tc, detail, evergreen.TaskFailed, "", "", nil)
 		}
 
 		detail.PostErrored = tc.getPostErrored()
 		detail.OtherFailingCommands = tc.getOtherFailingCommands()
-		updateEndTaskFailureDetailsForTestResults(tc, detail)
+		updateEndTaskFailureDetailsForTestResults(ctx, tc, detail)
 
 	case evergreen.TaskFailed:
-		a.handleTimeoutAndOOM(ctx, tc, detail, status)
+		a.handleTimeoutAndOOM(ctx, tc, detail)
 
-		tc.logger.Task().Info("Task completed - FAILURE.")
+		tc.logger.Task().Info(ctx, "Task completed - FAILURE.")
 		// If the post commands error, ignore the error. runCommandsInBlock
 		// already logged the error, and the post commands cannot cause the
 		// task to fail since the task already failed.
@@ -1062,14 +1224,14 @@ func (a *Agent) finishTask(ctx context.Context, tc *taskContext, status string, 
 		// this is a distinct case from a task failing and intentionally setting
 		// its failure type to system failed, as that is within a task's
 		// control.
-		tc.logger.Task().Error("Task encountered unexpected task lifecycle system failure.")
+		tc.logger.Task().Error(ctx, "Task encountered unexpected task lifecycle system failure.")
 		detail.Status = evergreen.TaskFailed
 		detail.Type = evergreen.CommandTypeSystem
 		if detail.Description == "" {
 			detail.Description = "task system-failed for unknown reasons"
 		}
 	default:
-		tc.logger.Task().Errorf("Programmatic error: ending task with invalid task status '%s', defaulting to system failure.", detail.Status)
+		tc.logger.Task().Errorf(ctx, "Programmatic error: ending task with invalid task status '%s', defaulting to system failure.", detail.Status)
 		detail.Status = evergreen.TaskFailed
 		detail.Type = evergreen.CommandTypeSystem
 		if detail.Description == "" {
@@ -1078,7 +1240,7 @@ func (a *Agent) finishTask(ctx context.Context, tc *taskContext, status string, 
 	}
 
 	if addedMetadataTagResp := tc.getAddMetadataTagResponse(); addedMetadataTagResp != nil {
-		tc.logger.Task().Infof("Appending extra failure metadata tags set with HTTP endpoint.")
+		tc.logger.Task().Infof(ctx, "Appending extra failure metadata tags set with HTTP endpoint.")
 		detail.FailureMetadataTags = utility.UniqueStrings(append(detail.FailureMetadataTags, addedMetadataTagResp.AddFailureMetadataTags...))
 	}
 
@@ -1086,65 +1248,88 @@ func (a *Agent) finishTask(ctx context.Context, tc *taskContext, status string, 
 	// was setup, regardless of the task status.
 	if tc.taskConfig != nil && tc.taskConfig.TaskOutputDir != nil {
 		toCtx, span := a.tracer.Start(ctx, "task-output-ingestion")
-		tc.logger.Execution().Error(errors.Wrap(tc.taskConfig.TaskOutputDir.Run(toCtx), "ingesting task output"))
+		tc.logger.Execution().Error(ctx, errors.Wrap(tc.taskConfig.TaskOutputDir.Run(toCtx), "ingesting task output"))
 		span.End()
 	}
 
-	a.killProcs(ctx, tc, false, "task is ending")
+	_ = a.killProcs(ctx, tc, false, "task is ending")
 
 	if tc.logger != nil {
-		tc.logger.Execution().Infof("Sending final task status: '%s'.", detail.Status)
+		tc.logger.Execution().Infof(ctx, "Sending final task status: '%s'.", detail.Status)
 		flushCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
-		grip.Error(errors.Wrap(tc.logger.Flush(flushCtx), "flushing logs"))
+		grip.Error(ctx, errors.Wrap(tc.logger.Flush(flushCtx), "flushing logs"))
 	}
 
-	grip.Infof("Sending final task status: '%s'.", detail.Status)
+	grip.Infof(ctx, "Sending final task status: '%s'.", detail.Status)
 	resp, err := a.comm.EndTask(ctx, detail, tc.task)
 	if err != nil {
 		return nil, errors.Wrap(err, "marking task complete")
 	}
-	grip.Infof("Successfully sent final task status: '%s'.", detail.Status)
+	grip.Infof(ctx, "Successfully sent final task status: '%s'.", detail.Status)
 
 	if detail.Status != evergreen.TaskSucceeded {
 		// In end task, the server may modify the task's TaskOutputInfo to
 		// specify a failed bucket config for task and test logs.
 		// If so, we need to rotate the logger to pick up the new bucket.
 		if err := a.rotateLoggerToFailedBucket(ctx, tc); err != nil {
-			grip.Warning(message.WrapError(err, message.Fields{"message": "rotating logger to failed bucket"}))
+			grip.Warning(ctx, message.WrapError(err, message.Fields{"message": "rotating logger to failed bucket"}))
 		}
 	}
 
 	err = a.upsertCheckRun(ctx, tc)
 	if err != nil {
-		grip.Error(errors.Wrap(err, "upserting check run"))
+		grip.Error(ctx, errors.Wrap(err, "upserting check run"))
 		if tc.logger != nil {
-			tc.logger.Task().Errorf("Error upserting check run: '%s'", err.Error())
+			tc.logger.Task().Errorf(ctx, "Error upserting check run: '%s'", err.Error())
 		}
 	}
 
 	if tc.logger != nil {
 		flushCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
-		grip.Error(errors.Wrap(tc.logger.Flush(flushCtx), "flushing logs"))
+		grip.Error(ctx, errors.Wrap(tc.logger.Flush(flushCtx), "flushing logs"))
 	}
 
 	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(attribute.String(evergreen.TaskStatusOtelAttribute, detail.Status))
+	var taskData *task.Task
+	if tc.taskConfig != nil {
+		taskData = &tc.taskConfig.Task
+	}
+	span.SetAttributes(buildTaskEndSpanAttributes(taskData, detail)...)
 	if detail.Status != evergreen.TaskSucceeded {
 		span.SetStatus(codes.Error, fmt.Sprintf("failing status '%s'", detail.Status))
 	}
-	if detail.Type != "" {
-		span.SetAttributes(attribute.String(evergreen.TaskFailureTypeOtelAttribute, detail.Type))
-	}
-	if detail.FailingCommand != "" {
-		span.SetAttributes(attribute.String(evergreen.TaskFailingCommandOtelAttribute, detail.FailingCommand))
-	}
-	if detail.Description != "" {
-		span.SetAttributes(attribute.String(evergreen.TaskDescriptionOtelAttribute, detail.Description))
-	}
 
 	return resp, nil
+}
+
+func buildTaskEndSpanAttributes(t *task.Task, detail *apimodels.TaskEndDetail) []attribute.KeyValue {
+	if detail == nil {
+		return nil
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String(evergreen.TaskStatusOtelAttribute, detail.Status),
+	}
+
+	if t != nil {
+		taskCopy := *t
+		taskCopy.Status = detail.Status
+		taskCopy.Details = *detail
+		attrs = append(attrs, attribute.String(evergreen.TaskDisplayStatusOtelAttribute, taskCopy.DetermineDisplayStatus()))
+	}
+	if detail.Type != "" {
+		attrs = append(attrs, attribute.String(evergreen.TaskFailureTypeOtelAttribute, detail.Type))
+	}
+	if detail.FailingCommand != "" {
+		attrs = append(attrs, attribute.String(evergreen.TaskFailingCommandOtelAttribute, detail.FailingCommand))
+	}
+	if detail.Description != "" {
+		attrs = append(attrs, attribute.String(evergreen.TaskDescriptionOtelAttribute, detail.Description))
+	}
+
+	return attrs
 }
 
 // bucketConfigsChanged returns true if either the task or test bucket config
@@ -1175,7 +1360,7 @@ func (a *Agent) rotateLoggerToFailedBucket(ctx context.Context, tc *taskContext)
 				}
 			}
 		} else if err != nil {
-			grip.Warning(message.WrapError(err, message.Fields{
+			grip.Warning(ctx, message.WrapError(err, message.Fields{
 				"message": "refreshing task after failure to get updated failed bucket config",
 				"task_id": tc.task.ID,
 			}))
@@ -1213,7 +1398,7 @@ func (a *Agent) upsertCheckRun(ctx context.Context, tc *taskContext) error {
 		return err
 	}
 
-	tc.logger.Task().Infof("Successfully upserted checkRun.")
+	tc.logger.Task().Infof(ctx, "Successfully upserted checkRun.")
 	return nil
 }
 
@@ -1227,7 +1412,7 @@ func buildCheckRun(ctx context.Context, tc *taskContext) (*apimodels.CheckRunOut
 	fileName := utility.FromStringPtr(fileNamePointer)
 	checkRunOutput := apimodels.CheckRunOutput{}
 	if fileName == "" {
-		tc.logger.Task().Infof("Upserting check run with no output file specified.")
+		tc.logger.Task().Infof(ctx, "Upserting check run with no output file specified.")
 		return &checkRunOutput, nil
 	}
 
@@ -1242,7 +1427,7 @@ func buildCheckRun(ctx context.Context, tc *taskContext) (*apimodels.CheckRunOut
 	if os.IsNotExist(err) {
 		checkRunOutput.Title = "Error getting check run output"
 		checkRunOutput.Summary = "Evergreen couldn't find the check run output file"
-		tc.logger.Task().Errorf("Attempting to create check run but file '%s' does not exist", fileName)
+		tc.logger.Task().Errorf(ctx, "Attempting to create check run but file '%s' does not exist", fileName)
 		return &checkRunOutput, errors.Wrap(err, "getting check run output")
 	}
 
@@ -1264,9 +1449,9 @@ func (a *Agent) endTaskResponse(ctx context.Context, tc *taskContext, status str
 	var userDefinedFailureType string
 	var userDefinedFailureMetadataTags []string
 	if userEndTaskResp := tc.getUserEndTaskResponse(); userEndTaskResp != nil {
-		tc.logger.Task().Infof("Task status set to '%s' with HTTP endpoint.", userEndTaskResp.Status)
+		tc.logger.Task().Infof(ctx, "Task status set to '%s' with HTTP endpoint.", userEndTaskResp.Status)
 		if !evergreen.IsValidTaskEndStatus(userEndTaskResp.Status) {
-			tc.logger.Task().Errorf("'%s' is not a valid task status, defaulting to system failure.", userEndTaskResp.Status)
+			tc.logger.Task().Errorf(ctx, "'%s' is not a valid task status, defaulting to system failure.", userEndTaskResp.Status)
 			status = evergreen.TaskFailed
 			userDefinedFailureType = evergreen.CommandTypeSystem
 		} else {
@@ -1274,13 +1459,13 @@ func (a *Agent) endTaskResponse(ctx context.Context, tc *taskContext, status str
 			userDefinedFailureMetadataTags = userEndTaskResp.AddFailureMetadataTags
 
 			if len(userEndTaskResp.Description) > globals.EndTaskMessageLimit {
-				tc.logger.Task().Warningf("Description from endpoint is too long to set (%d character limit), using default description.", globals.EndTaskMessageLimit)
+				tc.logger.Task().Warningf(ctx, "Description from endpoint is too long to set (%d character limit), using default description.", globals.EndTaskMessageLimit)
 			} else {
 				highestPriorityDescription = userEndTaskResp.Description
 			}
 
 			if userEndTaskResp.Type != "" && !utility.StringSliceContains(evergreen.ValidCommandTypes, userEndTaskResp.Type) {
-				tc.logger.Task().Warningf("'%s' is not a valid failure type, defaulting to command failure type.", userEndTaskResp.Type)
+				tc.logger.Task().Warningf(ctx, "'%s' is not a valid failure type, defaulting to command failure type.", userEndTaskResp.Type)
 			} else {
 				userDefinedFailureType = userEndTaskResp.Type
 			}
@@ -1335,7 +1520,7 @@ func setEndTaskFailureDetails(tc *taskContext, detail *apimodels.TaskEndDetail, 
 
 // updateEndTaskFailureDetailsForTestResults checks and updates the task failure
 // details for missing or failed test results.
-func updateEndTaskFailureDetailsForTestResults(tc *taskContext, detail *apimodels.TaskEndDetail) {
+func updateEndTaskFailureDetailsForTestResults(ctx context.Context, tc *taskContext, detail *apimodels.TaskEndDetail) {
 	if detail.Status == evergreen.TaskFailed {
 		// If the task has already failed for another reason, do not overwrite
 		// it with a test result-related failure. Test results failures are
@@ -1344,7 +1529,7 @@ func updateEndTaskFailureDetailsForTestResults(tc *taskContext, detail *apimodel
 	}
 
 	if tc.taskConfig.Task.MustHaveResults && !tc.taskConfig.HasTestResults {
-		tc.logger.Task().Info("Test results are missing and this task must have attached test results. Overall task status changed to FAILED.")
+		tc.logger.Task().Info(ctx, "Test results are missing and this task must have attached test results. Overall task status changed to FAILED.")
 		detail.Type = evergreen.CommandTypeTest
 		detail.Status = evergreen.TaskFailed
 		detail.Description = evergreen.TaskDescriptionNoResults
@@ -1352,69 +1537,69 @@ func updateEndTaskFailureDetailsForTestResults(tc *taskContext, detail *apimodel
 	}
 
 	if tc.taskConfig.HasFailingTestResult {
-		tc.logger.Task().Info("Test results contain at least one failure. Overall task status changed to FAILED.")
+		tc.logger.Task().Info(ctx, "Test results contain at least one failure. Overall task status changed to FAILED.")
 		detail.Type = evergreen.CommandTypeTest
 		detail.Status = evergreen.TaskFailed
 		detail.Description = evergreen.TaskDescriptionResultsFailed
 	}
 }
 
-func (a *Agent) killProcs(ctx context.Context, tc *taskContext, ignoreTaskGroupCheck bool, reason string) {
+func (a *Agent) killProcs(ctx context.Context, tc *taskContext, ignoreTaskGroupCheck bool, reason string) error {
 	logger := grip.NewJournaler("killProcs")
 	if tc.logger != nil && !tc.logger.Closed() {
 		logger = tc.logger.Execution()
 	}
 
 	if !a.shouldKill(tc, ignoreTaskGroupCheck) {
-		return
+		return nil
 	}
 
-	logger.Infof("Cleaning up task because %s", reason)
+	logger.Infof(ctx, "Cleaning up task because %s", reason)
 
+	catcher := grip.NewBasicCatcher()
 	if tc.task.ID != "" && tc.taskConfig != nil && tc.taskConfig.Distro != nil {
-		logger.Infof("Cleaning up processes for task: '%s'.", tc.task.ID)
+		logger.Infof(ctx, "Cleaning up processes for task: '%s'.", tc.task.ID)
 		if err := agentutil.KillSpawnedProcs(ctx, tc.task.ID, tc.taskConfig.WorkDir, tc.taskConfig.Distro.ExecUser, logger); err != nil {
+			catcher.Wrap(err, "cleaning up spawned processes")
 			// If the host is in a state where ps is timing out we need human intervention.
 			if psErr := errors.Cause(err); psErr == agentutil.ErrPSTimeout {
 				disableErr := a.comm.DisableHost(ctx, a.opts.HostID, apimodels.DisableInfo{Reason: psErr.Error()})
-				logger.CriticalWhen(disableErr != nil, errors.Wrap(err, "disabling host due to ps timeout"))
+				logger.CriticalWhen(ctx, disableErr != nil, errors.Wrap(err, "disabling host due to ps timeout"))
 			}
-			logger.Critical(errors.Wrap(err, "cleaning up spawned processes"))
+			logger.Critical(ctx, errors.Wrap(err, "cleaning up spawned processes"))
 		}
-		logger.Infof("Cleaned up processes for task: '%s'.", tc.task.ID)
+		logger.Infof(ctx, "Cleaned up processes for task: '%s'.", tc.task.ID)
 	}
 
-	// Agents running in containers don't have Docker available, so skip
-	// Docker cleanup for them.
-	if a.opts.Mode != globals.PodMode {
-		logger.Info("Cleaning up Docker artifacts.")
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, globals.DockerTimeout)
-		defer cancel()
-		if err := docker.Cleanup(ctx, logger); err != nil {
-			logger.Critical(errors.Wrap(err, "cleaning up Docker artifacts"))
-		}
-		logger.Info("Cleaned up Docker artifacts.")
+	logger.Info(ctx, "Cleaning up Docker artifacts.")
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, globals.DockerTimeout)
+	defer cancel()
+	if err := docker.Cleanup(ctx, logger); err != nil {
+		catcher.Wrap(err, "cleaning up Docker artifacts")
+		logger.Critical(ctx, errors.Wrap(err, "cleaning up Docker artifacts"))
 	}
+	logger.Info(ctx, "Cleaned up Docker artifacts.")
+	return catcher.Resolve()
 }
 
 // clearGlobalFiles cleans up certain files that were created in the home directory, including
 // the global git config file, git credentials file, and netrc file.
-func (a *Agent) clearGlobalFiles(tc *taskContext) {
+func (a *Agent) clearGlobalFiles(ctx context.Context, tc *taskContext) {
 	logger := grip.GetDefaultJournaler()
 	if tc.logger != nil && !tc.logger.Closed() {
 		logger = tc.logger.Execution()
 	}
 
 	for _, file := range globalFilesToCleanup {
-		logger.Infof("Clearing '%s'.", file)
+		logger.Infof(ctx, "Clearing '%s'.", file)
 		globalPath := filepath.Join(a.opts.HomeDirectory, file)
 		if _, err := os.Stat(globalPath); os.IsNotExist(err) {
-			logger.Infof("Global '%s' file does not exist.", file)
+			logger.Infof(ctx, "Global '%s' file does not exist.", file)
 		} else if err := os.Remove(globalPath); err != nil {
-			logger.Error(errors.Wrapf(err, "removing global '%s' file", file))
+			logger.Error(ctx, errors.Wrapf(err, "removing global '%s' file", file))
 		} else {
-			logger.Infof("Cleared '%s'.", file)
+			logger.Infof(ctx, "Cleared '%s'.", file)
 		}
 	}
 }
@@ -1439,7 +1624,7 @@ func (a *Agent) shouldKill(tc *taskContext, ignoreTaskGroupCheck bool) bool {
 
 // logPanic logs a panic to the task log and returns the panic error, along with
 // the original error (if any). If there was no panic error, this is a no-op.
-func (a *Agent) logPanic(tc *taskContext, pErr, originalErr error, op string) error {
+func (a *Agent) logPanic(ctx context.Context, tc *taskContext, pErr, originalErr error, op string) error {
 	if pErr == nil {
 		return nil
 	}
@@ -1452,13 +1637,87 @@ func (a *Agent) logPanic(tc *taskContext, pErr, originalErr error, op string) er
 		"operation": op,
 	})
 	if tc.logger != nil && !tc.logger.Closed() {
-		tc.logger.Task().Error(logMsg)
+		tc.logger.Task().Error(ctx, logMsg)
 	}
 	logMsg["task_id"] = tc.task.ID
 	if tc.taskConfig != nil {
 		logMsg["task_execution"] = tc.taskConfig.Task.Execution
 	}
-	grip.Alert(message.WrapError(errors.WithStack(pErr), logMsg))
+	grip.Alert(ctx, message.WrapError(errors.WithStack(pErr), logMsg))
 
 	return catcher.Resolve()
+}
+
+const maxDescendantDepth = 10
+
+// getDescendantPIDs returns all descendant PIDs of the given parent PIDs
+// by recursively calling pgrep -P. This operation will no-op on windows architectures.
+func getDescendantPIDs(ctx context.Context, parentPIDs []int, logger client.LoggerProducer, tracer trace.Tracer) []int {
+	if runtime.GOOS == "windows" || len(parentPIDs) == 0 {
+		return nil
+	}
+
+	ctx, span := tracer.Start(ctx, "get-descendant-pids")
+	defer span.End()
+
+	seen := make(map[int]bool)
+	var result []int
+	parentPIDsToSearch := make([]int, len(parentPIDs))
+	copy(parentPIDsToSearch, parentPIDs)
+	for _, pid := range parentPIDs {
+		seen[pid] = true
+	}
+
+	for depth := 0; depth < maxDescendantDepth && len(parentPIDsToSearch) > 0; depth++ {
+		var nextParentPIDsToSearch []int
+		for _, pid := range parentPIDsToSearch {
+			children := pgrepChildren(ctx, pid, logger)
+			for _, child := range children {
+				if !seen[child] {
+					seen[child] = true
+					result = append(result, child)
+					nextParentPIDsToSearch = append(nextParentPIDsToSearch, child)
+				}
+			}
+		}
+		parentPIDsToSearch = nextParentPIDsToSearch
+	}
+
+	span.SetAttributes(
+		attribute.Int("num_parent_pids", len(parentPIDs)),
+		attribute.Int("num_descendants_found", len(result)),
+	)
+
+	return result
+}
+
+// pgrepChildren returns the direct child PIDs of the given parent PID.
+func pgrepChildren(ctx context.Context, parentPID int, logger client.LoggerProducer) []int {
+	// PID 0 is the kernel scheduler, and negative PIDs are invalid.
+	if parentPID <= 0 {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(parentPID))
+	out, err := cmd.Output()
+	if err != nil {
+		logger.Execution().Warningf(ctx, "pgrep -P %d failed: %s", parentPID, err.Error())
+		return nil
+	}
+
+	var pids []int
+	// pgrep outputs one PID per line, each line containing just a numeric PID.
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			logger.Execution().Warningf(ctx, "unexpected pgrep output line for parent PID %d: %s", parentPID, line)
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
 }

@@ -4,6 +4,11 @@ requireProjectAdmin is used to restrict certain actions to admins.
 directive @requireProjectAdmin on ARGUMENT_DEFINITION
 
 """
+requireProjectAccess is used to restrict admin, view, and edit access for repos.
+"""
+directive @requireRepoAccess(access: AccessLevel!) on ARGUMENT_DEFINITION
+
+"""
 requireProjectAccess is used to restrict admin, view, and edit access for projects.
 """
 directive @requireProjectAccess(permission: ProjectPermission!, access: AccessLevel!) on ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | FIELD_DEFINITION
@@ -69,3 +74,7 @@ directive @requireAdmin on FIELD_DEFINITION
 defer is used to defer the execution of a field or fragment.
 """
 directive @defer(if: Boolean = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+requireVolumeAccess is used to restrict edit access for volumes.
+"""
+directive @requireVolumeAccess on ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION

@@ -45,17 +45,6 @@ func ByTaskIdAndExecution(id string, execution int) db.Q {
 	})
 }
 
-// ByTaskIdWithoutExecution returns a query for entries with the given Task Id
-// that do not have an execution number associated with them
-func ByTaskIdWithoutExecution(id string) db.Q {
-	return db.Query(bson.M{
-		TaskIdKey: id,
-		ExecutionKey: bson.M{
-			"$exists": false,
-		},
-	})
-}
-
 func ByTaskIdsAndExecutions(tasks []TaskIDAndExecution) db.Q {
 	orClause := []bson.M{}
 	for _, t := range tasks {
@@ -75,11 +64,6 @@ func ByTaskIds(taskIds []string) db.Q {
 			"$in": taskIds,
 		},
 	})
-}
-
-// ByBuildId returns all entries with the given Build Id, sorted by Task name
-func ByBuildId(id string) db.Q {
-	return db.Query(bson.M{BuildIdKey: id}).Sort([]string{TaskNameKey})
 }
 
 // === DB Logic ===
@@ -124,6 +108,15 @@ func FindOne(ctx context.Context, query db.Q) (*Entry, error) {
 func FindAll(ctx context.Context, query db.Q) ([]Entry, error) {
 	entries := []Entry{}
 	err := db.FindAllQ(ctx, Collection, query, &entries)
+	return entries, err
+}
+
+// FindAllSecondary gets every Entry for the given query, reading from a secondary
+// node. Results may be replication-lagged, so use it only for display reads of
+// already-persisted artifacts, never in a read-after-write path.
+func FindAllSecondary(ctx context.Context, query db.Q) ([]Entry, error) {
+	entries := []Entry{}
+	err := db.FindAllQSecondary(ctx, Collection, query, &entries)
 	return entries, err
 }
 

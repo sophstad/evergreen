@@ -3,6 +3,7 @@ package parameterstore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,7 +100,7 @@ func (pm *ParameterManager) Put(ctx context.Context, name, value string) (*Param
 		return nil, errors.New("cannot put a parameter with an empty name")
 	}
 
-	fullName := pm.getPrefixedName(name)
+	fullName := pm.GetPrefixedName(name)
 	if _, err := pm.ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
 		Name:      aws.String(fullName),
 		Value:     aws.String(value),
@@ -114,7 +115,7 @@ func (pm *ParameterManager) Put(ctx context.Context, name, value string) (*Param
 	// parameter was changed in case caching gets enabled or a different
 	// ParameterManager instance has caching enabled.
 	if err := BumpParameterRecord(ctx, pm.DB, fullName, time.Now()); err != nil {
-		grip.Warning(message.WrapError(err, message.Fields{
+		grip.Warning(ctx, message.WrapError(err, message.Fields{
 			"message": "could not bump parameter update timestamp, possibly because it is being concurrently updated",
 			"name":    fullName,
 		}))
@@ -137,7 +138,7 @@ func (pm *ParameterManager) Get(ctx context.Context, names ...string) ([]Paramet
 
 	fullNames := make([]string, 0, len(names))
 	for _, name := range names {
-		fullNames = append(fullNames, pm.getPrefixedName(name))
+		fullNames = append(fullNames, pm.GetPrefixedName(name))
 	}
 
 	fullNamesToFind := fullNames
@@ -204,7 +205,7 @@ func (pm *ParameterManager) GetStrict(ctx context.Context, names ...string) ([]P
 
 	fullNames := make([]string, 0, len(names))
 	for _, name := range names {
-		fullNames = append(fullNames, pm.getPrefixedName(name))
+		fullNames = append(fullNames, pm.GetPrefixedName(name))
 	}
 
 	params, err := pm.Get(ctx, fullNames...)
@@ -224,6 +225,9 @@ func (pm *ParameterManager) GetStrict(ctx context.Context, names ...string) ([]P
 				missingNames = append(missingNames, name)
 			}
 		}
+		// Sort the missing names so the error message returns them in a
+		// predictable order.
+		slices.Sort(missingNames)
 
 		if len(missingNames) > 0 {
 			return nil, errors.Errorf("parameter(s) not found: %s", missingNames)
@@ -241,7 +245,7 @@ func (pm *ParameterManager) Delete(ctx context.Context, names ...string) error {
 
 	fullNames := make([]string, 0, len(names))
 	for _, name := range names {
-		fullNames = append(fullNames, pm.getPrefixedName(name))
+		fullNames = append(fullNames, pm.GetPrefixedName(name))
 	}
 
 	_, err := pm.ssmClient.DeleteParameters(ctx, &ssm.DeleteParametersInput{
@@ -256,7 +260,7 @@ func (pm *ParameterManager) Delete(ctx context.Context, names ...string) error {
 		// the parameter was changed in case caching gets enabled or a different
 		// ParameterManager instance has caching enabled.
 		if err := BumpParameterRecord(ctx, pm.DB, fullName, time.Now()); err != nil {
-			grip.Warning(message.WrapError(err, message.Fields{
+			grip.Warning(ctx, message.WrapError(err, message.Fields{
 				"message": "could not bump parameter record last updated timestamp, possibly because it is being concurrently updated",
 				"name":    fullName,
 			}))
@@ -271,9 +275,9 @@ func (pm *ParameterManager) isCachingEnabled() bool {
 	return pm.cache != nil
 }
 
-// getPrefixedName returns the parameter name with the common parameter prefix
+// GetPrefixedName returns the parameter name with the common parameter prefix
 // to ensure it is a full path rather than a basename.
-func (pm *ParameterManager) getPrefixedName(basename string) string {
+func (pm *ParameterManager) GetPrefixedName(basename string) string {
 	if pm.pathPrefix == "" {
 		return basename
 	}

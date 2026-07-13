@@ -118,7 +118,7 @@ type APIPatchTriggerDefinition struct {
 
 func (t *APIPatchTriggerDefinition) BuildFromService(ctx context.Context, def patch.PatchTriggerDefinition) error {
 	t.ChildProjectId = utility.ToStringPtr(def.ChildProject) // we store the real ID in the child project field
-	identifier, err := model.GetIdentifierForProject(ctx, def.ChildProject)
+	identifier, err := model.GetIdentifierForProjectSecondary(ctx, def.ChildProject)
 	if err != nil {
 		return errors.Wrapf(err, "getting identifier for child project '%s'", def.ChildProject)
 	}
@@ -289,23 +289,13 @@ type APIBuildBaronSettings struct {
 	// Type of ticket to create.
 	TicketCreateIssueType *string `bson:"ticket_create_issue_type" json:"ticket_create_issue_type"`
 	// Jira project to search for tickets.
-	TicketSearchProjects    []*string `bson:"ticket_search_projects" json:"ticket_search_projects"`
-	BFSuggestionServer      *string   `bson:"bf_suggestion_server" json:"bf_suggestion_server"`
-	BFSuggestionUsername    *string   `bson:"bf_suggestion_username" json:"bf_suggestion_username"`
-	BFSuggestionPassword    *string   `bson:"bf_suggestion_password" json:"bf_suggestion_password"`
-	BFSuggestionTimeoutSecs *int      `bson:"bf_suggestion_timeout_secs" json:"bf_suggestion_timeout_secs"`
-	BFSuggestionFeaturesURL *string   `bson:"bf_suggestion_features_url" json:"bf_suggestion_features_url"`
+	TicketSearchProjects []*string `bson:"ticket_search_projects" json:"ticket_search_projects"`
 }
 
 func (bb *APIBuildBaronSettings) BuildFromService(def evergreen.BuildBaronSettings) {
 	bb.TicketCreateProject = utility.ToStringPtr(def.TicketCreateProject)
 	bb.TicketCreateIssueType = utility.ToStringPtr(def.TicketCreateIssueType)
 	bb.TicketSearchProjects = utility.ToStringPtrSlice(def.TicketSearchProjects)
-	bb.BFSuggestionServer = utility.ToStringPtr(def.BFSuggestionServer)
-	bb.BFSuggestionUsername = utility.ToStringPtr(def.BFSuggestionUsername)
-	bb.BFSuggestionPassword = utility.ToStringPtr(def.BFSuggestionPassword)
-	bb.BFSuggestionTimeoutSecs = utility.ToIntPtr(def.BFSuggestionTimeoutSecs)
-	bb.BFSuggestionFeaturesURL = utility.ToStringPtr(def.BFSuggestionFeaturesURL)
 }
 
 func (bb *APIBuildBaronSettings) ToService() evergreen.BuildBaronSettings {
@@ -313,11 +303,6 @@ func (bb *APIBuildBaronSettings) ToService() evergreen.BuildBaronSettings {
 	buildBaron.TicketCreateProject = utility.FromStringPtr(bb.TicketCreateProject)
 	buildBaron.TicketCreateIssueType = utility.FromStringPtr(bb.TicketCreateIssueType)
 	buildBaron.TicketSearchProjects = utility.FromStringPtrSlice(bb.TicketSearchProjects)
-	buildBaron.BFSuggestionServer = utility.FromStringPtr(bb.BFSuggestionServer)
-	buildBaron.BFSuggestionUsername = utility.FromStringPtr(bb.BFSuggestionUsername)
-	buildBaron.BFSuggestionPassword = utility.FromStringPtr(bb.BFSuggestionPassword)
-	buildBaron.BFSuggestionTimeoutSecs = utility.FromIntPtr(bb.BFSuggestionTimeoutSecs)
-	buildBaron.BFSuggestionFeaturesURL = utility.FromStringPtr(bb.BFSuggestionFeaturesURL)
 	return buildBaron
 }
 
@@ -356,103 +341,9 @@ type APIWorkstationConfig struct {
 	GitClone *bool `bson:"git_clone" json:"git_clone"`
 }
 
-type APIContainerSecret struct {
-	// Name of the container secret.
-	Name *string `json:"name"`
-	// External name of the container secrets. Cannot be modified by users.
-	ExternalName *string `json:"external_name"`
-	// External identifier for the container secret. Cannot be modified by
-	// users.
-	ExternalID *string `json:"external_id"`
-	// Type of container secret.
-	Type *string `json:"type"`
-	// Container secret value to set.
-	Value *string `json:"value"`
-	// ShouldRotate indicates that the user requested the pod secret to be
-	// rotated to a new value. This only applies to the project's pod secret.
-	ShouldRotate *bool `json:"should_rotate"`
-	// RepoCreds, if set, are the new repository credentials to store. This only
-	// applies to repository credentials.
-	RepoCreds *APIRepositoryCredentials `json:"repo_creds"`
-}
-
 type APIRepositoryCredentials struct {
 	Username *string `json:"username"`
 	Password *string `json:"password"`
-}
-
-func (cr *APIContainerSecret) BuildFromService(h model.ContainerSecret) error {
-	if h.Type == model.ContainerSecretRepoCreds && h.Value != "" {
-		// If the plaintext secret value is available and this secret is a repo
-		// cred, the value is the repo creds encoded as JSON, so convert it back
-		// to its structured form for the REST API.
-		var apiRepoCreds APIRepositoryCredentials
-		if err := json.Unmarshal([]byte(h.Value), &apiRepoCreds); err != nil {
-			return errors.Wrap(err, "unmarshalling repository credentials")
-		}
-		cr.RepoCreds = &apiRepoCreds
-	}
-	if h.Value != "" {
-		cr.Value = utility.ToStringPtr(h.Value)
-	}
-	cr.Name = utility.ToStringPtr(h.Name)
-	cr.ExternalID = utility.ToStringPtr(h.ExternalID)
-	cr.Type = utility.ToStringPtr(string(h.Type))
-	return nil
-}
-
-func (cr *APIContainerSecret) ToService() (*model.ContainerSecret, error) {
-	secret := model.ContainerSecret{
-		Name:       utility.FromStringPtr(cr.Name),
-		ExternalID: utility.FromStringPtr(cr.ExternalID),
-		Type:       model.ContainerSecretType(utility.FromStringPtr(cr.Type)),
-		Value:      utility.FromStringPtr(cr.Value),
-	}
-	if utility.FromBoolPtr(cr.ShouldRotate) {
-		if secret.Type == model.ContainerSecretPodSecret {
-			// The user has requested to rotate the pod secret to a new value.
-			secret.Value = utility.RandomString()
-		} else {
-			return nil, errors.Errorf("can only rotate the value for the pod secret, not for container secret '%s' of type '%s'", secret.Name, secret.Type)
-		}
-	}
-	if cr.RepoCreds != nil {
-		if secret.Type == model.ContainerSecretRepoCreds {
-			// If this is a repo cred and the credentials must be stored, the value
-			// to store must be encoded as JSON.
-			b, err := json.Marshal(cr.RepoCreds)
-			if err != nil {
-				return nil, errors.Wrap(err, "marshalling repository credentials as JSON")
-			}
-			secret.Value = string(b)
-		} else {
-			return nil, errors.Errorf("can only set credentials for repo creds, not for container secret '%s' of type '%s'", secret.Name, secret.Type)
-		}
-	}
-	return &secret, nil
-}
-
-type APIContainerResources struct {
-	// Name for container resource definition.
-	Name *string `bson:"name" json:"name"`
-	// Memory (in MB) for the container.
-	MemoryMB *int `bson:"memory_mb" json:"memory_mb"`
-	// CPU (1024 CPU = 1 vCPU) for the container.
-	CPU *int `bson:"cpu" json:"cpu"`
-}
-
-func (cr *APIContainerResources) BuildFromService(h model.ContainerResources) {
-	cr.Name = utility.ToStringPtr(h.Name)
-	cr.MemoryMB = utility.ToIntPtr(h.MemoryMB)
-	cr.CPU = utility.ToIntPtr(h.CPU)
-}
-
-func (cr *APIContainerResources) ToService() model.ContainerResources {
-	return model.ContainerResources{
-		Name:     utility.FromStringPtr(cr.Name),
-		MemoryMB: utility.FromIntPtr(cr.MemoryMB),
-		CPU:      utility.FromIntPtr(cr.CPU),
-	}
 }
 
 type APIWorkstationSetupCommand struct {
@@ -617,8 +508,6 @@ type APIProjectRef struct {
 	DisplayName *string `json:"display_name"`
 	// List of identifiers of tasks used in this patch.
 	DeactivatePrevious *bool `json:"deactivate_previous"`
-	// If true, repotracker is run on github push events. If false, repotracker is run periodically every few minutes.
-	TracksPushEvents *bool `json:"tracks_push_events"`
 	// Enable GitHub automated pull request testing.
 	PRTestingEnabled *bool `json:"pr_testing_enabled"`
 	// Enable GitHub manual pull request testing.
@@ -650,6 +539,8 @@ type APIProjectRef struct {
 	RepotrackerError *APIRepositoryErrorDetails `json:"repotracker_error"`
 	// Disable task dispatching.
 	DispatchingDisabled *bool `json:"dispatching_disabled"`
+	// Disable automatic task activation on the waterfall.
+	WaterfallDisabled *bool `json:"waterfall_disabled"`
 	// Disable stepback.
 	StepbackDisabled *bool `json:"stepback_disabled"`
 	// Enable debug spawn host functionality.
@@ -699,12 +590,6 @@ type APIProjectRef struct {
 	DeleteSubscriptions []*string `json:"delete_subscriptions,omitempty"`
 	// List of periodic build definitions.
 	PeriodicBuilds []APIPeriodicBuildDefinition `json:"periodic_builds,omitempty"`
-	// List of container size definitions
-	ContainerSizeDefinitions []APIContainerResources `json:"container_size_definitions"`
-	// List of container secrets.
-	ContainerSecrets []APIContainerSecret `json:"container_secrets,omitempty"`
-	// Names of container secrets to be deleted.
-	DeleteContainerSecrets []string `json:"delete_container_secrets,omitempty"`
 	// List of external links in the version metadata.
 	ExternalLinks []APIExternalLink `json:"external_links"`
 	// Options for banner to display for the project.
@@ -721,9 +606,6 @@ type APIProjectRef struct {
 	TestSelection APITestSelectionSettings `json:"test_selection,omitzero"`
 	// Whether or not to run every mainline commit version.
 	RunEveryMainlineCommit *bool `json:"run_every_mainline_commit,omitzero"`
-	// Limit for the number of mainline commits to run when
-	// RunEveryMainlineCommit is true.
-	RunEveryMainlineCommitLimit *int `json:"run_every_mainline_commit_limit,omitzero"`
 }
 
 // ToService returns a service layer ProjectRef using the data from APIProjectRef
@@ -740,7 +622,6 @@ func (p *APIProjectRef) ToService() (*model.ProjectRef, error) {
 		Identifier:                       utility.FromStringPtr(p.Identifier),
 		DisplayName:                      utility.FromStringPtr(p.DisplayName),
 		DeactivatePrevious:               utility.BoolPtrCopy(p.DeactivatePrevious),
-		TracksPushEvents:                 utility.BoolPtrCopy(p.TracksPushEvents),
 		PRTestingEnabled:                 utility.BoolPtrCopy(p.PRTestingEnabled),
 		ManualPRTestingEnabled:           utility.BoolPtrCopy(p.ManualPRTestingEnabled),
 		GitTagVersionsEnabled:            utility.BoolPtrCopy(p.GitTagVersionsEnabled),
@@ -755,6 +636,7 @@ func (p *APIProjectRef) ToService() (*model.ProjectRef, error) {
 		PatchingDisabled:                 utility.BoolPtrCopy(p.PatchingDisabled),
 		RepotrackerDisabled:              utility.BoolPtrCopy(p.RepotrackerDisabled),
 		DispatchingDisabled:              utility.BoolPtrCopy(p.DispatchingDisabled),
+		WaterfallDisabled:                utility.BoolPtrCopy(p.WaterfallDisabled),
 		StepbackDisabled:                 utility.BoolPtrCopy(p.StepbackDisabled),
 		StepbackBisect:                   utility.BoolPtrCopy(p.StepbackBisect),
 		VersionControlEnabled:            utility.BoolPtrCopy(p.VersionControlEnabled),
@@ -773,7 +655,6 @@ func (p *APIProjectRef) ToService() (*model.ProjectRef, error) {
 		GitHubPermissionGroupByRequester: p.GitHubPermissionGroupByRequester,
 		TestSelection:                    p.TestSelection.ToService(),
 		RunEveryMainlineCommit:           utility.FromBoolPtr(p.RunEveryMainlineCommit),
-		RunEveryMainlineCommitLimit:      utility.FromIntPtr(p.RunEveryMainlineCommitLimit),
 	}
 
 	if projectRef.ProjectHealthView == "" {
@@ -835,23 +716,6 @@ func (p *APIProjectRef) ToService() (*model.ProjectRef, error) {
 		}
 		projectRef.GitHubDynamicTokenPermissionGroups = permissionGroups
 	}
-
-	for _, size := range p.ContainerSizeDefinitions {
-		projectRef.ContainerSizeDefinitions = append(projectRef.ContainerSizeDefinitions, size.ToService())
-	}
-
-	for idx, secret := range p.ContainerSecrets {
-		if utility.StringSliceContains(p.DeleteContainerSecrets, utility.FromStringPtr(secret.Name)) {
-			continue
-		}
-
-		apiContainerSecret, err := secret.ToService()
-		if err != nil {
-			return nil, errors.Wrapf(err, "converting container secret at index %d to service model", idx)
-		}
-		projectRef.ContainerSecrets = append(projectRef.ContainerSecrets, *apiContainerSecret)
-	}
-
 	return &projectRef, nil
 }
 
@@ -870,7 +734,6 @@ func (p *APIProjectRef) BuildPublicFields(ctx context.Context, projectRef model.
 	p.BatchTime = projectRef.BatchTime
 	p.RemotePath = utility.ToStringPtr(projectRef.RemotePath)
 	p.DeactivatePrevious = projectRef.DeactivatePrevious
-	p.TracksPushEvents = utility.BoolPtrCopy(projectRef.TracksPushEvents)
 	p.PRTestingEnabled = utility.BoolPtrCopy(projectRef.PRTestingEnabled)
 	p.ManualPRTestingEnabled = utility.BoolPtrCopy(projectRef.ManualPRTestingEnabled)
 	p.GitTagVersionsEnabled = utility.BoolPtrCopy(projectRef.GitTagVersionsEnabled)
@@ -882,6 +745,7 @@ func (p *APIProjectRef) BuildPublicFields(ctx context.Context, projectRef model.
 	p.PatchingDisabled = utility.BoolPtrCopy(projectRef.PatchingDisabled)
 	p.RepotrackerDisabled = utility.BoolPtrCopy(projectRef.RepotrackerDisabled)
 	p.DispatchingDisabled = utility.BoolPtrCopy(projectRef.DispatchingDisabled)
+	p.WaterfallDisabled = utility.BoolPtrCopy(projectRef.WaterfallDisabled)
 	p.StepbackDisabled = utility.BoolPtrCopy(projectRef.StepbackDisabled)
 	p.StepbackBisect = utility.BoolPtrCopy(projectRef.StepbackBisect)
 	p.VersionControlEnabled = utility.BoolPtrCopy(projectRef.VersionControlEnabled)
@@ -897,7 +761,6 @@ func (p *APIProjectRef) BuildPublicFields(ctx context.Context, projectRef model.
 	p.GitHubPermissionGroupByRequester = projectRef.GitHubPermissionGroupByRequester
 	p.TestSelection.BuildFromService(projectRef.TestSelection)
 	p.RunEveryMainlineCommit = utility.ToBoolPtr(projectRef.RunEveryMainlineCommit)
-	p.RunEveryMainlineCommitLimit = utility.ToIntPtr(projectRef.RunEveryMainlineCommitLimit)
 
 	if projectRef.ProjectHealthView == "" {
 		projectRef.ProjectHealthView = model.ProjectHealthViewFailed
@@ -968,12 +831,6 @@ func (p *APIProjectRef) BuildPublicFields(ctx context.Context, projectRef model.
 		p.PatchTriggerAliases = patchTriggers
 	}
 
-	for _, size := range projectRef.ContainerSizeDefinitions {
-		var apiSize APIContainerResources
-		apiSize.BuildFromService(size)
-		p.ContainerSizeDefinitions = append(p.ContainerSizeDefinitions, apiSize)
-	}
-
 	// copy external links
 	if projectRef.ExternalLinks != nil {
 		externalLinks := []APIExternalLink{}
@@ -1012,19 +869,15 @@ func (p *APIProjectRef) BuildFromService(ctx context.Context, projectRef model.P
 	workstationConfig.BuildFromService(projectRef.WorkstationConfig)
 	p.WorkstationConfig = workstationConfig
 
-	for idx, secret := range projectRef.ContainerSecrets {
-		var apiSecret APIContainerSecret
-		if err := apiSecret.BuildFromService(secret); err != nil {
-			return errors.Wrapf(err, "converting container secret at index %d to service model", idx)
-		}
-		p.ContainerSecrets = append(p.ContainerSecrets, apiSecret)
-	}
-
 	return nil
 }
 
 // DefaultUnsetBooleans is used to set booleans to their default value.
 func (pRef *APIProjectRef) DefaultUnsetBooleans() {
+	if pRef.DebugSpawnHostsDisabled == nil {
+		// DebugSpawnHostsDisabled needs to be on by default to enforce opt-in
+		pRef.DebugSpawnHostsDisabled = utility.TruePtr()
+	}
 	reflected := reflect.ValueOf(pRef).Elem()
 	recursivelyDefaultBooleans(reflected)
 }
@@ -1033,7 +886,7 @@ func recursivelyDefaultBooleans(structToSet reflect.Value) {
 	var err error
 	var i int
 	defer func() {
-		grip.Error(recovery.HandlePanicWithError(recover(), err, fmt.Sprintf("panicked while recursively defaulting booleans for field number %d", i)))
+		grip.Error(context.Background(), recovery.HandlePanicWithError(recover(), err, fmt.Sprintf("panicked while recursively defaulting booleans for field number %d", i)))
 	}()
 	falseType := reflect.TypeOf(false)
 	// Iterate through each field of the struct.

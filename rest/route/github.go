@@ -38,6 +38,7 @@ const (
 	githubActionAutoBaseChange  = "automatic_base_change_succeeded"
 	githubActionChecksRequested = "checks_requested"
 	githubActionRerequested     = "rerequested"
+	githubActionDestroyed       = "destroyed"
 
 	// pull request comments
 	retryComment            = "evergreen retry"
@@ -62,6 +63,10 @@ const (
 
 	// graphiteKind is what we have to pass into the Graphite CI API under current restrictions.
 	graphiteKind = "GITHUB_ACTIONS"
+)
+
+var (
+	githubWebhookTimeoutCause = errors.New("Reached GitHub webhook timeout limit")
 )
 
 // skipCILabels are a set of labels which will skip creating PR patch if part of
@@ -128,9 +133,25 @@ func (gh *githubHookApi) Parse(ctx context.Context, r *http.Request) error {
 	return nil
 }
 
-// shouldSkipWebhook returns true if the event is from a GitHub app and the app is available for the owner/repo or,
-// the event is from webhooks and the app is not available for the owner/repo.
+// shouldSkipWebhook returns true if the event is from a GitHub app and the app
+// is available for the owner/repo or, the event is from webhooks and the app is
+// not available for the owner/repo. This deduplicates event processing for
+// repos with both the GitHub app installed and a repo webhook installed.
 func (gh *githubHookApi) shouldSkipWebhook(ctx context.Context, owner, repo string, fromApp bool) bool {
+	if gh.settings.Ui.StagingEnvironment != "" {
+		// For personal staging, only use repo webhooks and ignore GitHub app
+		// webhooks because they're more convenient.
+		//
+		// For context, it's easier to maintain personal staging if they use
+		// only repo webhooks because Evergreen devs have direct and visible
+		// control over the repo webhook configurations (via repo settings). In
+		// contrast, GitHub apps have restrictive permissions and are not
+		// directly accessible by Evergreen devs, so making changes (e.g. adding
+		// webhooks to a new repo, changing webhook configuration, debugging) is
+		// slow and difficult.
+		return fromApp
+	}
+
 	hasApp, err := githubapp.CreateGitHubAppAuth(gh.settings).IsGithubAppInstalledOnRepo(ctx, owner, repo)
 	if err != nil {
 		hasApp = false
@@ -141,13 +162,13 @@ func (gh *githubHookApi) shouldSkipWebhook(ctx context.Context, owner, repo stri
 func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 	// GitHub occasionally aborts requests early before we are able to complete the full operation
 	// (for example enqueueing a PR to the commit queue). We therefore want to use a custom timeout without cancel.
-	newCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubWebhookTimeout)
+	ctx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), githubWebhookTimeout, githubWebhookTimeoutCause)
 	defer cancel()
 
 	switch event := gh.event.(type) {
 	case *github.PingEvent:
 		fromApp := event.GetInstallation() != nil
-		if gh.shouldSkipWebhook(newCtx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
+		if gh.shouldSkipWebhook(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
 			break
 		}
 		if event.HookID == nil {
@@ -156,7 +177,7 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 				Message:    "malformed ping event",
 			})
 		}
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -165,7 +186,7 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 
 	case *github.PullRequestEvent:
 		fromApp := event.GetInstallation() != nil
-		if gh.shouldSkipWebhook(newCtx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
+		if gh.shouldSkipWebhook(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
 			break
 		}
 		if event.Action == nil {
@@ -173,7 +194,7 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 				StatusCode: http.StatusBadRequest,
 				Message:    "pull request has no action",
 			}
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"source": "GitHub hook",
 				"msg_id": gh.msgID,
 				"event":  gh.eventType,
@@ -185,49 +206,88 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 		action := utility.FromStringPtr(event.Action)
 		if action == githubActionOpened || action == githubActionSynchronize ||
 			action == githubActionReopened || action == githubActionAutoBaseChange {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"source":    "GitHub hook",
 				"msg_id":    gh.msgID,
 				"event":     gh.eventType,
 				"action":    action,
-				"repo":      *event.PullRequest.Base.Repo.FullName,
-				"ref":       *event.PullRequest.Base.Ref,
-				"pr_number": *event.PullRequest.Number,
-				"hash":      *event.PullRequest.Head.SHA,
-				"user":      *event.Sender.Login,
+				"repo":      event.GetPullRequest().GetBase().GetRepo().GetFullName(),
+				"ref":       event.GetPullRequest().GetBase().GetRef(),
+				"pr_number": event.GetPullRequest().GetNumber(),
+				"hash":      event.GetPullRequest().GetHead().GetSHA(),
+				"user":      event.GetSender().GetLogin(),
+				"assignee":  event.GetPullRequest().GetAssignee().GetLogin(),
 				"message":   "PR accepted, attempting to queue",
 			})
-			if err := gh.AddIntentForPR(newCtx, event.PullRequest, event.Sender.GetLogin(), patch.AutomatedCaller, "", false); err != nil {
-				grip.Error(message.WrapError(err, message.Fields{
+
+			skip, err := shouldSkipCIForGraphite(ctx,
+				event.Repo.Owner.GetLogin(),
+				event.Repo.GetName(),
+				event.PullRequest.GetNumber(),
+				event.PullRequest.GetHead().GetSHA(),
+				event.PullRequest.GetBase().GetRef(),
+				event.PullRequest.GetHead().GetRef(),
+			)
+			grip.Error(ctx, message.WrapError(err, message.Fields{
+				"source":    "GitHub hook",
+				"msg_id":    gh.msgID,
+				"event":     gh.eventType,
+				"message":   "error checking Graphite CI optimizer",
+				"owner":     event.Repo.Owner.GetLogin(),
+				"repo":      event.Repo.GetName(),
+				"pr_number": event.PullRequest.GetNumber(),
+				"head_sha":  event.PullRequest.GetHead().GetSHA(),
+				"base_ref":  event.PullRequest.GetBase().GetRef(),
+				"head_ref":  event.PullRequest.GetHead().GetRef(),
+			}))
+			// Continue on error - don't block PR patch creation.
+			if skip {
+				grip.Debug(ctx, message.Fields{
 					"source":    "GitHub hook",
 					"msg_id":    gh.msgID,
 					"event":     gh.eventType,
-					"repo":      *event.PullRequest.Base.Repo.FullName,
-					"ref":       *event.PullRequest.Base.Ref,
-					"pr_number": *event.PullRequest.Number,
-					"user":      *event.Sender.Login,
+					"message":   "Graphite CI optimizer determined this PR does not need to be tested",
+					"owner":     event.Repo.Owner.GetLogin(),
+					"repo":      event.Repo.GetName(),
+					"pr_number": event.PullRequest.GetNumber(),
+					"head_sha":  event.PullRequest.GetHead().GetSHA(),
+					"base_ref":  event.PullRequest.GetBase().GetRef(),
+					"head_ref":  event.PullRequest.GetHead().GetRef(),
+				})
+				break
+			}
+
+			if err := gh.AddIntentForPR(ctx, event.PullRequest, event.Sender.GetLogin(), patch.AutomatedCaller, "", false); err != nil {
+				grip.Error(ctx, message.WrapError(err, message.Fields{
+					"source":    "GitHub hook",
+					"msg_id":    gh.msgID,
+					"event":     gh.eventType,
+					"repo":      event.GetPullRequest().GetBase().GetRepo().GetFullName(),
+					"ref":       event.GetPullRequest().GetBase().GetRef(),
+					"pr_number": event.GetPullRequest().GetNumber(),
+					"user":      event.GetSender().GetLogin(),
 					"message":   "can't add intent",
 				}))
 				return gimlet.NewJSONInternalErrorResponse(errors.Wrap(err, "adding patch intent"))
 			}
 		} else if action == githubActionClosed {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"source":    "GitHub hook",
 				"msg_id":    gh.msgID,
 				"event":     gh.eventType,
-				"repo":      *event.PullRequest.Base.Repo.FullName,
-				"pr_number": *event.PullRequest.Number,
-				"user":      *event.Sender.Login,
+				"repo":      event.GetPullRequest().GetBase().GetRepo().GetFullName(),
+				"pr_number": event.GetPullRequest().GetNumber(),
+				"user":      event.GetSender().GetLogin(),
 				"action":    action,
 				"message":   "pull request closed; aborting patch",
 			})
 
-			if err := data.AbortPatchesFromPullRequest(newCtx, event); err != nil {
-				grip.Error(message.WrapError(err, message.Fields{
+			if err := data.AbortPatchesFromPullRequest(ctx, event); err != nil {
+				grip.Error(ctx, message.WrapError(err, message.Fields{
 					"source":  "GitHub hook",
 					"msg_id":  gh.msgID,
 					"event":   gh.eventType,
-					"action":  *event.Action,
+					"action":  event.GetAction(),
 					"message": "failed to abort patches",
 				}))
 				return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "aborting patches"))
@@ -237,10 +297,10 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 		}
 	case *github.PushEvent:
 		fromApp := event.GetInstallation() != nil
-		if gh.shouldSkipWebhook(newCtx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
+		if gh.shouldSkipWebhook(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
 			break
 		}
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"source":     "GitHub hook",
 			"msg_id":     gh.msgID,
 			"event":      gh.eventType,
@@ -250,11 +310,11 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 		})
 		// Regardless of whether a tag or commit is being pushed, we want to trigger the repotracker
 		// to ensure we're up-to-date on the commit the tag is being pushed to.
-		if err := data.TriggerRepotracker(newCtx, gh.queue, gh.msgID, event); err != nil {
+		if err := data.TriggerRepotracker(ctx, gh.queue, gh.msgID, event); err != nil {
 			return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "triggering repotracker"))
 		}
 		if isTag(event.GetRef()) {
-			if err := gh.handleGitTag(newCtx, event); err != nil {
+			if err := gh.handleGitTag(ctx, event); err != nil {
 				return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "handling git tag"))
 			}
 			return gimlet.NewJSONResponse(struct{}{})
@@ -262,30 +322,33 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 
 	case *github.IssueCommentEvent:
 		fromApp := event.GetInstallation() != nil
-		if gh.shouldSkipWebhook(newCtx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
+		if gh.shouldSkipWebhook(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
 			break
 		}
-		if err := gh.handleComment(newCtx, event); err != nil {
+		if err := gh.handleComment(ctx, event); err != nil {
 			return gimlet.MakeJSONInternalErrorResponder(err)
 		}
 
 	case *github.MergeGroupEvent:
 		fromApp := event.GetInstallation() != nil
-		if gh.shouldSkipWebhook(newCtx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
+		if gh.shouldSkipWebhook(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), fromApp) {
 			break
 		}
 		if event.GetAction() == githubActionChecksRequested {
-			return gh.handleMergeGroupChecksRequested(newCtx, event)
+			return gh.handleMergeGroupChecksRequested(ctx, event)
+		}
+		if event.GetAction() == githubActionDestroyed {
+			return gh.handleMergeGroupDestroyed(ctx, event)
 		}
 
 	case *github.CheckRunEvent:
 		if event.GetAction() == githubActionRerequested {
-			return gh.handleCheckRunRerequested(newCtx, event)
+			return gh.handleCheckRunRerequested(ctx, event)
 		}
 
 	case *github.CheckSuiteEvent:
 		if event.GetAction() == githubActionRerequested {
-			return gh.handleCheckSuiteRerequested(newCtx, event)
+			return gh.handleCheckSuiteRerequested(ctx, event)
 		}
 	}
 
@@ -295,7 +358,7 @@ func (gh *githubHookApi) Run(ctx context.Context) gimlet.Responder {
 func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, uid int, checkRun *github.CheckRun) error {
 	taskIDFromCheckrun := checkRun.GetExternalID()
 	if taskIDFromCheckrun == "" {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -307,7 +370,7 @@ func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, 
 	}
 	taskToRestart, taskErr := data.FindTask(ctx, taskIDFromCheckrun)
 	if taskErr != nil {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -323,7 +386,7 @@ func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, 
 	}
 	githubUser, err := user.FindByGithubUID(ctx, uid)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -338,7 +401,7 @@ func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, 
 		return errors.Errorf("user with GitHub ID '%d' not found", uid)
 	}
 	if err := model.ResetTaskOrDisplayTask(ctx, gh.settings, taskToRestart, githubUser.Id, evergreen.GithubCheckRun, false, nil); err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -359,7 +422,7 @@ func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, 
 	// Should still update check run even if task isn't refreshed.
 	latestExecutionForTask, taskErr := data.FindTask(ctx, taskIDFromCheckrun)
 	if taskErr != nil {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -371,12 +434,29 @@ func (gh *githubHookApi) rerunCheckRun(ctx context.Context, owner, repo string, 
 		latestExecutionForTask = taskToRestart
 	}
 
+	// Get the project's GitHub app auth for check run operations.
+	ghAppAuth, err := model.GetAndValidateCheckRunGitHubAppAuth(ctx, taskToRestart)
+	if err != nil {
+		grip.Debug(ctx, message.WrapError(err, message.Fields{
+			"source":    "GitHub hook",
+			"operation": "check run",
+			"msg_id":    gh.msgID,
+			"event":     gh.eventType,
+			"owner":     owner,
+			"repo":      repo,
+			"task":      taskToRestart.Id,
+			"message":   "checkRun not updated for task",
+		}))
+		// Don't want to retry on this case, so log but return no error.
+		return nil
+	}
 	// Check run status should stay the same while task is being re-run.
 	latestExecutionForTask.Status = taskToRestart.Status
-	_, err = thirdparty.UpdateCheckRun(ctx, owner, repo, gh.settings.Api.URL, checkRun.GetID(), latestExecutionForTask, output)
+	_, err = thirdparty.UpdateCheckRun(ctx, owner, repo, gh.settings.Api.URL, checkRun.GetID(), latestExecutionForTask, output, ghAppAuth)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":    "GitHub hook",
+			"operation": "check run",
 			"msg_id":    gh.msgID,
 			"event":     gh.eventType,
 			"owner":     owner,
@@ -397,7 +477,7 @@ func (gh *githubHookApi) handleCheckRunRerequested(ctx context.Context, event *g
 
 	checkRun := event.GetCheckRun()
 	if checkRun == nil {
-		grip.Error(message.Fields{
+		grip.Error(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"msg_id":  gh.msgID,
 			"event":   gh.eventType,
@@ -422,7 +502,7 @@ func (gh *githubHookApi) handleCheckSuiteRerequested(ctx context.Context, event 
 	repo := event.Repo.GetName()
 	checkRunIDs, err := thirdparty.ListCheckRunCheckSuite(ctx, owner, repo, event.CheckSuite.GetID())
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":      "GitHub hook",
 			"msg_id":      gh.msgID,
 			"event":       gh.eventType,
@@ -437,7 +517,7 @@ func (gh *githubHookApi) handleCheckSuiteRerequested(ctx context.Context, event 
 	for _, checkRunID := range checkRunIDs {
 		checkRun, err := thirdparty.GetCheckRun(ctx, owner, repo, checkRunID)
 		if err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"source":    "GitHub hook",
 				"msg_id":    gh.msgID,
 				"event":     gh.eventType,
@@ -462,27 +542,40 @@ func (gh *githubHookApi) handleMergeGroupChecksRequested(ctx context.Context, ev
 	org := event.GetOrg().GetLogin()
 	repo := event.GetRepo().GetName()
 	branch := strings.TrimPrefix(event.MergeGroup.GetBaseRef(), "refs/heads/")
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"source":   "GitHub hook",
 		"msg_id":   gh.msgID,
 		"event":    gh.eventType,
 		"org":      org,
 		"repo":     repo,
 		"branch":   branch,
+		"sender":   event.GetSender().GetLogin(),
 		"base_sha": event.GetMergeGroup().GetBaseSHA(),
 		"head_sha": event.GetMergeGroup().GetHeadSHA(),
 		"message":  "merge group received",
 	})
-	// Ensure that a project exists before creating an intent. Otherwise, intent creation will fail which will always yield an unactionable 'Evergreen error' posted to GitHub.
-	projectRefs, err := model.FindMergedEnabledProjectRefsByRepoAndBranch(ctx, org, repo, branch)
+	// Ensure that a project has merge queue enabled before creating an intent.
+	// Otherwise, intent processing emits an unactionable failing status to GitHub.
+	projectRef, err := model.FindOneProjectRefWithCommitQueueByOwnerRepoAndBranch(ctx, org, repo, branch)
 	if err != nil {
 		return gimlet.NewJSONInternalErrorResponse(errors.Wrap(err, "finding project ref"))
 	}
-	if len(projectRefs) == 0 {
-		return gimlet.NewJSONInternalErrorResponse(errors.New("no matching project ref"))
+	if projectRef == nil {
+		grip.Info(ctx, message.Fields{
+			"source":   "GitHub hook",
+			"msg_id":   gh.msgID,
+			"event":    gh.eventType,
+			"org":      org,
+			"repo":     repo,
+			"branch":   branch,
+			"base_sha": event.GetMergeGroup().GetBaseSHA(),
+			"head_sha": event.GetMergeGroup().GetHeadSHA(),
+			"message":  "GitHub merge group ignored because Evergreen merge queue is not enabled",
+		})
+		return nil
 	}
 	if err := gh.AddIntentForGithubMerge(ctx, event); err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"source":   "GitHub hook",
 			"msg_id":   gh.msgID,
 			"event":    gh.eventType,
@@ -500,7 +593,7 @@ func (gh *githubHookApi) handleMergeGroupChecksRequested(ctx context.Context, ev
 
 // AddIntentForGithubMerge creates and inserts an intent document in response to a GitHub merge group event.
 func (gh *githubHookApi) AddIntentForGithubMerge(ctx context.Context, mg *github.MergeGroupEvent) error {
-	intent, err := patch.NewGithubMergeIntent(gh.msgID, patch.AutomatedCaller, mg)
+	intent, err := patch.NewGithubMergeIntent(ctx, gh.msgID, patch.AutomatedCaller, mg)
 	if err != nil {
 		return errors.Wrap(err, "creating GitHub merge intent")
 	}
@@ -508,6 +601,97 @@ func (gh *githubHookApi) AddIntentForGithubMerge(ctx context.Context, mg *github
 		return errors.Wrap(err, "saving GitHub merge intent")
 	}
 	return nil
+}
+
+// handleMergeGroupDestroyed processes a "destroyed" MergeGroupEvent. It marks
+// merge queue patches as removed from the queue and cancels their tasks.
+func (gh *githubHookApi) handleMergeGroupDestroyed(ctx context.Context, event *github.MergeGroupEvent) gimlet.Responder {
+	org := event.GetOrg().GetLogin()
+	repo := event.GetRepo().GetName()
+	headSHA := event.GetMergeGroup().GetHeadSHA()
+	reason := event.GetReason()
+
+	grip.Info(ctx, message.Fields{
+		"source":   "GitHub hook",
+		"msg_id":   gh.msgID,
+		"event":    gh.eventType,
+		"org":      org,
+		"repo":     repo,
+		"head_sha": headSHA,
+		"reason":   reason,
+		"message":  "merge group destroyed",
+	})
+
+	updatedPatches, err := patch.MarkMergeQueuePatchesRemovedFromQueue(ctx, org, repo, headSHA, reason)
+	if err != nil {
+		grip.Error(ctx, message.WrapError(err, message.Fields{
+			"source":   "GitHub hook",
+			"msg_id":   gh.msgID,
+			"event":    gh.eventType,
+			"org":      org,
+			"repo":     repo,
+			"head_sha": headSHA,
+			"reason":   reason,
+			"message":  "error marking merge queue patches as removed from queue",
+		}))
+		return gimlet.NewJSONInternalErrorResponse(errors.Wrap(err, "marking patches as removed from queue"))
+	}
+
+	catcher := grip.NewSimpleCatcher()
+	for _, p := range updatedPatches {
+		// Patches may not be finalized if the merge group was destroyed before
+		// the patch intent was processed into a version with tasks.
+		if p.Version == "" {
+			continue
+		}
+		err := model.CancelPatch(ctx, &p, task.AbortInfo{User: evergreen.GithubMergeUser})
+		grip.Error(ctx, message.WrapError(err, message.Fields{
+			"source":     "GitHub hook",
+			"msg_id":     gh.msgID,
+			"event":      gh.eventType,
+			"org":        org,
+			"repo":       repo,
+			"head_sha":   headSHA,
+			"reason":     reason,
+			"patch_id":   p.Id.Hex(),
+			"version_id": p.Version,
+			"message":    "error cancelling merge queue patch",
+		}))
+		catcher.Wrapf(err, "cancelling patch '%s'", p.Id.Hex())
+	}
+
+	if catcher.HasErrors() {
+		return gimlet.NewJSONInternalErrorResponse(errors.Wrap(catcher.Resolve(), "cancelling merge queue patches"))
+	}
+
+	updatedPatchIDs := make([]string, 0, len(updatedPatches))
+	for _, p := range updatedPatches {
+		updatedPatchIDs = append(updatedPatchIDs, p.Id.Hex())
+	}
+	model.EmitMergeQueueDestroyedSpans(ctx, updatedPatchIDs, org, repo, headSHA, event.GetMergeGroup().GetHeadRef(), reason)
+
+	model.EmitMergeQueueCompletionMetricsFromWebhook(ctx, updatedPatchIDs)
+
+	logFields := message.Fields{
+		"source":   "GitHub hook",
+		"msg_id":   gh.msgID,
+		"event":    gh.eventType,
+		"org":      org,
+		"repo":     repo,
+		"head_sha": headSHA,
+		"reason":   reason,
+	}
+
+	if len(updatedPatches) > 0 {
+		logFields["patches_updated"] = len(updatedPatches)
+		logFields["message"] = "successfully processed merge group destroyed event"
+	} else {
+		logFields["message"] = "no patches updated when marking merge group as removed"
+	}
+
+	grip.Info(ctx, logFields)
+
+	return gimlet.NewJSONResponse(struct{}{})
 }
 
 // handleComment parses a given comment and takes the relevant action, if it's an Evergreen-tracked comment.
@@ -528,37 +712,37 @@ func (gh *githubHookApi) handleComment(ctx context.Context, event *github.IssueC
 		if isPatchComment(commentBody) {
 			alias = parsePRCommentForAlias(commentBody)
 		}
-		grip.Info(gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
+		grip.Info(ctx, gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
 
 		err := gh.createPRPatch(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), callerType, alias, event.Issue.GetNumber())
-		grip.Error(message.WrapError(err, gh.getCommentLogWithMessage(event,
+		grip.Error(ctx, message.WrapError(err, gh.getCommentLogWithMessage(event,
 			fmt.Sprintf("can't create PR for '%s'", commentBody))))
 		return errors.Wrap(err, "creating patch")
 	}
 
 	if triggersStatusRefresh(commentBody) {
-		grip.Info(gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
+		grip.Info(ctx, gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
 
 		err := gh.refreshPatchStatus(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), event.Issue.GetNumber())
-		grip.Error(message.WrapError(err, gh.getCommentLogWithMessage(event,
+		grip.Error(ctx, message.WrapError(err, gh.getCommentLogWithMessage(event,
 			"problem triggering status refresh")))
 		return errors.Wrap(err, "triggering status refresh")
 	}
 
 	if triggersHelpText(commentBody) {
-		grip.Info(gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
+		grip.Info(ctx, gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
 		err := gh.displayHelpText(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), event.Issue.GetNumber())
-		grip.Error(message.WrapError(err, gh.getCommentLogWithMessage(event,
+		grip.Error(ctx, message.WrapError(err, gh.getCommentLogWithMessage(event,
 			"problem sending help comment")))
 		return errors.Wrap(err, "sending help comment")
 	}
 
 	if isKeepDefinitionsComment(commentBody) {
-		grip.Info(gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
+		grip.Info(ctx, gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
 
 		err := keepPRPatchDefinition(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), event.Issue.GetNumber())
 
-		grip.Error(message.WrapError(err, gh.getCommentLogWithMessage(event,
+		grip.Error(ctx, message.WrapError(err, gh.getCommentLogWithMessage(event,
 			"problem keeping pr patch definitions")))
 
 		return errors.Wrap(err, "keeping pr patch definition")
@@ -566,11 +750,11 @@ func (gh *githubHookApi) handleComment(ctx context.Context, event *github.IssueC
 	}
 
 	if isResetDefinitionsComment(commentBody) {
-		grip.Info(gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
+		grip.Info(ctx, gh.getCommentLogWithMessage(event, fmt.Sprintf("'%s' triggered", commentBody)))
 
 		err := resetPRPatchDefinition(ctx, event.Repo.Owner.GetLogin(), event.Repo.GetName(), event.Issue.GetNumber())
 
-		grip.Error(message.WrapError(err, gh.getCommentLogWithMessage(event,
+		grip.Error(ctx, message.WrapError(err, gh.getCommentLogWithMessage(event,
 			"problem resetting pr patch definitions")))
 
 		return errors.Wrap(err, "resetting pr patch definition")
@@ -585,9 +769,9 @@ func (gh *githubHookApi) getCommentLogWithMessage(event *github.IssueCommentEven
 		"source":    "GitHub hook",
 		"msg_id":    gh.msgID,
 		"event":     gh.eventType,
-		"repo":      *event.Repo.FullName,
-		"pr_number": *event.Issue.Number,
-		"user":      *event.Sender.Login,
+		"repo":      event.GetRepo().GetFullName(),
+		"pr_number": event.GetIssue().GetNumber(),
+		"user":      event.GetSender().GetLogin(),
 		"message":   msg,
 	}
 }
@@ -728,7 +912,7 @@ func shouldSkipCIForGraphite(ctx context.Context, owner, repo string, prNumber i
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		grip.Warning(message.Fields{
+		grip.Warning(ctx, message.Fields{
 			"message":  "Invalid authentication. Skipping Graphite checks.",
 			"owner":    owner,
 			"repo":     repo,
@@ -737,11 +921,11 @@ func shouldSkipCIForGraphite(ctx context.Context, owner, repo string, prNumber i
 			"ref":      ref,
 			"head_ref": headRef,
 		})
-		return false, errors.New("invalid authentication for Graphite CI optimizer")
+		return false, nil
 	}
 
 	if resp.StatusCode == http.StatusPaymentRequired {
-		grip.Warning(message.Fields{
+		grip.Warning(ctx, message.Fields{
 			"message":  "Your Graphite plan does not support the CI Optimizer. Please upgrade your plan to use this feature.",
 			"owner":    owner,
 			"repo":     repo,
@@ -754,7 +938,7 @@ func shouldSkipCIForGraphite(ctx context.Context, owner, repo string, prNumber i
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		grip.Warning(message.Fields{
+		grip.Warning(ctx, message.Fields{
 			"message":      "Response returned a non-200 status. Skipping Graphite checks.",
 			"owner":        owner,
 			"repo":         repo,
@@ -769,18 +953,12 @@ func shouldSkipCIForGraphite(ctx context.Context, owner, repo string, prNumber i
 	}
 
 	// Parse the response body
-	var responseBodyBytes []byte
-	err = utility.ReadJSON(resp.Body, &responseBodyBytes)
-	if err != nil {
-		return false, errors.Wrap(err, "reading response body")
-	}
-
 	var responseBody struct {
 		Skip bool `json:"skip"`
 	}
 
-	if err = json.Unmarshal(responseBodyBytes, &responseBody); err != nil {
-		return false, errors.Wrap(err, "unmarshaling response body")
+	if err = utility.ReadJSON(resp.Body, &responseBody); err != nil {
+		return false, errors.Wrap(err, "reading response body")
 	}
 
 	return responseBody.Skip, nil
@@ -790,22 +968,6 @@ func (gh *githubHookApi) createPRPatch(ctx context.Context, owner, repo, calledB
 	pr, err := thirdparty.GetGithubPullRequest(ctx, owner, repo, prNumber)
 	if err != nil {
 		return errors.Wrapf(err, "getting PR for repo '%s:%s', PR #%d", owner, repo, prNumber)
-	}
-
-	skip, err := shouldSkipCIForGraphite(ctx, owner, repo, prNumber, pr.Head.GetSHA(), pr.Base.GetRef(), pr.Head.GetRef())
-	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
-			"message": "error checking Graphite CI optimizer",
-			"owner":   owner,
-			"repo":    repo,
-			"pr":      prNumber,
-			"sha":     pr.Head.GetSHA(),
-			"ref":     pr.Base.GetRef(),
-			"headRef": pr.Head.GetRef(),
-		}))
-		// Continue on error - don't block PR patch creation.
-	} else if skip {
-		return nil
 	}
 
 	baseBranch := pr.Base.GetRef()
@@ -890,7 +1052,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 		return errors.Wrap(err, "finding project ref for patch")
 	}
 	if projectRef == nil {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message": "skipping CI on PR due to no project ref with PR testing found",
 			"owner":   pr.Base.User.GetLogin(),
 			"repo":    pr.Base.Repo.GetName(),
@@ -908,7 +1070,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 		// graphite-base/* branch wil be deleted eventually, which can cause CI
 		// failures, so the recommendation is not to run tests on it at all.
 		// Docs: https://graphite.dev/docs/setup-recommended-ci-settings#ignore-graphite%E2%80%99s-temporary-branches-in-your-ci
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":     "skipping CI on PR because the base branch is a Graphite temporary branch, so Graphite is still rebasing the PR or encountered a merge conflict",
 			"owner":       pr.Base.User.GetLogin(),
 			"repo":        pr.Base.Repo.GetName(),
@@ -928,7 +1090,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 		)
 		update.Run(ctx)
 		if err := update.Error(); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"message":     "could not send back error for GitHub PR status due to Graphite temporary branch",
 				"owner":       pr.Base.User.GetLogin(),
 				"repo":        pr.Base.Repo.GetName(),
@@ -941,7 +1103,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 		return nil
 	}
 
-	mergeBase, err := thirdparty.GetPullRequestMergeBase(ctx, baseOwnerRepo[0], baseOwnerRepo[1], pr.Base.GetLabel(), pr.Head.GetLabel(), pr.GetNumber())
+	mergeBase, err := thirdparty.GetPullRequestMergeBase(ctx, pr)
 	if err != nil {
 		return errors.Wrapf(err, "getting merge base between branches '%s' and '%s'", pr.Base.GetLabel(), pr.Head.GetLabel())
 	}
@@ -958,7 +1120,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 			limitedDesc = limitedDesc[:skipCIDescriptionCharLimit]
 		}
 		if strings.Contains(title, label) || strings.Contains(limitedDesc, label) {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message": "skipping CI on PR due to skip label in title/description",
 				"owner":   pr.Base.User.GetLogin(),
 				"repo":    pr.Base.Repo.GetName(),
@@ -972,7 +1134,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 
 	conflictingPatches, err := getOtherPatchesWithHash(ctx, pr.Head.GetSHA(), pr.GetNumber())
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message":           "error getting same hash patches",
 			"owner":             pr.Base.User.GetLogin(),
 			"repo":              pr.Base.Repo.GetName(),
@@ -992,7 +1154,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 	// If we don't want to override any existing patches, comment to inform the user and no-op.
 	if !overrideExisting {
 		// We want to comment on explaining why a new patch will not be ran.
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":         "skipping CI on PR due to patch already existing",
 			"owner":           pr.Base.User.GetLogin(),
 			"repo":            pr.Base.Repo.GetName(),
@@ -1017,7 +1179,7 @@ func (gh *githubHookApi) AddIntentForPR(ctx context.Context, pr *github.PullRequ
 // and ignore them. If any errors from aborting patches occur, we comment again to inform the user that there was
 // an error and to retry- and we fail the entire operation.
 func (gh *githubHookApi) overrideOtherPRs(ctx context.Context, pr *github.PullRequest, patches []patch.Patch) error {
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":         "aborting existing CI on same SHA patches",
 		"owner":           pr.Base.User.GetLogin(),
 		"repo":            pr.Base.Repo.GetName(),
@@ -1038,14 +1200,14 @@ func (gh *githubHookApi) overrideOtherPRs(ctx context.Context, pr *github.PullRe
 		commentsCatcher.Wrap(gh.sc.AddCommentToPR(ctx, pr.Base.User.GetLogin(), pr.Base.Repo.GetName(), pr.GetNumber(), "There was an issue aborting the other patches, please try 'evergreen retry' again."), "adding comment to overriding PR when error")
 	}
 
-	grip.Warning(message.WrapError(commentsCatcher.Resolve(), message.Fields{
+	grip.Warning(ctx, message.WrapError(commentsCatcher.Resolve(), message.Fields{
 		"message": "commenting on patches with same hash to cancel",
 		"owner":   pr.Base.User.GetLogin(),
 		"repo":    pr.Base.Repo.GetName(),
 		"ref":     pr.Head.GetRef(),
 		"pr_num":  pr.GetNumber(),
 	}))
-	grip.Error(message.WrapError(cancelCatcher.Resolve(), message.Fields{
+	grip.Error(ctx, message.WrapError(cancelCatcher.Resolve(), message.Fields{
 		"message": "cancelling patches with same hash",
 		"owner":   pr.Base.User.GetLogin(),
 		"repo":    pr.Base.Repo.GetName(),
@@ -1067,7 +1229,7 @@ func (gh *githubHookApi) handleGitTag(ctx context.Context, event *github.PushEve
 	defer span.End()
 
 	if err := validatePushTagEvent(event); err != nil {
-		grip.Debug(message.WrapError(err, message.Fields{
+		grip.Debug(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"message": "error validating event",
 			"ref":     event.GetRef(),
@@ -1089,7 +1251,7 @@ func (gh *githubHookApi) handleGitTag(ctx context.Context, event *github.PushEve
 		return gh.handleDeletedGitTag(ctx, event, tag, owner, repo)
 	}
 
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"source":  "GitHub hook",
 		"msg_id":  gh.msgID,
 		"event":   gh.eventType,
@@ -1106,7 +1268,7 @@ func (gh *githubHookApi) handleGitTag(ctx context.Context, event *github.PushEve
 func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.PushEvent, tag model.GitTag, owner, repo string) error {
 	hash, err := thirdparty.GetTaggedCommitFromGithub(ctx, owner, repo, event.GetRef())
 	if err != nil {
-		grip.Debug(message.WrapError(err, message.Fields{
+		grip.Debug(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"message": "getting tagged commit from GitHub",
 			"ref":     event.GetRef(),
@@ -1119,7 +1281,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 	}
 	projectRefs, err := model.FindMergedEnabledProjectRefsByOwnerAndRepo(ctx, owner, repo)
 	if err != nil {
-		grip.Debug(message.WrapError(err, message.Fields{
+		grip.Debug(ctx, message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"message": "error finding projects",
 			"ref":     event.GetRef(),
@@ -1131,7 +1293,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 		return errors.Wrapf(err, "finding projects for repo '%s/%s'", owner, repo)
 	}
 	if len(projectRefs) == 0 {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"source":  "GitHub hook",
 			"message": "no projects found",
 			"ref":     event.GetRef(),
@@ -1175,7 +1337,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 					continue
 				}
 				foundVersion[pRef.Id] = true
-				grip.Debug(message.Fields{
+				grip.Debug(ctx, message.Fields{
 					"source":  "GitHub hook",
 					"message": "adding tag to version",
 					"version": existingVersion.Id,
@@ -1207,7 +1369,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 					continue
 				}
 				if v != nil {
-					grip.Info(message.Fields{
+					grip.Info(ctx, message.Fields{
 						"source":  "GitHub hook",
 						"msg_id":  gh.msgID,
 						"event":   gh.eventType,
@@ -1228,7 +1390,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 		})
 	catcher.Add(err)
 	resolvedError := catcher.Resolve()
-	grip.Error(message.WrapError(resolvedError, message.Fields{
+	grip.Error(ctx, message.WrapError(resolvedError, message.Fields{
 		"source":  "GitHub hook",
 		"msg_id":  gh.msgID,
 		"event":   gh.eventType,
@@ -1244,7 +1406,7 @@ func (gh *githubHookApi) handleCreatedGitTag(ctx context.Context, event *github.
 func (gh *githubHookApi) handleDeletedGitTag(ctx context.Context, event *github.PushEvent, tag model.GitTag, owner, repo string) error {
 	err := model.RemoveGitTagFromVersions(ctx, owner, repo, tag)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.ErrorWhen(ctx, !errors.Is(context.Canceled, err), message.WrapError(err, message.Fields{
 			"source":  "GitHub hook",
 			"message": "removing tag from versions",
 			"ref":     event.GetRef(),
@@ -1255,7 +1417,7 @@ func (gh *githubHookApi) handleDeletedGitTag(ctx context.Context, event *github.
 		}))
 		return errors.Wrapf(err, "removing tag '%s' from versions", tag.Tag)
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"source":  "GitHub hook",
 		"msg_id":  gh.msgID,
 		"event":   gh.eventType,
@@ -1275,7 +1437,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 	}
 
 	if !pRef.AuthorizedForGitTag(ctx, tag.Pusher, pRef.Owner, pRef.Repo) {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"source":             "GitHub hook",
 			"msg_id":             gh.msgID,
 			"event":              gh.eventType,
@@ -1290,7 +1452,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 		}
 		stubVersion, dbErr := repotracker.ShellVersionFromRevision(ctx, &pRef, metadata)
 		if dbErr != nil {
-			grip.Error(message.WrapError(dbErr, message.Fields{
+			grip.Error(ctx, message.WrapError(dbErr, message.Fields{
 				"message":            "error creating shell version",
 				"project":            pRef.Id,
 				"project_identifier": pRef.Identifier,
@@ -1300,7 +1462,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 		stubVersion.Errors = []string{errors.Errorf("user '%s' not authorized for git tag version", tag.Pusher).Error()}
 		err := stubVersion.Insert(ctx)
 		if err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"message":            "error inserting stub version for failed git tag version",
 				"project":            pRef.Id,
 				"project_identifier": pRef.Identifier,
@@ -1318,7 +1480,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 				return nil, errors.Wrap(err, "getting email sender")
 			}
 
-			subject, body := unauthorizedGitTagEmail(tag.Tag, tag.Pusher, fmt.Sprintf("https://spruce.mongodb.com/project/%s/settings/github-commitqueue", pRef.Identifier))
+			subject, body := unauthorizedGitTagEmail(tag.Tag, tag.Pusher, fmt.Sprintf("https://spruce.corp.mongodb.com/project/%s/settings/github-commitqueue", pRef.Identifier))
 			email := message.Email{
 				Recipients:        []string{userDoc.EmailAddress},
 				PlainTextContents: false,
@@ -1326,7 +1488,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 				Body:              body,
 			}
 			composer := message.NewEmailMessage(level.Notice, email)
-			sender.Send(composer)
+			sender.Send(ctx, composer)
 		}
 		return nil, nil
 	}
@@ -1341,7 +1503,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 		Revision:   revision,
 		GitTag:     tag,
 		RemotePath: remotePath,
-		Activate:   true,
+		Activate:   pRef.IsWaterfallEnabled(),
 	}
 	var projectInfo model.ProjectInfo
 	if remotePath != "" {
@@ -1352,7 +1514,7 @@ func (gh *githubHookApi) createVersionForTag(ctx context.Context, pRef model.Pro
 				return nil, errors.Wrap(err, "getting admin settings")
 			}
 		}
-		projectInfo, err = gh.sc.GetProjectFromFile(ctx, pRef, remotePath)
+		projectInfo, err = gh.sc.GetProjectFromFile(ctx, pRef, remotePath, gh.settings)
 		if err != nil {
 			return nil, errors.Wrap(err, "loading project info from file")
 		}

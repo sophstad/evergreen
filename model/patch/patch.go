@@ -10,7 +10,6 @@ import (
 	"github.com/evergreen-ci/evergreen/db"
 	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
 	"github.com/evergreen-ci/evergreen/thirdparty"
-	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/anser/bsonutil"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
@@ -26,69 +25,6 @@ type VariantTasks struct {
 	Variant      string        `bson:"variant"`
 	Tasks        []string      `bson:"tasks"`
 	DisplayTasks []DisplayTask `bson:"displaytasks"`
-}
-
-// MergeVariantsTasks merges two slices of VariantsTasks into a single set.
-func MergeVariantsTasks(vts1, vts2 []VariantTasks) []VariantTasks {
-	bvToVT := map[string]VariantTasks{}
-	for _, vt := range vts1 {
-		if _, ok := bvToVT[vt.Variant]; !ok {
-			bvToVT[vt.Variant] = VariantTasks{Variant: vt.Variant}
-		}
-		bvToVT[vt.Variant] = mergeVariantTasks(bvToVT[vt.Variant], vt)
-	}
-	for _, vt := range vts2 {
-		if _, ok := bvToVT[vt.Variant]; !ok {
-			bvToVT[vt.Variant] = VariantTasks{Variant: vt.Variant}
-		}
-		bvToVT[vt.Variant] = mergeVariantTasks(bvToVT[vt.Variant], vt)
-	}
-
-	var merged []VariantTasks
-	for _, vt := range bvToVT {
-		merged = append(merged, vt)
-	}
-	return merged
-}
-
-// mergeVariantTasks merges the current VariantTask for a specific variant with
-// toMerge, whichs has the same variant.  The merged VariantTask contains all
-// unique task names from current and toMerge. All display tasks merged such
-// that, for each display task name, execution tasks are merged into a unique
-// set for that display task.
-func mergeVariantTasks(current VariantTasks, toMerge VariantTasks) VariantTasks {
-	for _, t := range toMerge.Tasks {
-		if !utility.StringSliceContains(current.Tasks, t) {
-			current.Tasks = append(current.Tasks, t)
-		}
-	}
-	for _, dt := range toMerge.DisplayTasks {
-		var found bool
-		for i := range current.DisplayTasks {
-			if current.DisplayTasks[i].Name != dt.Name {
-				continue
-			}
-			current.DisplayTasks[i] = mergeDisplayTasks(current.DisplayTasks[i], dt)
-			found = true
-			break
-		}
-		if !found {
-			current.DisplayTasks = append(current.DisplayTasks, dt)
-		}
-	}
-	return current
-}
-
-// mergeDisplayTasks merges two display tasks such that the resulting
-// DisplayTask's execution tasks are the unique set of execution tasks from
-// current and toMerge.
-func mergeDisplayTasks(current DisplayTask, toMerge DisplayTask) DisplayTask {
-	for _, et := range toMerge.ExecTasks {
-		if !utility.StringSliceContains(current.ExecTasks, et) {
-			current.ExecTasks = append(current.ExecTasks, et)
-		}
-	}
-	return current
 }
 
 type DisplayTask struct {
@@ -119,29 +55,31 @@ type LocalModuleInclude struct {
 
 // Patch stores all details related to a patch request
 type Patch struct {
-	Id                                      mgobson.ObjectId `bson:"_id,omitempty"`
-	Description                             string           `bson:"desc"`
-	Path                                    string           `bson:"path,omitempty"`
-	Githash                                 string           `bson:"githash"`
-	Hidden                                  bool             `bson:"hidden"`
-	PatchNumber                             int              `bson:"patch_number"`
-	Author                                  string           `bson:"author"`
-	Version                                 string           `bson:"version"`
-	Status                                  string           `bson:"status"`
-	CreateTime                              time.Time        `bson:"create_time"`
-	StartTime                               time.Time        `bson:"start_time"`
-	FinishTime                              time.Time        `bson:"finish_time"`
-	BuildVariants                           []string         `bson:"build_variants"`
-	RegexBuildVariants                      []string         `bson:"regex_build_variants"`
-	RegexTestSelectionBuildVariants         []string         `bson:"regex_test_selection_build_variants,omitempty"`
-	RegexTestSelectionExcludedBuildVariants []string         `bson:"regex_test_selection_excluded_build_variants,omitempty"`
-	Tasks                                   []string         `bson:"tasks"`
-	RegexTestSelectionTasks                 []string         `bson:"regex_test_selection_tasks,omitempty"`
-	RegexTestSelectionExcludedTasks         []string         `bson:"regex_test_selection_excluded_tasks,omitempty"`
-	RegexTasks                              []string         `bson:"regex_tasks"`
-	VariantsTasks                           []VariantTasks   `bson:"variants_tasks"`
-	Patches                                 []ModulePatch    `bson:"patches"`
-	Parameters                              []Parameter      `bson:"parameters,omitempty"`
+	Id          mgobson.ObjectId `bson:"_id,omitempty"`
+	Description string           `bson:"desc"`
+	Path        string           `bson:"path,omitempty"`
+	Githash     string           `bson:"githash"`
+	Hidden      bool             `bson:"hidden"`
+	PatchNumber int              `bson:"patch_number"`
+	Author      string           `bson:"author"`
+	Version     string           `bson:"version"`
+	Status      string           `bson:"status"`
+	CreateTime  time.Time        `bson:"create_time"`
+	// IngestTime is the wall-clock time when this patch document was first persisted.
+	IngestTime                              time.Time      `bson:"ingest_time,omitempty"`
+	StartTime                               time.Time      `bson:"start_time"`
+	FinishTime                              time.Time      `bson:"finish_time"`
+	BuildVariants                           []string       `bson:"build_variants"`
+	RegexBuildVariants                      []string       `bson:"regex_build_variants"`
+	RegexTestSelectionBuildVariants         []string       `bson:"regex_test_selection_build_variants,omitempty"`
+	RegexTestSelectionExcludedBuildVariants []string       `bson:"regex_test_selection_excluded_build_variants,omitempty"`
+	Tasks                                   []string       `bson:"tasks"`
+	RegexTestSelectionTasks                 []string       `bson:"regex_test_selection_tasks,omitempty"`
+	RegexTestSelectionExcludedTasks         []string       `bson:"regex_test_selection_excluded_tasks,omitempty"`
+	RegexTasks                              []string       `bson:"regex_tasks"`
+	VariantsTasks                           []VariantTasks `bson:"variants_tasks"`
+	Patches                                 []ModulePatch  `bson:"patches"`
+	Parameters                              []Parameter    `bson:"parameters,omitempty"`
 	// Activated indicates whether or not the patch is finalized (i.e.
 	// tasks/variants are now scheduled to run). If true, the patch has been
 	// finalized.
@@ -165,9 +103,13 @@ type Patch struct {
 	Alias                string                               `bson:"alias"`
 	Triggers             TriggerInfo                          `bson:"triggers"`
 	MergePatch           string                               `bson:"merge_patch"`
-	GithubPatchData      thirdparty.GithubPatch               `bson:"github_patch_data,omitempty"`
-	GithubMergeData      thirdparty.GithubMergeGroup          `bson:"github_merge_data,omitempty"`
-	GitInfo              *GitMetadata                         `bson:"git_info,omitempty"`
+	// GithubPatchData stores GitHub PR patch metadata.
+	GithubPatchData thirdparty.GithubPatch `bson:"github_patch_data,omitempty"`
+	// GithubMergeData stores GitHub merge queue metadata.
+	GithubMergeData thirdparty.GithubMergeGroup `bson:"github_merge_data,omitempty"`
+	// GitHubParentPRCheckout stores parent PR checkout metadata.
+	GitHubParentPRCheckout *GitHubParentPRCheckout `bson:"github_parent_pr_checkout,omitempty"`
+	GitInfo                *GitMetadata            `bson:"git_info,omitempty"`
 	// DisplayNewUI is only used when roundtripping the patch via the CLI
 	DisplayNewUI bool `bson:"display_new_ui,omitempty"`
 	// MergeStatus is only used in gitServePatch to send the status of this
@@ -184,6 +126,8 @@ type Patch struct {
 	// when the manifest is not found.
 	// Not stored in the database since it is only needed during patch creation.
 	ReferenceManifestID string `bson:"-"`
+	// MergeQueueMetricsEmitStatus tracks whether the patch_completed span was successfully emitted.
+	MergeQueueMetricsEmitStatus string `bson:"merge_queue_metrics_emit_status,omitempty"`
 }
 
 func (p *Patch) MarshalBSON() ([]byte, error)  { return mgobson.Marshal(p) }
@@ -204,14 +148,29 @@ type PatchSet struct {
 	Summary        []thirdparty.Summary `bson:"summary"`
 }
 
+// GitHubParentPRCheckout stores parent PR checkout metadata.
+type GitHubParentPRCheckout struct {
+	PRNumber  int    `bson:"pr_number,omitempty"`
+	BaseOwner string `bson:"base_owner,omitempty"`
+	BaseRepo  string `bson:"base_repo,omitempty"`
+	HeadOwner string `bson:"head_owner,omitempty"`
+	HeadRepo  string `bson:"head_repo,omitempty"`
+	HeadHash  string `bson:"head_hash,omitempty"`
+	ForModule string `bson:"for_module,omitempty"`
+	ForSource bool   `bson:"for_source,omitempty"`
+}
+
 type TriggerInfo struct {
 	Aliases              []string    `bson:"aliases,omitempty"`
 	ParentPatch          string      `bson:"parent_patch,omitempty"`
 	ParentProjectID      string      `bson:"parent_project_id,omitempty"`
+	ParentAsModule       string      `bson:"parent_as_module,omitempty"`
 	DownstreamRevision   string      `bson:"downstream_revision,omitempty"`
 	SameBranchAsParent   bool        `bson:"same_branch_as_parent"`
 	ChildPatches         []string    `bson:"child_patches,omitempty"`
 	DownstreamParameters []Parameter `bson:"downstream_parameters,omitempty"`
+	// ChildrenCompletedTime represents the time all child patches for a parent patch completed.
+	ChildrenCompletedTime time.Time `bson:"children_completed_time"`
 }
 
 type PatchTriggerDefinition struct {
@@ -235,6 +194,35 @@ type TaskSpecifier struct {
 // status.
 func (p *Patch) IsFinished() bool {
 	return evergreen.IsFinishedVersionStatus(p.Status)
+}
+
+// GetCollectiveTimes returns the collective start and finish times for the
+// patch family (parent + all child patches). For parent patches with children,
+// it returns the earliest start time and latest finish time across all patches.
+// For non-parent patches or parents without children, it returns the patch's own times.
+func (p *Patch) GetCollectiveTimes(ctx context.Context) (startTime, finishTime time.Time, err error) {
+	startTime = p.StartTime
+	finishTime = p.FinishTime
+
+	if !p.IsParent() || len(p.Triggers.ChildPatches) == 0 {
+		return startTime, finishTime, nil
+	}
+
+	childPatches, err := Find(ctx, ByStringIds(p.Triggers.ChildPatches))
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.Wrap(err, "getting child patches for collective time calculations")
+	}
+
+	for _, childPatch := range childPatches {
+		if !childPatch.StartTime.IsZero() && (startTime.IsZero() || childPatch.StartTime.Before(startTime)) {
+			startTime = childPatch.StartTime
+		}
+		if !childPatch.FinishTime.IsZero() && childPatch.FinishTime.After(finishTime) {
+			finishTime = childPatch.FinishTime
+		}
+	}
+
+	return startTime, finishTime, nil
 }
 
 // SetDescription sets a patch's description in the database
@@ -349,6 +337,20 @@ func (p *Patch) SetDownstreamParameters(ctx context.Context, parameters []Parame
 	)
 }
 
+// SetChildrenCompletedTime sets a patch's ChildrenCompletedTime.
+func (p *Patch) SetChildrenCompletedTime(ctx context.Context, completedTime time.Time) error {
+	triggersKey := bsonutil.GetDottedKeyName(TriggersKey, TriggerInfoChildrenCompletedTimeKey)
+	return UpdateOne(
+		ctx,
+		bson.M{IdKey: p.Id},
+		bson.M{
+			"$set": bson.M{
+				triggersKey: completedTime,
+			},
+		},
+	)
+}
+
 // ResolveVariantTasks returns a set of all build variants and a set of all
 // tasks that will run based on the given VariantTasks, filtering out any
 // duplicates.
@@ -435,6 +437,7 @@ func TryMarkStarted(ctx context.Context, versionId string, startTime time.Time) 
 
 // Insert inserts the patch into the db, returning any errors that occur
 func (p *Patch) Insert(ctx context.Context) error {
+	p.IngestTime = time.Now()
 	return db.Insert(ctx, Collection, p)
 }
 
@@ -698,9 +701,9 @@ func (p *Patch) IsParent() bool {
 }
 
 // ShouldPatchFileWithDiff returns true if the patch should read with diff
-// (i.e. is not a PR patch) and the config has changed.
+// (i.e. is not a GitHub patch) and the config has changed.
 func (p *Patch) ShouldPatchFileWithDiff(path string) bool {
-	return !p.IsGithubPRPatch() && p.ConfigChanged(path)
+	return !p.IsGithubPRPatch() && !p.IsMergeQueuePatch() && p.ConfigChanged(path)
 }
 
 func (p *Patch) GetPatchIndex(parentPatch *Patch) (int, error) {
@@ -902,7 +905,7 @@ func GetCollectiveStatusFromPatchStatuses(statuses []string) string {
 	}
 
 	if !(hasCreated || hasFailure || hasSuccess || hasAborted) {
-		grip.Critical(message.Fields{
+		grip.Critical(context.Background(), message.Fields{
 			"message":  "An unknown patch status was found",
 			"cause":    "Programmer error: new statuses should be added to GetCollectiveStatusFromPatchStatuses().",
 			"statuses": statuses,

@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/build"
+	"github.com/evergreen-ci/evergreen/model/cost"
 	"github.com/evergreen-ci/evergreen/model/patch"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/user"
@@ -31,23 +34,6 @@ func (r *patchResolver) AuthorDisplayName(ctx context.Context, obj *restModel.AP
 	return usr.DisplayName(), nil
 }
 
-// BaseTaskStatuses is the resolver for the baseTaskStatuses field.
-func (r *patchResolver) BaseTaskStatuses(ctx context.Context, obj *restModel.APIPatch) ([]string, error) {
-	versionID := utility.FromStringPtr(obj.Id)
-	baseVersion, err := model.FindBaseVersionForVersion(ctx, versionID)
-	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching base version for version '%s': %s", versionID, err.Error()))
-	}
-	if baseVersion == nil {
-		return nil, nil
-	}
-	statuses, err := task.GetBaseStatusesForActivatedTasks(ctx, versionID, baseVersion.Id)
-	if err != nil {
-		return nil, nil
-	}
-	return statuses, nil
-}
-
 // Builds is the resolver for the builds field.
 func (r *patchResolver) Builds(ctx context.Context, obj *restModel.APIPatch) ([]*restModel.APIBuild, error) {
 	versionID := utility.FromStringPtr(obj.Version)
@@ -67,7 +53,18 @@ func (r *patchResolver) Builds(ctx context.Context, obj *restModel.APIPatch) ([]
 // Duration is the resolver for the duration field.
 func (r *patchResolver) Duration(ctx context.Context, obj *restModel.APIPatch) (*PatchDuration, error) {
 	patchID := utility.FromStringPtr(obj.Id)
-	query := db.Query(task.ByVersion(patchID)).WithFields(task.TimeTakenKey, task.StartTimeKey, task.FinishTimeKey, task.DisplayOnlyKey, task.ExecutionKey)
+	p, err := patch.FindOneId(ctx, patchID)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching patch '%s': %s", patchID, err.Error()))
+	}
+	if p == nil {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("patch '%s' not found", patchID))
+	}
+	versionIDs := []string{patchID}
+	if p.IsParent() {
+		versionIDs = append(versionIDs, p.Triggers.ChildPatches...)
+	}
+	query := db.Query(task.ByVersions(versionIDs)).WithFields(task.TimeTakenKey, task.StartTimeKey, task.FinishTimeKey, task.DisplayOnlyKey, task.ExecutionKey)
 	tasks, err := task.FindAllFirstExecution(ctx, query)
 	if err != nil {
 		return nil, InternalServerError.Send(ctx, err.Error())
@@ -218,7 +215,7 @@ func (r *patchResolver) PatchTriggerAliases(ctx context.Context, obj *restModel.
 			})
 		}
 
-		identifier, err := model.GetIdentifierForProject(ctx, alias.ChildProject)
+		identifier, err := model.GetIdentifierForProjectSecondary(ctx, alias.ChildProject)
 		if err != nil {
 			return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting project identifier for child project '%s' in alias '%s': %s", alias.ChildProject, alias.Alias, err.Error()))
 		}
@@ -243,15 +240,9 @@ func (r *patchResolver) Project(ctx context.Context, obj *restModel.APIPatch) (*
 	return patchProject, nil
 }
 
-// ProjectIdentifier is the resolver for the projectIdentifier field.
-func (r *patchResolver) ProjectIdentifier(ctx context.Context, obj *restModel.APIPatch) (string, error) {
-	obj.GetIdentifier(ctx)
-	return utility.FromStringPtr(obj.ProjectIdentifier), nil
-}
-
 // ProjectMetadata is the resolver for the projectMetadata field.
 func (r *patchResolver) ProjectMetadata(ctx context.Context, obj *restModel.APIPatch) (*restModel.APIProjectRef, error) {
-	apiProjectRef, err := getProjectMetadata(ctx, obj.ProjectId, obj.Id)
+	apiProjectRef, err := getAPIProjectRef(ctx, obj.ProjectId)
 	return apiProjectRef, err
 }
 
@@ -300,6 +291,14 @@ func (r *patchResolver) Time(ctx context.Context, obj *restModel.APIPatch) (*Pat
 
 // User is the resolver for the user field.
 func (r *patchResolver) User(ctx context.Context, obj *restModel.APIPatch) (*restModel.APIDBUser, error) {
+	// If only userId is requested, we can return it without a database call.
+	requestedFields := graphql.CollectAllFields(ctx)
+	if len(requestedFields) == 1 && requestedFields[0] == "userId" {
+		return &restModel.APIDBUser{
+			UserID: obj.Author,
+		}, nil
+	}
+
 	authorId := utility.FromStringPtr(obj.Author)
 	currentUser := mustHaveUser(ctx)
 	if currentUser.Id == authorId {
@@ -308,17 +307,61 @@ func (r *patchResolver) User(ctx context.Context, obj *restModel.APIPatch) (*res
 		return apiUser, nil
 	}
 
-	author, err := user.FindOneById(ctx, authorId)
+	dbUser, err := loaders.GetUser(ctx, authorId)
 	if err != nil {
-		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()))
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()), err)
 	}
-	if author == nil {
-		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("user '%s' not found", authorId))
+	// This is most likely a reaped user, so just return their ID
+	if dbUser == nil {
+		return &restModel.APIDBUser{
+			UserID: obj.Author,
+		}, nil
 	}
 
 	apiUser := &restModel.APIDBUser{}
-	apiUser.BuildFromService(*author)
+	apiUser.BuildFromService(*dbUser)
 	return apiUser, nil
+}
+
+// UserLite is the resolver for the userLite field.
+func (r *patchResolver) UserLite(ctx context.Context, obj *restModel.APIPatch) (*user.DBUser, error) {
+	// If only id is requested, we can return it without a database call.
+	requestedFields := graphql.CollectAllFields(ctx)
+	if len(requestedFields) == 1 && requestedFields[0] == "id" {
+		return &user.DBUser{Id: utility.FromStringPtr(obj.Author)}, nil
+	}
+
+	authorId := utility.FromStringPtr(obj.Author)
+	currentUser := mustHaveUser(ctx)
+	if currentUser.Id == authorId {
+		return currentUser, nil
+	}
+
+	dbUser, err := loaders.GetUser(ctx, authorId)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("getting user '%s': %s", authorId, err.Error()), err)
+	}
+	// This is most likely a service user, so just return their ID.
+	if dbUser == nil {
+		return &user.DBUser{Id: authorId}, nil
+	}
+	return dbUser, nil
+}
+
+// Version is the resolver for the version field.
+func (r *patchResolver) Version(ctx context.Context, obj *restModel.APIPatch) (*model.Version, error) {
+	versionID := utility.FromStringPtr(obj.Version)
+	if versionID == "" {
+		return nil, nil
+	}
+	v, err := model.VersionFindOneId(ctx, versionID)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching version '%s': %s", versionID, err.Error()))
+	}
+	if v == nil {
+		return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("version '%s' not found", versionID))
+	}
+	return v, nil
 }
 
 // VersionFull is the resolver for the versionFull field.
@@ -339,7 +382,83 @@ func (r *patchResolver) VersionFull(ctx context.Context, obj *restModel.APIPatch
 	return &apiVersion, nil
 }
 
+// Cost returns the patch's cost with values rounded for display.
+func (r *patchResolver) Cost(ctx context.Context, obj *restModel.APIPatch) (*cost.Cost, error) {
+	if obj.Cost == nil {
+		return nil, nil
+	}
+	rounded := obj.Cost.RoundedBase()
+	rounded.ChildPatchesTotalCost = cost.RoundCost(obj.Cost.ChildPatchesTotalCost)
+	rounded.Total = cost.RoundCost(obj.Cost.AdjustedTotal() + obj.Cost.ChildPatchesTotalCost)
+	return &rounded, nil
+}
+
+// PredictedCost returns the patch's predicted cost with values rounded for display.
+func (r *patchResolver) PredictedCost(ctx context.Context, obj *restModel.APIPatch) (*cost.Cost, error) {
+	if obj.PredictedCost == nil {
+		return nil, nil
+	}
+	rounded := obj.PredictedCost.RoundedBase()
+	rounded.ChildPatchesTotalCost = cost.RoundCost(obj.PredictedCost.ChildPatchesTotalCost)
+	rounded.Total = cost.RoundCost(obj.PredictedCost.AdjustedTotal() + obj.PredictedCost.ChildPatchesTotalCost)
+	return &rounded, nil
+}
+
+// FilteredPatchCount is the resolver for the filteredPatchCount field.
+func (r *patchesResolver) FilteredPatchCount(ctx context.Context, obj *Patches) (int, error) {
+	fc := graphql.GetFieldContext(ctx)
+	opts, err := buildOptionsFromParentArgs(ctx, fc)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := patch.ProjectOrUserPatchesCount(ctx, opts)
+	if err != nil {
+		return 0, InternalServerError.Send(ctx, fmt.Sprintf("fetching patch count: %s", err.Error()))
+	}
+	return count, nil
+}
+
+// Patches is the resolver for the patches field.
+func (r *patchesResolver) Patches(ctx context.Context, obj *Patches) ([]*restModel.APIPatch, error) {
+	fc := graphql.GetFieldContext(ctx)
+	opts, err := buildOptionsFromParentArgs(ctx, fc)
+	if err != nil {
+		return nil, err
+	}
+
+	patches, err := patch.ProjectOrUserPatchesPage(ctx, opts)
+	if err != nil {
+		return nil, InternalServerError.Send(ctx, fmt.Sprintf("fetching patches: %s", err.Error()))
+	}
+
+	apiPatches := []*restModel.APIPatch{}
+	projectIDs := make([]string, 0, len(patches))
+	for _, p := range patches {
+		apiPatch := restModel.APIPatch{}
+		if err := apiPatch.BuildFromService(ctx, p, &restModel.APIPatchArgs{
+			IncludeVersionCost: true,
+		}); err != nil {
+			return nil, InternalServerError.Send(ctx, fmt.Sprintf("converting patch '%s' to APIPatch: %s", p.Id.Hex(), err.Error()))
+		}
+		apiPatches = append(apiPatches, &apiPatch)
+		if projectID := utility.FromStringPtr(apiPatch.ProjectId); projectID != "" {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+
+	if len(projectIDs) > 0 {
+		loaders.PreloadProjects(ctx, projectIDs)
+	}
+
+	return apiPatches, nil
+}
+
 // Patch returns PatchResolver implementation.
 func (r *Resolver) Patch() PatchResolver { return &patchResolver{r} }
 
+// Patches returns PatchesResolver implementation.
+func (r *Resolver) Patches() PatchesResolver { return &patchesResolver{r} }
+
 type patchResolver struct{ *Resolver }
+type patchesResolver struct{ *Resolver }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 )
@@ -8,6 +9,7 @@ import (
 type dependencyIncluder struct {
 	Project                 *Project
 	requester               string
+	branch                  string
 	included                map[TVPair]bool
 	deactivateGeneratedDeps map[TVPair]bool
 }
@@ -17,8 +19,8 @@ type dependencyIncluder struct {
 // for the given set of tasks.
 // If any dependency is cross-variant, it will include the variant and task for that dependency.
 // This function can return an error, but it should be treated as an informational warning.
-func IncludeDependencies(project *Project, tvpairs []TVPair, requester string, activationInfo *specificActivationInfo) ([]TVPair, error) {
-	di := &dependencyIncluder{Project: project, requester: requester}
+func IncludeDependencies(project *Project, tvpairs []TVPair, requester, branch string, activationInfo *specificActivationInfo) ([]TVPair, error) {
+	di := &dependencyIncluder{Project: project, requester: requester, branch: branch}
 	return di.include(tvpairs, activationInfo, nil)
 }
 
@@ -26,8 +28,8 @@ func IncludeDependencies(project *Project, tvpairs []TVPair, requester string, a
 // activationInfo and generatedVariants are required in the case for generate tasks to detect if
 // new generated dependency's task/variant pairs are depended on by inactive tasks. If so,
 // we also set these new dependencies to inactive.
-func IncludeDependenciesWithGenerated(project *Project, tvpairs []TVPair, requester string, activationInfo *specificActivationInfo, generatedVariants []parserBV) ([]TVPair, error) {
-	di := &dependencyIncluder{Project: project, requester: requester}
+func IncludeDependenciesWithGenerated(project *Project, tvpairs []TVPair, requester, branch string, activationInfo *specificActivationInfo, generatedVariants []parserBV) ([]TVPair, error) {
+	di := &dependencyIncluder{Project: project, requester: requester, branch: branch}
 	return di.include(tvpairs, activationInfo, generatedVariants)
 }
 
@@ -135,6 +137,11 @@ func (di *dependencyIncluder) handle(pair TVPair, activationInfo *specificActiva
 		return false, errors.Errorf("task '%s' in variant '%s' cannot be run for a '%s'", pair.TaskName, pair.Variant, di.requester)
 	}
 
+	if bvt.skipOnBranch(di.branch) {
+		di.included[pair] = false
+		return false, nil
+	}
+
 	if bvt.IsDisabled() {
 		di.included[pair] = false
 		return false, nil
@@ -145,18 +152,24 @@ func (di *dependencyIncluder) handle(pair TVPair, activationInfo *specificActiva
 	// queue up all dependencies for recursive inclusion
 	deps := di.expandDependencies(pair, bvt.DependsOn)
 
-	// If this function is invoked from generate.tasks, calculate all variants
-	// that need to be included as dependencies, but are not in the generated project.
-	// If all the task / variant pairs that spawn these dependencies are inactive, we
-	// also mark this newly generated dependency as inactive.
+	// If this function is invoked from generate.tasks, calculate task/variant pairs
+	// that were pulled in only as dependencies of inactive generated tasks so they can
+	// be marked inactive. Also record roots that activate by default so they are not
+	// left inactive when another generated task (incorrectly) marked them as dependency-only.
 	pairSpecifiesActivation := activationInfo.taskOrVariantHasSpecificActivation(pair.Variant, pair.TaskName)
+	if isRoot && generatedVariants != nil && !pairSpecifiesActivation {
+		di.updateDeactivationMap(pair, false)
+	}
 	catcher := grip.NewBasicCatcher()
 	for _, dep := range deps {
 		// Since the only tasks that have activation info set are the initial unexpanded dependencies, we only need
 		// to propagate the deactivateGeneratedDeps for those tasks, which only exist at the root level of each recursion.
 		// Hence, if isRoot is true, we updateDeactivationMap for the full recursive set of dependencies of the task.
 		if isRoot {
-			di.updateDeactivationMap(dep, generatedVariants, pairSpecifiesActivation)
+			propagate := !pairSpecifiesActivation || di.inactiveGeneratedRootMarksDepsInactive(pair)
+			if propagate {
+				di.updateDeactivationMap(dep, pairSpecifiesActivation)
+			}
 		}
 		ok, err := di.handle(dep, activationInfo, generatedVariants, false)
 		if !ok {
@@ -173,23 +186,59 @@ func (di *dependencyIncluder) handle(pair TVPair, activationInfo *specificActiva
 	return true, nil
 }
 
-func (di *dependencyIncluder) updateDeactivationMap(pair TVPair, generatedVariants []parserBV, pairSpecifiesActivation bool) {
-	if !variantExistsInGeneratedProject(generatedVariants, pair.Variant) {
-		// If the dependency has not yet been added to deactivateGeneratedDeps, or if the
-		// original pair needs to be active, we update deactivateGeneratedDeps.
-		// We ultimately will only deactivate new dependencies where deactivateGeneratedDeps[pair] = true.
-		// If deactivateGeneratedDeps[pair] = false it signifies that there was at least
-		// one pair that depends on this new dep being active - so we cannot deactivate it.
-		if _, foundPair := di.deactivateGeneratedDeps[pair]; !foundPair || !pairSpecifiesActivation {
-			di.deactivateGeneratedDeps[pair] = pairSpecifiesActivation
-			di.recursivelyUpdateDeactivationMap(pair, map[TVPair]bool{}, pairSpecifiesActivation)
-		}
+// inactiveGeneratedRootMarksDepsInactive is true when the root is inactive only
+// because activate was set false on the task or variant (generate.tasks or static
+// config), not because of batchtime, cron, or disable. In that case dependency-only
+// tasks should inherit inactive; batchtime-style inactivity must not pull
+// prerequisites into deactivateGeneratedDeps or normal deps would never activate.
+func (di *dependencyIncluder) inactiveGeneratedRootMarksDepsInactive(pair TVPair) bool {
+	bvt := di.Project.FindTaskForVariant(pair.TaskName, pair.Variant)
+	if bvt == nil {
+		return false
+	}
+	bv := di.Project.FindBuildVariant(pair.Variant)
+
+	// activate: false takes precedence over cron/batchtime, so propagate
+	// inactivity to dependencies
+	taskExplicitDeactivate := bvt.Activate != nil && !utility.FromBoolPtr(bvt.Activate)
+	variantExplicitDeactivate := bv != nil && bv.Activate != nil && !utility.FromBoolPtr(bv.Activate)
+	if taskExplicitDeactivate || variantExplicitDeactivate {
+		return true
+	}
+
+	if utility.FromBoolPtr(bvt.Disable) {
+		return false
+	}
+	if bvt.BatchTime != nil || bvt.CronBatchTime != "" {
+		return false
+	}
+	if bv != nil && (bv.BatchTime != nil || bv.CronBatchTime != "" || utility.FromBoolPtr(bv.Disable)) {
+		return false
+	}
+
+	return false
+}
+
+func (di *dependencyIncluder) updateDeactivationMap(pair TVPair, pairSpecifiesActivation bool) {
+	// deactivateGeneratedDeps[pair]==true means the task should be treated as having
+	// specific activation (inactive until batch/cron/elapsed). false is the default
+	// when the key is absent; we only store false to record "must activate" for a pair
+	// that is also a generated root so it wins over a dependency-only inactive edge.
+	// Inactive wins: never downgrade true to false; never recurse with false or we would
+	// clear transitive batchtime/cron dependencies that must stay inactive.
+	if pairSpecifiesActivation {
+		di.deactivateGeneratedDeps[pair] = true
+		di.recursivelyUpdateDeactivationMap(pair, map[TVPair]bool{})
+		return
+	}
+	if _, ok := di.deactivateGeneratedDeps[pair]; !ok {
+		di.deactivateGeneratedDeps[pair] = false
 	}
 }
 
-// recursivelyUpdateDeactivationMap recurses through the full dependencies of a task and updates their value
-// in the deactivateGeneratedDeps based on the pairSpecifiesActivation input.
-func (di *dependencyIncluder) recursivelyUpdateDeactivationMap(pair TVPair, dependencyIncluded map[TVPair]bool, pairSpecifiesActivation bool) {
+// recursivelyUpdateDeactivationMap marks all transitive dependencies inactive for
+// generate.tasks (they inherit the inactive root); only the inactive case recurses.
+func (di *dependencyIncluder) recursivelyUpdateDeactivationMap(pair TVPair, dependencyIncluded map[TVPair]bool) {
 	// If we've been here before, return early to avoid infinite recursion and extra work.
 	if dependencyIncluded[pair] {
 		return
@@ -199,12 +248,8 @@ func (di *dependencyIncluder) recursivelyUpdateDeactivationMap(pair TVPair, depe
 	if bvt != nil {
 		deps := di.expandDependencies(pair, bvt.DependsOn)
 		for _, dep := range deps {
-			// Values only get set to true if pairSpecifiesActivation is true, otherwise they are set to false,
-			// which signifies that we must activate the task.
-			if _, foundDep := di.deactivateGeneratedDeps[dep]; !foundDep || !pairSpecifiesActivation {
-				di.deactivateGeneratedDeps[dep] = pairSpecifiesActivation
-			}
-			di.recursivelyUpdateDeactivationMap(dep, dependencyIncluded, pairSpecifiesActivation)
+			di.deactivateGeneratedDeps[dep] = true
+			di.recursivelyUpdateDeactivationMap(dep, dependencyIncluded)
 		}
 	}
 }

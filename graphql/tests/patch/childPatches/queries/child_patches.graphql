@@ -3,7 +3,15 @@
     id
     childPatches {
       id
-      projectID
+      projectMetadata {
+        id
+      }
+    }
+    version {
+      id
+      childVersions {
+        id
+      }
     }
   }
 }

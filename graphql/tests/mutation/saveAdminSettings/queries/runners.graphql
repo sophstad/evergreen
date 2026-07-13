@@ -19,6 +19,7 @@ mutation Runners {
         maxIncludesPerVersion: 1
         maxParserProjectSize: 1
         maxPendingGeneratedTasks: 1
+        maxScheduledTasksPerDistro: 1
         maxTaskExecution: 1
         maxTasksPerVersion: 1
       }
@@ -26,11 +27,6 @@ mutation Runners {
         maxConcurrentRequests: 1
         maxRepoRevisionsToSearch: 1
         numNewRepoRevisionsToFetch: 1
-      }
-      podLifecycle: {
-        maxParallelPodRequests: 1
-        maxPodDefinitionCleanupRate: 1
-        maxSecretCleanupRate: 1
       }
       scheduler: {
         acceptableHostIdleTimeSeconds: 1
@@ -51,6 +47,9 @@ mutation Runners {
         stepbackTaskFactor: 1
         targetTimeSeconds: 1
         taskFinder: PARALLEL
+        translateProjectConcurrencyLimit: 1
+        translateProjectCacheBytesLimit: 1
+        translateProjectCacheTTLSeconds: 1
       }
     }
   ) {
@@ -76,6 +75,7 @@ mutation Runners {
       maxIncludesPerVersion
       maxParserProjectSize
       maxPendingGeneratedTasks
+      maxScheduledTasksPerDistro
       maxTaskExecution
       maxTasksPerVersion
     }
@@ -83,11 +83,6 @@ mutation Runners {
       maxConcurrentRequests
       maxRepoRevisionsToSearch
       numNewRepoRevisionsToFetch
-    }
-    podLifecycle {
-      maxParallelPodRequests
-      maxPodDefinitionCleanupRate
-      maxSecretCleanupRate
     }
     scheduler {
       acceptableHostIdleTimeSeconds
@@ -108,6 +103,9 @@ mutation Runners {
       stepbackTaskFactor
       targetTimeSeconds
       taskFinder
+      translateProjectConcurrencyLimit
+      translateProjectCacheBytesLimit
+      translateProjectCacheTTLSeconds
     }
   }
 }

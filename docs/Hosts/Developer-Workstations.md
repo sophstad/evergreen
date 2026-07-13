@@ -16,7 +16,8 @@ workstations can use the same configuration as build hosts, but also have:
   which is a distribution of the open source components of
   VSCode. This runs remotely on the workstation and proxies through
   the Evergreen application layer for a fully featured remote editing
-  experience.
+  experience. **Code Server is only supported on Ubuntu 18.04
+  workstations; it is not available on Ubuntu 22.04 workstations.**
 
 - Evergreen supports an "unexpirable" spawn host which isn't
   subjected to the termination deadline of most spawn hosts. While
@@ -91,7 +92,7 @@ within the workstation distro's persistent home directory.
 
 ## Migrate a volume to a new workstation
 
-To facilitate upgrading your virtual workstations, home volumes can be migrated to a new workstation using the "Migrate" button on the [My Volumes](https://spruce.mongodb.com/spawn/volume) page:
+To facilitate upgrading your virtual workstations, home volumes can be migrated to a new workstation using the "Migrate" button on the [My Volumes](https://spruce.corp.mongodb.com/spawn/volume) page:
 
 ![Screen Shot 2022-11-14 at 11 59 33 AM](https://user-images.githubusercontent.com/9298431/201720970-3303d26e-c9d3-400f-8a50-22a23b05a1f4.png)
 

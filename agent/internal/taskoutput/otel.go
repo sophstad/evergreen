@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/agent/internal/client"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/sdk/trace"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -55,30 +57,43 @@ func (o otelTraceDirectoryHandler) run(ctx context.Context) error {
 	defer func(traceClient otlptrace.Client, ctx context.Context) {
 		err := traceClient.Stop(ctx)
 		if err != nil {
-			o.logger.Task().Error(errors.Wrapf(err, "stopping trace client for '%s'", o.dir))
+			o.logger.Task().Error(ctx, errors.Wrapf(err, "stopping trace client for '%s'", o.dir))
 		}
 	}(o.traceClient, ctx)
 
-	catcher := grip.NewBasicCatcher()
+	// Process files and upload batches in parallel using a worker pool.
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(runtime.GOMAXPROCS(0))
+
 	for _, fileName := range files {
-		resourceSpans, err := unmarshalTraces(fileName)
-		if err != nil {
-			catcher.Wrapf(err, "unmarshalling trace file '%s'", fileName)
-			continue
-		}
-
-		spanBatches := batchSpans(resourceSpans, trace.DefaultMaxExportBatchSize)
-		for _, batch := range spanBatches {
-			if err = o.traceClient.UploadTraces(ctx, batch); err != nil {
-				catcher.Wrapf(err, "uploading traces for '%s'", fileName)
-				continue
+		g.Go(func() error {
+			if err := gCtx.Err(); err != nil {
+				return errors.Wrap(err, "context canceled before processing file")
 			}
-		}
 
-		catcher.Wrapf(os.Remove(fileName), "removing trace file '%s'", fileName)
+			resourceSpans, err := unmarshalTraces(gCtx, fileName)
+			if err != nil {
+				return errors.Wrapf(err, "unmarshalling trace file '%s'", fileName)
+			}
+
+			spanBatches := batchSpans(resourceSpans, trace.DefaultMaxExportBatchSize)
+			for _, batch := range spanBatches {
+				if err := gCtx.Err(); err != nil {
+					return errors.Wrap(err, "context canceled while uploading traces")
+				}
+				if err := o.traceClient.UploadTraces(gCtx, batch); err != nil {
+					return errors.Wrapf(err, "uploading traces for '%s'", fileName)
+				}
+			}
+
+			if err := os.Remove(fileName); err != nil {
+				return errors.Wrapf(err, "removing trace file '%s'", fileName)
+			}
+			return nil
+		})
 	}
 
-	return catcher.Resolve()
+	return g.Wait()
 }
 
 // newOtelTraceDirectoryHandler returns a new otel trace directory handler for the
@@ -103,12 +118,12 @@ func batchSpans(spans []*tracepb.ResourceSpans, batchSize int) [][]*tracepb.Reso
 	return append(batches, spans)
 }
 
-func unmarshalTraces(fileName string) ([]*tracepb.ResourceSpans, error) {
+func unmarshalTraces(ctx context.Context, fileName string) ([]*tracepb.ResourceSpans, error) {
 	file, err := os.Open(fileName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "opening trace file '%s'", fileName)
 	}
-	defer func() { grip.Error(errors.Wrapf(file.Close(), "closing trace file '%s'", fileName)) }()
+	defer func() { grip.Error(ctx, errors.Wrapf(file.Close(), "closing trace file '%s'", fileName)) }()
 
 	catcher := grip.NewBasicCatcher()
 

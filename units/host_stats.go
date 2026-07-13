@@ -38,6 +38,7 @@ type taskSpawnedHost struct {
 	Task                string `json:"task_scope"`
 	TaskExecutionNumber int    `json:"task_execution_number"`
 	Build               string `json:"build_scope"`
+	Project             string `json:"project"`
 }
 
 func makeHostStats() *hostStatsJob {
@@ -70,7 +71,7 @@ func (j *hostStatsJob) Run(ctx context.Context) {
 		j.AddError(errors.Wrap(err, "counting inactive hosts by cloud provider"))
 		return
 	}
-	j.logger.Info(message.Fields{
+	j.logger.Info(ctx, message.Fields{
 		"message": "count of decommissioned/quarantined hosts",
 		"counts":  inactiveHosts,
 	})
@@ -88,16 +89,17 @@ func (j *hostStatsJob) Run(ctx context.Context) {
 			Task:                h.SpawnOptions.TaskID,
 			TaskExecutionNumber: h.SpawnOptions.TaskExecutionNumber,
 			Build:               h.SpawnOptions.BuildID,
+			Project:             h.SpawnOptions.ProjectID,
 		})
 	}
-	j.logger.Info(message.Fields{
+	j.logger.Info(ctx, message.Fields{
 		"message": "hosts spawned by tasks",
 		"hosts":   hosts,
 	})
 
 	for _, h := range taskSpawned {
 		if !utility.IsZeroTime(h.StartTime) && h.StartTime.Add(longRunningHostThreshold).Before(time.Now()) {
-			j.logger.Warning(message.Fields{
+			j.logger.Warning(ctx, message.Fields{
 				"message":               "long running host spawned by task",
 				"id":                    h.Id,
 				"duration":              time.Since(h.StartTime).Seconds(),
@@ -106,14 +108,50 @@ func (j *hostStatsJob) Run(ctx context.Context) {
 				"task_scope":            h.SpawnOptions.TaskID,
 				"task_execution_number": h.SpawnOptions.TaskExecutionNumber,
 				"build_scope":           h.SpawnOptions.BuildID,
+				"project":               h.SpawnOptions.ProjectID,
 			})
 		}
 	}
 
 	count, err := host.CountVirtualWorkstationsByInstanceType(ctx)
 	j.AddError(err)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message": "virtual workstations",
 		"stats":   count,
 	})
+
+	spawnStats, err := host.AggregateSpawnhostData(ctx)
+	if err != nil {
+		j.AddError(errors.Wrap(err, "aggregating spawn host data"))
+		return
+	}
+	debugHostCount, countErr := host.CountDebugSpawnhosts(ctx)
+	if countErr != nil {
+		j.AddError(errors.Wrap(countErr, "counting debug spawn hosts"))
+		return
+	}
+	j.logger.Info(ctx, message.Fields{
+		"message":                 "spawn host usage stats",
+		"stats":                   "spawn-hosts",
+		"total_hosts":             spawnStats.TotalHosts,
+		"total_stopped_hosts":     spawnStats.TotalStoppedHosts,
+		"total_unexpirable_hosts": spawnStats.TotalUnexpirableHosts,
+		"num_users_with_hosts":    spawnStats.NumUsersWithHosts,
+		"total_volumes":           spawnStats.TotalVolumes,
+		"total_volume_size":       spawnStats.TotalVolumeSize,
+		"num_users_with_volumes":  spawnStats.NumUsersWithVolumes,
+		"instance_types":          spawnStats.InstanceTypes,
+		"debug_hosts":             debugHostCount,
+		"non_debug_hosts":         spawnStats.TotalHosts - debugHostCount,
+	})
+
+	spawnHostsByProject, err := host.AggregateSpawnhostCountByProject(ctx)
+	if err != nil {
+		j.AddError(errors.Wrap(err, "aggregating spawn host counts by project"))
+	} else {
+		j.logger.Info(ctx, message.Fields{
+			"message":  "spawn hosts by project",
+			"projects": spawnHostsByProject,
+		})
+	}
 }

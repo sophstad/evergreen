@@ -276,7 +276,7 @@ Fields:
   non-module related build variant fields ([context](../decisions/2024-07-18_allow_module_expansions)).
 - `tasks`: a list of tasks to run, referenced either by task name or by tags.
   Tasks listed here can also include other task-level fields, such as
-  `batchtime`, `cron`, `activate`, `depends_on`, `stepback`, and `run_on`.
+  `batchtime`, `cron`, `activate`, `depends_on`, `stepback`, `run_on`, and `ps`.
   We can also [define when a task will run](#controlling-when-tasks-and-variants-run). If there are
   conflicting settings definitions at different levels, the order of priority
   is defined [here](#task-fields-override-hierarchy).
@@ -309,7 +309,7 @@ Fields:
   one changed file matches one of these patterns. If no paths are specified, the variant
   will always run (default behavior). See [Build Variant Path Filtering](#build-variant-path-filtering) for more details.
 - Build variants support [all options that limit when a task will run](#controlling-when-tasks-and-variants-run)
-  (`allowed_requesters`, `patch_only`, `patchable`, `disable`, etc.). If set for the
+  (`allowed_requesters`, `allowed_branches`, `ignored_branches`, `patch_only`, `patchable`, `disable`, etc.). If set for the
   build variant, it will apply to all tasks under the build variant.
 
 Additionally, an item in the `tasks` list can be of the form
@@ -355,7 +355,37 @@ include:
     module: module_name
 ```
 
-Warning: YAML anchors currently not supported.
+#### YAML Anchors (Beta)
+
+YAML anchors (`&name`) and aliases (`*name`) are supported within a single file and across include files. Cross-file anchor support is in beta and requires passing `--yaml-anchors` to `evergreen validate` or `evergreen evaluate`.
+
+An anchor defined in the main config file or in an earlier include file can be referenced as an alias in any later include file. Files are processed in the order they are listed in `include`, so an alias can only refer to an anchor that was defined in a file that appears earlier in the list (or in the main config file).
+
+```yaml
+# main evergreen.yml — defines an anchor for reuse
+include:
+  - filename: included.yml
+
+tasks:
+  - name: setup
+    commands:
+      - &common-setup
+        command: shell.exec
+        params:
+          script: ./setup.sh
+```
+
+```yaml
+# included.yml — uses the anchor defined in the main file
+tasks:
+  - name: teardown
+    commands:
+      - *common-setup
+```
+
+If two files define an anchor with the same name, the later file's definition takes precedence for files processed after it. Within each file, anchors behave according to standard YAML rules.
+
+> **Note:** `_evg_anchors` is a reserved key used internally by Evergreen when processing cross-file anchors. Do not use it as a key in your project YAML.
 
 #### Limitations and Alternatives
 
@@ -482,6 +512,31 @@ Fields:
 - `auto_update`: if true, the latest revision for the module will be
   dynamically retrieved for each Github PR, CLI patch, and periodic build submission
 
+#### Wiki modules
+
+A module whose `repo` is a [GitHub wiki](https://docs.github.com/en/communities/documenting-your-project-with-wikis/about-wikis) (repository name `parent.wiki` for the `parent` repository) is cloned **only** at the remote’s **default branch (HEAD)**. Evergreen does not pin wikis to a specific commit, mainline time, or patch selection.
+
+The following are **ignored** for wiki modules (they still apply to normal modules):
+
+- `branch`, `ref`, and `auto_update` for the purpose of choosing a revision
+- `revisions` on [`git.get_project`](../Project-Commands#gitgetproject), the version manifest, and [evergreen set-module](../CLI/#operating-on-existing-patches)
+
+The `${<module_name>_rev}` expansion and other manifest-based revision fields are **empty** and not useful for wikis.
+
+The GitHub App used for private clones must be installed on the **parent** repository (e.g. `org/parent`); the clone URL still uses the `parent.wiki` repository.
+
+Wiki modules are intended for use with **git.get_project** cloning. [Includes](#include) that pull project YAML from a module repository are not supported for wikis.
+
+Example `modules` entry using a wiki repository:
+
+```yaml
+modules:
+  - name: product-wiki
+    owner: mongodb
+    repo: mongo.wiki
+    prefix: src/wiki
+```
+
 ### Pre and Post
 
 All projects can have a `pre` and `post` field which define a list of commands
@@ -557,13 +612,14 @@ Parameters:
 **Exec timeout: exec_timeout_secs**
 You can customize the points at which the "timeout" conditions are
 triggered. To cause a task to stop (and fail) if it doesn't complete
-within an allotted time, set the key `exec_timeout_secs` on the overall project
-or on a specific task to set the maximum allowed length of execution time. Exec timeout only
+within an allotted time, set the key `exec_timeout_secs` on the overall project,
+on a build variant, on a specific task, or on a specific task within a build variant to set the maximum allowed length of execution time. Exec timeout only
 applies to commands that run in `pre`, `setup_group`, `setup_task`, and the main
 task commands; it does not apply to the `post`, `teardown_task`, and
 `teardown_group` blocks. This timeout defaults to 6 hours, and cannot be set above 24 hours.
-`exec_timeout_secs` can only be set on the project or on a task as seen in below example.
-It cannot be set on functions or build variant tasks.
+`exec_timeout_secs` can be set on the project, on a build variant, on a task, or on a task within a build variant as
+seen in below example. The precedence order is: build variant task `>` project task `>` build variant `>` project. It
+cannot be set on functions.
 
 You can also set `exec_timeout_secs` using [timeout.update](Project-Commands#timeoutupdate).
 
@@ -594,21 +650,37 @@ buildvariants:
       - localtestdistro
     tasks:
       - name: compile
+      - name: test
+        exec_timeout_secs: 30 ## override the project, task, and build variant level exec_timeout_secs for this variant's test task
+  - name: linux
+    display_name: Linux
+    exec_timeout_secs: 120 ## override the project exec_timeout_secs for all tasks in this variant.
+    run_on:
+      - localtestdistro2
+    tasks:
+      - name: compile
 
 tasks:
-  name: compile
-  commands:
-    - command: shell.exec
-      timeout_secs: 10 ## override the project level timeout_secs defined above and force this command to fail if it stays "idle" for 10 seconds or more
-      exec_timeout_secs: 20 ## will override the project level exec_timeout_secs defined above for this task
-      params:
-        script: |
-          sleep 1000
+  - name: compile
+    commands:
+      - command: shell.exec
+        timeout_secs: 10 ## override the project level timeout_secs defined above and force this command to fail if it stays "idle" for 10 seconds or more
+        params:
+          script: |
+            sleep 1000
+  - name: test
+    exec_timeout_secs: 20 ## will override the project level exec_timeout_secs defined above for this task
+    commands:
+      - command: shell.exec
+        params:
+          script: |
+            echo "running tests"
 ```
 
 ### Controlling When Tasks and Variants Run
 
-You can control when tasks and build variants run using several different mechanisms:
+You can control when tasks and build variants run by setting activate, batchtime, disable, or cron on tasks or build variants, detailed
+[here](Controlling-when-tasks-run). There are also options to limit tasks and build variants to certain requesters, branches, or changed files, detailed below.
 
 #### Limiting by Requester Type
 
@@ -625,18 +697,6 @@ To cause a task to only run in versions NOT triggered from git tags, set
 
 To cause a task to only run in versions triggered from git tags, set
 `git_tag_only: true`.
-
-To cause a task to not run at all, set `disable: true`.
-
-- This behaves similarly to commenting out the task but will not
-  trigger any validation errors.
-- Disabling a task prevents it from being warned on for not being used.
-- If a task is disabled and is depended on by another task, the
-  dependent task will simply exclude the disabled task from its
-  dependencies.
-
-Can also set activate, batchtime or cron on tasks or build variants, detailed
-[here](Controlling-when-tasks-run).
 
 If there are conflicting settings defined at different levels, the order of
 priority is defined [here](#task-fields-override-hierarchy).
@@ -697,12 +757,82 @@ buildvariants:
         allowed_requesters: ["github_pr"]
 ```
 
+### Filtering by Branch
+
+You can limit tasks or build variants to only run on specific branches, or to be
+skipped on specific branches. This is useful when release branches inherit the
+same Evergreen configuration as the main branch but certain tasks (e.g.,
+expensive cache hydration) are only beneficial on the main branch.
+
+#### Allowed Branches
+
+`allowed_branches` specifies a list of regex patterns. The task will only run if
+the version's branch matches at least one pattern. If the branch does not match
+any pattern, the task is not created and any tasks that depend on it will not
+have a dependency on the skipped task (similar to `disable`).
+
+```yaml
+tasks:
+  - name: hydrate_cache
+    allowed_branches:
+      - "^master$"
+    commands:
+      - command: shell.exec
+        params:
+          script: "hydrate.sh"
+```
+
+#### Ignored Branches
+
+`ignored_branches` specifies a list of regex patterns. The task will be skipped
+if the version's branch matches any pattern.
+
+```yaml
+tasks:
+  - name: unit_tests
+    ignored_branches:
+      - "^v\\d+"
+      - "^release/"
+```
+
+If both `allowed_branches` and `ignored_branches` are set, `allowed_branches`
+takes precedence and `ignored_branches` is ignored.
+
+These fields can be set at the task definition level, the build variant level, or
+for a particular task under a build variant:
+
+```yaml
+buildvariants:
+  - name: ubuntu2204
+    # Skip all tasks in this variant on release branches
+    ignored_branches:
+      - "^v\\d+"
+    tasks:
+      - name: unit_tests
+      - name: hydrate_cache
+        # Override: this task only runs on master regardless of BV setting
+        allowed_branches:
+          - "^master$"
+```
+
+The inheritance priority follows the same rules as other task-level settings,
+documented in [Task Fields Override Hierarchy](#task-fields-override-hierarchy).
+
+Patterns are Go regular expressions (not globs). Use anchors like `^` and `$`
+for exact matching. For example, `master` matches any branch containing
+"master", while `^master$` matches only the branch named exactly "master".
+
+If the branch is empty (e.g., ad-hoc builds), branch filters do not apply and
+the task will run normally.
+
 ### Filtering by Changed Files
 
 You can control when tasks and build variants run based on which files have changed in a commit or patch. This is useful for optimizing CI/CD pipelines by only running relevant tests when specific parts of your codebase change. For both options here, this filtering applies to mainline versions and PR testing (so this won't prevent required merge queue testing, for example).
 
 For mainline version, we will not automatically run tasks if they are filtered out, and we will not create PR patches/tasks if filtered out, but instead send a successful status for all required
 checks as well as the base `evergreen` check.
+
+For merge queue filtering, take a look at build variant path filtering.
 
 #### Project-Level File Ignoring
 
@@ -725,24 +855,36 @@ ignore:
   - "!testdata/sample.txt" ## EXCEPT for changes to this txt file that's part of a test suite
 ```
 
-In the above example, a commit that only changes `README.md` would not
+In the above example, a commit that only changes `README.md` would ~~not~~
 be automatically scheduled, since `*.md` is ignored. A commit that
 changes both `README.md` and `important_file.cpp` _would_ schedule
 tasks, since only some of the commit's changed files are ignored.
 
+**Ignore is currently not considered for merge queue patches.**
+
 ##### Build Variant Path Filtering
 
 Build variants can specify `paths` gitignore-style patterns to define which files should trigger the variant when
-changed. This is the opposite of ignoring - it defines what files the variant cares about.
-**Note that ignored files take precedence over paths:** if a file is ignored, it will not run the variant even if
-the path filter would have matched it.
+changed. This is the opposite of ignoring -- it defines what files the variant cares about and prevents tasks
+from running if a specified file has not changed. However, this does _not_ mean that the variant will automatically
+be scheduled if a file in a specified path is changed. The tasks must still be manually selected to run through
+manual selection, alias, etc.
 
-Note: specifying paths could cause crons to not activate the build variants if the path filter does not match.
+_Merge queue behavior_: Build variant path filtering applies to the merge queue unless
+[explicitly disabled](#disabling-merge-queue-path-filtering). If testing multiple PRs in one merge queue patch,
+we will consider the full set of changed files to determine what tasks to run, but will
+not consider the changed files from other PRs in the merge group (i.e. paths changed in PRs that are ahead in the queue are not included).
+For PR patches and the merge queue, we will still send a successful check for ignored variants, to avoid blocking requirements.
+
+_Mainline behavior_: Cron, batchtime, and activate true/false will still take precedent over path filtering,
+as those settings are meant to ensure consistent testing, rather than relevant changes.
+
+_Interaction with ignore_: Because ignored files take precedent over build variant path filtering, if a file is ignored,
+it will not run the variant even if the path filter would have matched it (except in the merge queue, where include is not currently supported).
 
 Full gitignore syntax is explained
 [here](https://git-scm.com/docs/gitignore). Ignored variants may still
-be scheduled manually, and their tasks will still be scheduled on
-failure stepback. For PR patches, we will still send a successful check for ignored variants, to avoid blocking requirements.
+be scheduled manually, and their tasks will still be scheduled on failure stepback.
 
 ```yaml
 buildvariants:
@@ -768,6 +910,21 @@ When a build variant has `paths` defined:
 **Note: build variant path filtering is ignored on extremely large GitHub PRs with 3000+ files changed.** If a PR
 contains 3000+ changed files, `paths` will have no effect on the GitHub PR patch. The build variant will run its tasks
 even if `paths` doesn't match any of the changed files.
+
+###### Disabling Merge Queue Path Filtering
+
+If you want to disable path filtering specifically for merge queue versions while keeping it enabled for PR patches,
+you can set the `disable_merge_queue_path_filtering` top-level setting to `true`. When enabled, all build variants
+will run for merge queue versions regardless of their `paths` configuration, but path filtering will still apply
+to PR patches.
+
+This can be useful when you want more selective testing for PR patches but want to ensure comprehensive testing
+before merging to your main branch.
+
+```yaml
+disable_merge_queue_path_filtering: true
+buildvariants: ...
+```
 
 ### Expansions
 
@@ -869,6 +1026,8 @@ Every task has some expansions available by default:
 - `${build_variant}` is the name of the build variant the task belongs
   to
 - `${created_at}` is the time the version was created
+- `${distro_arch}` is the architecture of the distro the task is running on, in
+  `<GOOS>_<GOARCH>` form (e.g. `linux_amd64`)
 - `${distro_id}` is name of the distro the task is running on
 - `${execution}` is the execution number of the task (how many times
   it has been reset)
@@ -889,6 +1048,8 @@ Every task has some expansions available by default:
 - `${is_patch}` is "true" if the running task is in a patch build and
   undefined if it is not.
 - `${is_stepback}` is "true" if the running task was stepped back.
+- `${is_test_selection_enabled}` is "true" if test selection is enabled for the
+  running task and "false" if it is not.
 - `${otel_collector_endpoint}` is the gRPC endpoint for Evergreen's
   OTel collector. Tasks can send traces to this endpoint.
 - `${otel_parent_id}` is the OTel span ID of the current command.
@@ -909,6 +1070,13 @@ Every task has some expansions available by default:
   author name in patches
 - `${task_id}` is the task's unique id
 - `${task_name}` is the name of the task
+- `${timed_out_command_pid}` is the PID of the evergreen command that timed out,
+  if the task has timed out. It is only available in the `timeout` task block.
+- `${timed_out_pids}` is a comma separated list of all PIDs that were running when the task's
+  timeout limit exceeded. It is only available in the `timeout` task block.
+- `${timed_out_child_pids}` is a comma separated list of descendant PIDs (child processes) of
+  the processes that were running when the task's timeout limit exceeded.
+  It is only available in the `timeout` task block.
 - `${triggered_by_git_tag}` is the name of the tag that triggered this
   version, if applicable
 - `${version_id}` is the id of the task's version
@@ -954,9 +1122,7 @@ inter-project dependency:
 The following expansions are available if a task was created with a [patch trigger alias](Project-and-Distro-Settings#patch-trigger-aliases):
 
 - `${parent_patch_id}` is the ID of the parent patch for this task
-- `${parent_github_org}` is the Github org for the parent patch
-- `${parent_github_repo}` is the Github repo for the parent patch
-- `${parent_github_branch}` is the branch tracked by the parent patch
+- `{parent_project_module}` is the name of the parent module in the downstream project (i.e. defined on the upstream project's Child Patch Trigger Alias as "module")
 
 The following expansions are available if a task has modules, where `<module_name>` represents the name defined in the project yaml for a
 given module:
@@ -1145,6 +1311,108 @@ To disable the OOM tracker, add the following to the top-level of your yaml.
 
 ```yaml
 oom_tracker: false
+```
+
+### CPU and Memory Constraint Tracker
+
+If the CPU or Memory on a running task host sustains above 90% for a 5 minute period, it will be flagged
+as a (potentially) resource constrained task, which may be relevant when diagnosing its failures.
+
+If this occurs, tasks returned from the REST API will have a `resource_constraints`
+field available indicating that CPU and/or memory was constrained during execution.
+
+There will also be a log in the Agent logs that looks similar to the following:
+`Resource constraint detected: CPU constrained=true (peak 99.0%), memory constrained=true (peak 99.0%).`
+
+### Process Diagnostics: ps
+
+You can enable process logging by setting the `ps` field at multiple configuration levels. The specified command will run every 60 seconds during task execution to log process information.
+
+To disable process logging, either omit the `ps` field or set it to an empty string.
+
+The `ps` field follows a priority order (from highest to lowest):
+
+1. **Build variant task level** - Overrides all other settings
+2. **Project task level** - Overrides project-level settings
+3. **Project level** - Base configuration for all tasks
+
+To use an expansion, reference it with `ps: "${my_custom_ps}"` at the desired level.
+
+**Project level**:
+
+```yaml
+ps: "ps -o pid" # Enable for all tasks
+
+tasks:
+  - name: my_task
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Running with ps logging"
+```
+
+**Task level** (overrides project level):
+
+```yaml
+tasks:
+  - name: task_with_custom_ps
+    ps: "ps -o pid,tty,time,comm,args" # Custom ps command for this task
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Running with custom ps"
+
+  - name: task_without_ps
+    ps: "" # Explicitly disable ps logging
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "No ps logging"
+```
+
+**Build variant task level** (highest priority, overrides task level and project level):
+
+```yaml
+ps: "ps -o pid" # Project-level
+
+tasks:
+  - name: my_task_1
+    ps: "ps -o pid,tty,time,comm,args" # Task-level
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Task execution"
+
+  - name: my_task_2
+    ps: "ps -o pid,tty,time,comm,args" # Task-level
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Custom ps task"
+
+  - name: other_task
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Task without explicit ps"
+
+  - name: task_with_expansion
+    ps: "${my_custom_ps}" # Reference expansion defined in build variant
+    commands:
+      - command: shell.exec
+        params:
+          script: echo "Task using expansion"
+
+buildvariants:
+  - name: ubuntu2204
+    expansions:
+      my_custom_ps: "ps -o pid,user,comm" # Define custom ps command as expansion
+    tasks:
+      - name: my_task_1
+        ps: "ps -o pid,tty,time" # Build variant task-level: overrides task and project level ps.
+      - name: my_task_2 # Uses task-level "ps -o pid,tty,time,comm,args" since there is no build variant task-level override.
+      - name: other_task # Uses project-level "ps -o pid" since no task-level or build variant task-level ps is set.
+      - name: task_with_expansion # Uses "ps -o pid,user,comm" from the my_custom_ps expansion defined at task level.
 ```
 
 ### Matrix Variant Definition
@@ -1501,10 +1769,14 @@ group and each individual task. Tasks in a task group will not run the `pre`
 and `post` blocks in the YAML file; instead, the tasks will run the task group's
 setup and teardown blocks.
 
-Note: Because task directory is not removed between tasks, if git.get_project is
+Because task directory is not removed between tasks, if git.get_project is
 used for the task group and/or if any manual clones are shared between the tasks,
 they should be done in `setup_group` rather than `setup_task` in order to save
 resources and avoid conflicts.
+
+It is **not** recommended to use task groups only for the sake of organization,
+because this different task directory clean-up behavior can cause confusion if not
+explicitly desired. To organize tasks logically without using task groups, consider [display tasks](#display-tasks).
 
 ```yaml
 task_groups:
@@ -1627,6 +1899,7 @@ For that same reason, teardown groups also cannot run the [manually set task sta
 #### The following constraints apply to single host task groups
 
 - If tasks in a single host task groups have dependencies on another task outside the group, only the first task in the task group should list those dependencies. If a task in the group other than the first one have dependencies outside of the group, the task can be blocked waiting for external dependencies to complete and result in the host being terminated for idleness.
+- Tasks in a task group will depend on all previous tasks in the group, but not later tasks in the group.
 
 Tasks in a group will be displayed as
 separate tasks. Users can use display tasks if they wish to group the
@@ -1689,7 +1962,9 @@ parameters are available:
 - `omit_generated_tasks` - boolean (default: false). If true and the
   dependency is a generator task (i.e. it generates tasks via the
   [`generate.tasks`](Project-Commands#generatetasks) command), then generated tasks will not be included
-  as dependencies.
+  as dependencies. By default, this is false, which means adding a generator
+  task as a dependency will also add dependencies on all of their generated
+  tasks.
 
 So, for example:
 
@@ -1797,6 +2072,49 @@ tasks:
     commands:
       - func: my_function
 ```
+
+### Update Distros with Run On
+
+Test owners and Product teams should be confident and empowered to modify their distros as they see fit.
+DevProd cannot scale to adjust individual distros for individual teams; we do own the framework that gives you the ability to modify the distros.
+
+#### Adjust Distro Size
+
+Larger distros increase costs, and should only be increased when necessary.
+It is best to try to understand the underlying root cause of the issue to avoid altogether.
+Specifying larger distros should be a last resort.
+
+##### Example in a variant
+
+Specify that all tasks in the build variant should use a different sized distro.
+
+```yaml
+buildvariants:
+  - name: your-build-variant-name
+    display_name: "~ Your Variant"
+    run_on:
+      - rhel8.8-xlarge
+```
+
+Read more about the run_on field [here](Project-Configuration-Files#build-variants).
+
+##### Example in a task
+
+```yaml
+buildvariants:
+  - name: your-build-variant-name
+    display_name: "~ Your Variant"
+    run_on:
+      - rhel8.8-small
+    tasks:
+      - name: .tests_that_need_xlarge_distros
+        distros:
+          - rhel8.8-xlarge
+```
+
+There may be further changes you can do within your team using **variables or expansions**. It's good
+to reach out to your team for further advice here. For example, server's resmoke test configurations are
+documented [here](https://github.com/mongodb/mongo-task-generator/blob/master/docs/generating_tasks.md#runtime-based-sub-tasks).
 
 ### The Power of YAML
 

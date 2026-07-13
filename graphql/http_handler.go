@@ -6,23 +6,44 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/extension"
+	"github.com/99designs/gqlgen/graphql/handler/lru"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/evergreen-ci/evergreen/graphql/loaders"
 	"github.com/evergreen-ci/gimlet"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/ravilushqa/otelgqlgen"
+	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"go.opentelemetry.io/otel/attribute"
 )
 
 // Handler returns a gimlet http handler func used as the gql route handler
 func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *http.Request) {
-	srv := handler.New(NewExecutableSchema(New(apiURL)))
+	schema := NewExecutableSchema(New(apiURL))
+	srv := handler.New(schema)
 
-	// Send OTEL traces for each request.
+	srv.AddTransport(transport.Websocket{
+		KeepAlivePingInterval: 10 * time.Second,
+	})
+	srv.AddTransport(transport.Options{})
+	srv.AddTransport(transport.GET{})
+	srv.AddTransport(transport.POST{})
+	srv.AddTransport(transport.MultipartForm{})
+
+	srv.SetQueryCache(lru.New[*ast.QueryDocument](1000))
+
+	srv.Use(extension.Introspection{})
+	srv.Use(extension.AutomaticPersistedQuery{
+		Cache: lru.New[string](100),
+	})
+
+	// Send Otel traces for each request.
 	// Only create spans for resolved fields.
 	srv.Use(otelgqlgen.Middleware(
 		otelgqlgen.WithCreateSpanFromFields(func(fieldCtx *graphql.FieldContext) bool {
@@ -39,7 +60,7 @@ func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *
 	))
 
 	// Log graphql requests to splunk
-	srv.Use(SplunkTracing{})
+	srv.Use(MakeSplunkTracing(schema))
 
 	// Disable queries for service degradation
 	srv.Use(DisableQuery{})
@@ -52,7 +73,7 @@ func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *
 	srv.SetRecoverFunc(func(ctx context.Context, err any) error {
 		queryPath := graphql.GetFieldContext(ctx).Path()
 
-		grip.Critical(message.Fields{
+		grip.Critical(ctx, message.Fields{
 			"path":    "/graphql/query",
 			"message": "unhandled panic",
 			"error":   err,
@@ -78,8 +99,8 @@ func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *
 			args = fieldCtx.Args
 		}
 		args = RedactFieldsInMap(args, redactedFields)
-		if err != nil && !strings.HasSuffix(err.Error(), context.Canceled.Error()) {
-			grip.Error(message.WrapError(err, message.Fields{
+		if err != nil && !strings.HasSuffix(err.Error(), context.Canceled.Error()) && !loaders.IsBatchError(err) {
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"path":    "/graphql/query",
 				"query":   queryPath,
 				"args":    args,
@@ -88,5 +109,7 @@ func Handler(apiURL string, allowMutations bool) func(w http.ResponseWriter, r *
 		}
 		return graphql.DefaultErrorPresenter(ctx, err)
 	})
-	return srv.ServeHTTP
+
+	// Wrap with dataloader middleware to batch database queries
+	return loaders.Middleware(srv).ServeHTTP
 }

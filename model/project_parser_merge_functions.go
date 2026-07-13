@@ -12,7 +12,7 @@ const MergeProjectConfigError = "error merging project configs"
 
 // mergeUnorderedUnique merges fields that are lists where the order doesn't matter.
 // These fields can be defined throughout multiple yamls but cannot contain duplicate keys.
-// These fields are: [task, task group, parameter, module, function, container]
+// These fields are: [task, task group, parameter, module, function]
 func (pp *ParserProject) mergeUnorderedUnique(toMerge *ParserProject) error {
 	catcher := grip.NewBasicCatcher()
 
@@ -68,19 +68,6 @@ func (pp *ParserProject) mergeUnorderedUnique(toMerge *ParserProject) error {
 		moduleExist[module.Name] = true
 	}
 
-	containerExist := map[string]bool{}
-	for _, container := range pp.Containers {
-		containerExist[container.Name] = true
-	}
-	for _, container := range toMerge.Containers {
-		if _, ok := containerExist[container.Name]; ok {
-			catcher.Errorf("container '%s' has been declared already", container.Name)
-			continue
-		}
-		pp.Containers = append(pp.Containers, container)
-		containerExist[container.Name] = true
-	}
-
 	for key, val := range toMerge.Functions {
 		if _, ok := pp.Functions[key]; ok {
 			catcher.Errorf("function '%s' has been declared already", key)
@@ -129,7 +116,7 @@ func (pp *ParserProject) mergeOrderedUnique(toMerge *ParserProject) error {
 // mergeUnique merges fields that are non-lists across multiple project YAML
 // files.
 // These fields can only be defined in one yaml.
-// These fields are: [stepback, batch time, pre/post timeout, pre/post error fails task, OOM tracker, display name, command type, callback/exec timeout, task annotations, build baron]
+// These fields are: [stepback, batch time, pre/post timeout, pre/post error fails task, OOM tracker, ps, display name, command type, callback/exec timeout, task annotations, build baron]
 func (pp *ParserProject) mergeUnique(toMerge *ParserProject) error {
 	catcher := grip.NewBasicCatcher()
 
@@ -169,6 +156,12 @@ func (pp *ParserProject) mergeUnique(toMerge *ParserProject) error {
 		pp.OomTracker = toMerge.OomTracker
 	}
 
+	if pp.Ps != nil && toMerge.Ps != nil {
+		catcher.New("ps can only be defined in one YAML")
+	} else if toMerge.Ps != nil {
+		pp.Ps = toMerge.Ps
+	}
+
 	if pp.DisplayName != nil && toMerge.DisplayName != nil {
 		catcher.New("display name can only be defined in one YAML")
 	} else if toMerge.DisplayName != nil {
@@ -197,6 +190,12 @@ func (pp *ParserProject) mergeUnique(toMerge *ParserProject) error {
 		catcher.New("timeout secs can only be defined in one YAML")
 	} else if toMerge.TimeoutSecs != nil {
 		pp.TimeoutSecs = toMerge.TimeoutSecs
+	}
+
+	if pp.DisableMergeQueuePathFiltering != nil && toMerge.DisableMergeQueuePathFiltering != nil {
+		catcher.New("disable merge queue path filtering can only be defined in one YAML")
+	} else if toMerge.DisableMergeQueuePathFiltering != nil {
+		pp.DisableMergeQueuePathFiltering = toMerge.DisableMergeQueuePathFiltering
 	}
 
 	return catcher.Resolve()

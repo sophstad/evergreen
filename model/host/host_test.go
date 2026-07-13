@@ -1014,6 +1014,70 @@ func TestUpdateHostRunningTask(t *testing.T) {
 	})
 }
 
+func TestNumHostsByTaskSpec(t *testing.T) {
+	const (
+		group        = "task_group"
+		buildVariant = "build_variant"
+		project      = "project"
+		version      = "version"
+	)
+
+	t.Run("IdleHostBetweenTaskGroupTasksCounts", func(t *testing.T) {
+		require.NoError(t, db.Clear(Collection))
+		h := Host{
+			Id:               "idle_between_task_group_tasks",
+			Status:           evergreen.HostRunning,
+			LastTask:         "previous_task",
+			LastGroup:        group,
+			LastBuildVariant: buildVariant,
+			LastProject:      project,
+			LastVersion:      version,
+		}
+		require.NoError(t, h.Insert(t.Context()))
+
+		count, err := NumHostsByTaskSpec(t.Context(), group, buildVariant, project, version)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count)
+	})
+
+	t.Run("BusyHostRunningTaskGroupCounts", func(t *testing.T) {
+		require.NoError(t, db.Clear(Collection))
+		h := Host{
+			Id:                      "busy_with_task_group",
+			Status:                  evergreen.HostRunning,
+			RunningTask:             "current_task",
+			RunningTaskGroup:        group,
+			RunningTaskBuildVariant: buildVariant,
+			RunningTaskProject:      project,
+			RunningTaskVersion:      version,
+		}
+		require.NoError(t, h.Insert(t.Context()))
+
+		count, err := NumHostsByTaskSpec(t.Context(), group, buildVariant, project, version)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count)
+	})
+
+	t.Run("BusyHostRunningUnrelatedTaskDoesNotCount", func(t *testing.T) {
+		require.NoError(t, db.Clear(Collection))
+		h := Host{
+			Id:               "busy_with_stale_task_group",
+			Status:           evergreen.HostRunning,
+			RunningTask:      "unrelated_task",
+			LastTask:         "previous_task",
+			LastGroup:        group,
+			LastBuildVariant: buildVariant,
+			LastProject:      project,
+			LastVersion:      version,
+		}
+		require.NoError(t, h.Insert(t.Context()))
+
+		count, err := NumHostsByTaskSpec(t.Context(), group, buildVariant, project, version)
+		require.NoError(t, err)
+		assert.Zero(t, count)
+	})
+}
+
 func TestUpsert(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1999,57 +2063,6 @@ func TestHostStats(t *testing.T) {
 	}
 }
 
-func TestHostFindingWithTask(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	require.NoError(t, db.ClearCollections(Collection, task.Collection))
-	assert := assert.New(t)
-	task1 := task.Task{
-		Id: "task1",
-	}
-	task2 := task.Task{
-		Id: "task2",
-	}
-	task3 := task.Task{
-		Id: "task3",
-	}
-	host1 := Host{
-		Id:          "host1",
-		RunningTask: task1.Id,
-		Status:      evergreen.HostRunning,
-	}
-	host2 := Host{
-		Id:          "host2",
-		RunningTask: task2.Id,
-		Status:      evergreen.HostRunning,
-	}
-	host3 := Host{
-		Id:          "host3",
-		RunningTask: "",
-		Status:      evergreen.HostRunning,
-	}
-	host4 := Host{
-		Id:     "host4",
-		Status: evergreen.HostTerminated,
-	}
-	assert.NoError(task1.Insert(t.Context()))
-	assert.NoError(task2.Insert(t.Context()))
-	assert.NoError(task3.Insert(t.Context()))
-	assert.NoError(host1.Insert(ctx))
-	assert.NoError(host2.Insert(ctx))
-	assert.NoError(host3.Insert(ctx))
-	assert.NoError(host4.Insert(ctx))
-
-	hosts, err := FindRunningHosts(ctx, true)
-	assert.NoError(err)
-
-	assert.Len(hosts, 3)
-	assert.Equal(task1.Id, hosts[0].RunningTaskFull.Id)
-	assert.Equal(task2.Id, hosts[1].RunningTaskFull.Id)
-	assert.Nil(hosts[2].RunningTaskFull)
-}
-
 func TestInactiveHostCountPipeline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2103,7 +2116,7 @@ func TestInactiveHostCountPipeline(t *testing.T) {
 
 func setupIdleHostQueryIndex(t *testing.T) {
 	require.NoError(t, db.EnsureIndex(Collection, mongo.IndexModel{
-		Keys: StartedByStatusIndex,
+		Keys: StartedByCreationTimeIndex,
 	}))
 }
 
@@ -2287,145 +2300,6 @@ func TestIdleEphemeralGroupedByDistroID(t *testing.T) {
 	}
 }
 
-func TestFindAllRunningContainers(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	assert := assert.New(t)
-	assert.NoError(db.ClearCollections(Collection))
-
-	const d1 = "distro1"
-	const d2 = "distro2"
-
-	host1 := &Host{
-		Id:          "host1",
-		Distro:      distro.Distro{Id: d1},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task",
-		ParentID:    "parentId",
-	}
-	host2 := &Host{
-		Id:       "host2",
-		Distro:   distro.Distro{Id: d1},
-		Status:   evergreen.HostStarting,
-		ParentID: "parentId",
-	}
-	host3 := &Host{
-		Id:       "host3",
-		Distro:   distro.Distro{Id: d1},
-		Status:   evergreen.HostTerminated,
-		ParentID: "parentId",
-	}
-	host4 := &Host{
-		Id:          "host4",
-		Distro:      distro.Distro{Id: d1},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task2",
-		ParentID:    "parentId",
-	}
-	host5 := &Host{
-		Id:       "host5",
-		Distro:   distro.Distro{Id: d2},
-		Status:   evergreen.HostProvisioning,
-		ParentID: "parentId",
-	}
-	host6 := &Host{
-		Id:     "host6",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostProvisioning,
-	}
-	host7 := &Host{
-		Id:          "host7",
-		Distro:      distro.Distro{Id: d2},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task3",
-	}
-	host8 := &Host{
-		Id:     "host8",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostRunning,
-	}
-	assert.NoError(host1.Insert(ctx))
-	assert.NoError(host2.Insert(ctx))
-	assert.NoError(host3.Insert(ctx))
-	assert.NoError(host4.Insert(ctx))
-	assert.NoError(host5.Insert(ctx))
-	assert.NoError(host6.Insert(ctx))
-	assert.NoError(host7.Insert(ctx))
-	assert.NoError(host8.Insert(ctx))
-
-	containers, err := FindAllRunningContainers(ctx)
-	assert.NoError(err)
-	assert.Len(containers, 2)
-}
-
-func TestFindAllRunningContainersEmpty(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	assert := assert.New(t)
-	assert.NoError(db.ClearCollections(Collection))
-
-	const d1 = "distro1"
-	const d2 = "distro2"
-
-	host1 := &Host{
-		Id:          "host1",
-		Distro:      distro.Distro{Id: d1},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task",
-	}
-	host2 := &Host{
-		Id:     "host2",
-		Distro: distro.Distro{Id: d1},
-		Status: evergreen.HostStarting,
-	}
-	host3 := &Host{
-		Id:     "host3",
-		Distro: distro.Distro{Id: d1},
-		Status: evergreen.HostTerminated,
-	}
-	host4 := &Host{
-		Id:          "host4",
-		Distro:      distro.Distro{Id: d1},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task2",
-	}
-	host5 := &Host{
-		Id:     "host5",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostProvisioning,
-	}
-	host6 := &Host{
-		Id:     "host6",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostProvisioning,
-	}
-	host7 := &Host{
-		Id:          "host7",
-		Distro:      distro.Distro{Id: d2},
-		Status:      evergreen.HostRunning,
-		RunningTask: "task3",
-	}
-	host8 := &Host{
-		Id:     "host8",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostRunning,
-	}
-	assert.NoError(host1.Insert(ctx))
-	assert.NoError(host2.Insert(ctx))
-	assert.NoError(host3.Insert(ctx))
-	assert.NoError(host4.Insert(ctx))
-	assert.NoError(host5.Insert(ctx))
-	assert.NoError(host6.Insert(ctx))
-	assert.NoError(host7.Insert(ctx))
-	assert.NoError(host8.Insert(ctx))
-
-	containers, err := FindAllRunningContainers(ctx)
-	assert.NoError(err)
-	assert.Empty(containers)
-}
-
 func TestFindAllRunningParents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2493,77 +2367,6 @@ func TestFindAllRunningParents(t *testing.T) {
 	hosts, err := FindAllRunningParents(ctx)
 	assert.NoError(err)
 	assert.Len(hosts, 3)
-
-}
-
-func TestFindAllRunningParentsOrdered(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	assert := assert.New(t)
-	assert.NoError(db.ClearCollections(Collection))
-
-	const d1 = "distro1"
-	const d2 = "distro2"
-
-	host1 := &Host{
-		Id:                      "host1",
-		Distro:                  distro.Distro{Id: d1},
-		Status:                  evergreen.HostRunning,
-		HasContainers:           true,
-		LastContainerFinishTime: time.Now().Add(10 * time.Minute),
-	}
-	host2 := &Host{
-		Id:     "host2",
-		Distro: distro.Distro{Id: d1},
-		Status: evergreen.HostStarting,
-	}
-	host3 := &Host{
-		Id:     "host3",
-		Distro: distro.Distro{Id: d1},
-		Status: evergreen.HostTerminated,
-	}
-	host4 := &Host{
-		Id:                      "host4",
-		Distro:                  distro.Distro{Id: d1},
-		Status:                  evergreen.HostRunning,
-		HasContainers:           true,
-		LastContainerFinishTime: time.Now().Add(30 * time.Minute),
-	}
-	host5 := &Host{
-		Id:                      "host5",
-		Distro:                  distro.Distro{Id: d2},
-		Status:                  evergreen.HostRunning,
-		HasContainers:           true,
-		LastContainerFinishTime: time.Now().Add(5 * time.Minute),
-	}
-	host6 := &Host{
-		Id:     "host6",
-		Distro: distro.Distro{Id: d2},
-		Status: evergreen.HostProvisioning,
-	}
-	host7 := &Host{
-		Id:                      "host7",
-		Distro:                  distro.Distro{Id: d2},
-		Status:                  evergreen.HostRunning,
-		HasContainers:           true,
-		LastContainerFinishTime: time.Now().Add(15 * time.Minute),
-	}
-
-	assert.NoError(host1.Insert(ctx))
-	assert.NoError(host2.Insert(ctx))
-	assert.NoError(host3.Insert(ctx))
-	assert.NoError(host4.Insert(ctx))
-	assert.NoError(host5.Insert(ctx))
-	assert.NoError(host6.Insert(ctx))
-	assert.NoError(host7.Insert(ctx))
-
-	hosts, err := FindAllRunningParentsOrdered(ctx)
-	assert.NoError(err)
-	assert.Equal(hosts[0].Id, host5.Id)
-	assert.Equal(hosts[1].Id, host1.Id)
-	assert.Equal(hosts[2].Id, host7.Id)
-	assert.Equal(hosts[3].Id, host4.Id)
 
 }
 
@@ -3170,78 +2973,6 @@ func TestFindHostsSpawnedByTasks(t *testing.T) {
 	assert.Equal("1", found[0].Id)
 	assert.Equal("4", found[1].Id)
 	assert.Equal("7", found[2].Id)
-}
-
-func TestCountContainersOnParents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	assert := assert.New(t)
-	assert.NoError(db.ClearCollections(Collection))
-
-	h1 := Host{
-		Id:            "h1",
-		Status:        evergreen.HostRunning,
-		HasContainers: true,
-	}
-	h2 := Host{
-		Id:            "h2",
-		Status:        evergreen.HostRunning,
-		HasContainers: true,
-	}
-	h3 := Host{
-		Id:            "h3",
-		Status:        evergreen.HostRunning,
-		HasContainers: true,
-	}
-	h4 := Host{
-		Id:       "h4",
-		Status:   evergreen.HostRunning,
-		ParentID: "h1",
-	}
-	h5 := Host{
-		Id:       "h5",
-		Status:   evergreen.HostRunning,
-		ParentID: "h1",
-	}
-	h6 := Host{
-		Id:       "h6",
-		Status:   evergreen.HostRunning,
-		ParentID: "h2",
-	}
-	assert.NoError(h1.Insert(ctx))
-	assert.NoError(h2.Insert(ctx))
-	assert.NoError(h3.Insert(ctx))
-	assert.NoError(h4.Insert(ctx))
-	assert.NoError(h5.Insert(ctx))
-	assert.NoError(h6.Insert(ctx))
-
-	c1, err := HostGroup{h1, h2}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(3, c1)
-
-	c2, err := HostGroup{h1, h3}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(2, c2)
-
-	c3, err := HostGroup{h2, h3}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(1, c3)
-
-	// Parents have no containers
-	c4, err := HostGroup{h3}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(0, c4)
-
-	// Parents are actually containers
-	c5, err := HostGroup{h4, h5, h6}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(0, c5)
-
-	// Parents list is empty
-	c6, err := HostGroup{}.CountContainersOnParents(ctx)
-	assert.NoError(err)
-	assert.Equal(0, c6)
 }
 
 func TestFindUphostContainersOnParents(t *testing.T) {
@@ -4288,15 +4019,17 @@ func TestFindNoAvailableParent(t *testing.T) {
 		Id: "task1",
 		DurationPrediction: util.CachedDurationValue{
 			Value: durationOne,
-		}, BuildVariant: "bv1",
-		StartTime: time.Now(),
+		},
+		BuildVariant: "bv1",
+		StartTime:    time.Now(),
 	}
 	task2 := task.Task{
 		Id: "task2",
 		DurationPrediction: util.CachedDurationValue{
 			Value: durationTwo,
-		}, BuildVariant: "bv1",
-		StartTime: time.Now(),
+		},
+		BuildVariant: "bv1",
+		StartTime:    time.Now(),
 	}
 	assert.NoError(d.Insert(ctx))
 	assert.NoError(host1.Insert(ctx))
@@ -4775,6 +4508,161 @@ func TestFindSpawnhostsWithNoExpirationToExtend(t *testing.T) {
 	assert.Equal(t, "host-1", foundHosts[0].Id)
 }
 
+func TestFindTaskHostsNearingExpiration(t *testing.T) {
+	ctx := t.Context()
+
+	require.NoError(t, db.ClearCollections(Collection))
+
+	expiringSoon := time.Now().Format(evergreen.ExpireOnFormat)
+	notExpiringSoon := time.Now().AddDate(0, 0, 5).Format(evergreen.ExpireOnFormat)
+	recentTaskTime := time.Now().Add(-15 * time.Minute)
+	oldTaskTime := time.Now().Add(-2 * time.Hour)
+
+	makeExpireOnTag := func(value string) []Tag {
+		return []Tag{{Key: evergreen.TagExpireOn, Value: value, CanBeModified: false}}
+	}
+
+	hosts := []Host{
+		{
+			// Should match: expiring soon with running task.
+			Id:           "running-task",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostRunning,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-1",
+		},
+		{
+			// Should match: expiring soon with recent task completion.
+			Id:                    "recent-task",
+			UserHost:              false,
+			StartedBy:             evergreen.User,
+			Status:                evergreen.HostRunning,
+			InstanceTags:          makeExpireOnTag(expiringSoon),
+			LastTaskCompletedTime: recentTaskTime,
+		},
+		{
+			// Should not match: expiring soon but no recent task activity.
+			Id:                    "no-recent-task",
+			UserHost:              false,
+			StartedBy:             evergreen.User,
+			Status:                evergreen.HostRunning,
+			InstanceTags:          makeExpireOnTag(expiringSoon),
+			LastTaskCompletedTime: oldTaskTime,
+		},
+		{
+			// Should not match: not expiring soon.
+			Id:           "not-expiring",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostRunning,
+			InstanceTags: makeExpireOnTag(notExpiringSoon),
+			RunningTask:  "task-2",
+		},
+		{
+			// Should not match: spawn host, not a task host.
+			Id:           "spawn-host",
+			UserHost:     true,
+			Status:       evergreen.HostRunning,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-3",
+		},
+		{
+			// Should not match: wrong status.
+			Id:           "terminated-host",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostTerminated,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-4",
+		},
+		{
+			// Should match: starting status with running task.
+			Id:           "starting-host",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostStarting,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-5",
+		},
+		{
+			// Should match: decommissioned but running a task to completion.
+			Id:           "decommissioned-host",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostDecommissioned,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-6",
+		},
+		{
+			// Should not match: started less than an hour ago.
+			Id:           "new-host",
+			UserHost:     false,
+			StartedBy:    evergreen.User,
+			Status:       evergreen.HostRunning,
+			InstanceTags: makeExpireOnTag(expiringSoon),
+			RunningTask:  "task-7",
+			StartTime:    time.Now().Add(-30 * time.Minute),
+		},
+	}
+	for _, h := range hosts {
+		assert.NoError(t, h.Insert(ctx))
+	}
+
+	found, err := FindTaskHostsNearingExpiration(ctx)
+	assert.NoError(t, err)
+	require.Len(t, found, 4)
+	foundIDs := []string{found[0].Id, found[1].Id, found[2].Id, found[3].Id}
+	assert.ElementsMatch(t, []string{"running-task", "recent-task", "starting-host", "decommissioned-host"}, foundIDs)
+}
+
+func TestBumpExpireOnTag(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("BumpsTagByOneDayAndUpdateDB", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection))
+
+		currentExpireOn := time.Now().Format(evergreen.ExpireOnFormat)
+		h := &Host{
+			Id: "host-1",
+			InstanceTags: []Tag{
+				{Key: evergreen.TagExpireOn, Value: currentExpireOn, CanBeModified: false},
+			},
+		}
+		require.NoError(t, h.Insert(ctx))
+
+		newExpireOn, err := h.NextExpireOnTagValue()
+		require.NoError(t, err)
+
+		expectedExpireOn := time.Now().AddDate(0, 0, 1).Format(evergreen.ExpireOnFormat)
+		assert.Equal(t, expectedExpireOn, newExpireOn)
+
+		require.NoError(t, h.BumpExpireOnTag(ctx, newExpireOn))
+
+		found, err := FindOneId(ctx, h.Id)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		var gotExpireOn string
+		for _, tag := range found.InstanceTags {
+			if tag.Key == evergreen.TagExpireOn {
+				gotExpireOn = tag.Value
+				break
+			}
+		}
+		assert.Equal(t, expectedExpireOn, gotExpireOn)
+	})
+
+	t.Run("MissingTagErrors", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(Collection))
+
+		h := &Host{Id: "host-2"}
+		require.NoError(t, h.Insert(ctx))
+
+		_, err := h.NextExpireOnTagValue()
+		assert.Error(t, err)
+	})
+}
+
 func TestAddVolumeToHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -5158,7 +5046,7 @@ func TestGetAMI(t *testing.T) {
 				birch.EC.Double("bid_price", 0.001),
 				birch.EC.SliceString("security_group_ids", []string{"abcdef"}),
 			)},
-			Provider: evergreen.ProviderNameEc2OnDemand,
+			Provider: evergreen.ProviderNameEc2Fleet,
 		},
 	}
 	h2 := &Host{
@@ -5177,7 +5065,7 @@ func TestGetSubnetID(t *testing.T) {
 			ProviderSettingsList: []*birch.Document{birch.NewDocument(
 				birch.EC.String("subnet_id", "swish"),
 			)},
-			Provider: evergreen.ProviderNameEc2OnDemand,
+			Provider: evergreen.ProviderNameEc2Fleet,
 		},
 	}
 	h2 := &Host{
@@ -5419,31 +5307,6 @@ func (s *FindHostsSuite) TestFindByIPFail() {
 	s.Nil(h2)
 }
 
-func (s *FindHostsSuite) TestFindHostsByDistro() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	hosts, err := Find(ctx, ByDistroIDsOrAliasesRunning("distro5"))
-	s.Require().NoError(err)
-	s.Require().Len(hosts, 1)
-	s.Equal("host5", hosts[0].Id)
-
-	hosts, err = Find(ctx, ByDistroIDsOrAliasesRunning("alias125"))
-	s.Require().NoError(err)
-	s.Require().Len(hosts, 2)
-	var host1Found, host5Found bool
-	for _, h := range hosts {
-		if h.Id == "host1" {
-			host1Found = true
-		}
-		if h.Id == "host5" {
-			host5Found = true
-		}
-	}
-	s.True(host1Found)
-	s.True(host5Found)
-}
-
 func (s *FindHostsSuite) TestFindByUser() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -5665,7 +5528,7 @@ func TestFindHostsToTerminate(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, toTerminate)
 		},
-		"IncludesUserDataHostsThatHaveRunTasksBeforeButHaveNotCommunicatedRecently": func(t *testing.T) {
+		"IgnoresUserDataHostsThatHaveRunTasksBeforeButHaveNotCommunicatedRecently": func(t *testing.T) {
 			h := &Host{
 				Id:          "id",
 				Status:      evergreen.HostStarting,
@@ -5683,8 +5546,7 @@ func TestFindHostsToTerminate(t *testing.T) {
 			require.NoError(t, h.Insert(t.Context()))
 			toTerminate, err := FindHostsToTerminate(t.Context())
 			require.NoError(t, err)
-			require.Len(t, toTerminate, 1)
-			assert.Equal(t, h.Id, toTerminate[0].Id)
+			require.Empty(t, toTerminate)
 		},
 		"IncludesLinuxHostsThatExceedProvisioningTimeout": func(t *testing.T) {
 			h := &Host{
@@ -5993,31 +5855,6 @@ func TestGetPaginatedRunningHosts(t *testing.T) {
 			tCase(tctx, t)
 		})
 	}
-}
-
-func TestClearDockerStdinData(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	defer func() {
-		assert.NoError(t, db.ClearCollections(Collection))
-	}()
-	require.NoError(t, db.ClearCollections(Collection))
-	h := Host{
-		Id: "host_id",
-		DockerOptions: DockerOptions{
-			StdinData: []byte("stdin data"),
-		},
-	}
-	require.NoError(t, h.Insert(ctx))
-
-	require.NoError(t, h.ClearDockerStdinData(ctx))
-	assert.Empty(t, h.DockerOptions.StdinData)
-
-	dbHost, err := FindOneId(ctx, h.Id)
-	require.NoError(t, err)
-	require.NotZero(t, dbHost)
-	assert.Empty(t, dbHost.DockerOptions.StdinData)
 }
 
 func TestGeneratePersistentDNSName(t *testing.T) {
@@ -7264,4 +7101,171 @@ func TestMarkShouldNotExpire(t *testing.T) {
 			tCase(ctx, t, &Host{Id: "host_id"})
 		})
 	}
+}
+
+func TestFindDebugHostsForProject(t *testing.T) {
+	ctx := t.Context()
+
+	require.NoError(t, db.ClearCollections(Collection, task.Collection))
+
+	// Test empty project ID validation.
+	found, err := FindTerminatableDebugHostsForProject(ctx, "")
+	assert.ErrorContains(t, err, "project ID cannot be empty")
+	assert.Nil(t, found)
+
+	task1 := &task.Task{
+		Id:      "task_project1_1",
+		Project: "project1",
+	}
+	require.NoError(t, task1.Insert(ctx))
+
+	task2 := &task.Task{
+		Id:      "task_project1_2",
+		Project: "project1",
+	}
+	require.NoError(t, task2.Insert(ctx))
+
+	task3 := &task.Task{
+		Id:      "task_project2",
+		Project: "project2",
+	}
+	require.NoError(t, task3.Insert(ctx))
+
+	hosts := []*Host{
+		// Host 1: Debug host for project1, running - SHOULD BE FOUND
+		{
+			Id:       "debug_project1_running",
+			Status:   evergreen.HostRunning,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_1",
+			},
+		},
+		// Host 2: Debug host for project1, stopped - SHOULD BE FOUND
+		{
+			Id:       "debug_project1_stopped",
+			Status:   evergreen.HostStopped,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_2",
+			},
+		},
+		// Host 3: Debug host for project1, stopping - SHOULD BE FOUND
+		{
+			Id:       "debug_project1_stopping",
+			Status:   evergreen.HostStopping,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_1",
+			},
+		},
+		// Host 4: Debug host for project2 - should NOT be found
+		{
+			Id:       "debug_project2",
+			Status:   evergreen.HostRunning,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project2",
+			},
+		},
+		// Host 5: Non-debug host for project1 - should NOT be found
+		{
+			Id:       "non_debug_project1",
+			Status:   evergreen.HostRunning,
+			UserHost: true,
+			IsDebug:  false,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_1",
+			},
+		},
+		// Host 6: Debug host but not a user host - should NOT be found
+		{
+			Id:       "debug_not_user_host",
+			Status:   evergreen.HostRunning,
+			UserHost: false,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_1",
+			},
+		},
+		// Host 7: Debug host for project1 but terminated - should NOT be found
+		{
+			Id:       "debug_project1_terminated",
+			Status:   evergreen.HostTerminated,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "task_project1_1",
+			},
+		},
+		// Host 8: Debug host with no provision options - should NOT be found
+		{
+			Id:               "debug_no_provision",
+			Status:           evergreen.HostRunning,
+			UserHost:         true,
+			IsDebug:          true,
+			ProvisionOptions: nil,
+		},
+		// Host 9: Debug host with empty task ID - should NOT be found
+		{
+			Id:       "debug_empty_task",
+			Status:   evergreen.HostRunning,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "",
+			},
+		},
+		// Host 10: Debug host for project1 with non-existent task - should NOT be found (logged as warning)
+		{
+			Id:       "debug_project1_invalid_task",
+			Status:   evergreen.HostRunning,
+			UserHost: true,
+			IsDebug:  true,
+			ProvisionOptions: &ProvisionOptions{
+				TaskId: "nonexistent_task",
+			},
+		},
+	}
+
+	for i := range hosts {
+		require.NoError(t, hosts[i].Insert(ctx))
+	}
+
+	// Test finding debug hosts for project1.
+	found, err = FindTerminatableDebugHostsForProject(ctx, "project1")
+	require.NoError(t, err)
+	require.Len(t, found, 3, "should find exactly 3 debug hosts for project1")
+
+	// Verify the correct hosts were found.
+	foundIds := make(map[string]bool)
+	for _, h := range found {
+		foundIds[h.Id] = true
+	}
+
+	assert.True(t, foundIds["debug_project1_running"], "should find running debug host")
+	assert.True(t, foundIds["debug_project1_stopped"], "should find stopped debug host")
+	assert.True(t, foundIds["debug_project1_stopping"], "should find stopping debug host")
+	assert.False(t, foundIds["debug_project2"], "should not find debug host for different project")
+	assert.False(t, foundIds["non_debug_project1"], "should not find non-debug host")
+	assert.False(t, foundIds["debug_not_user_host"], "should not find non-user debug host")
+	assert.False(t, foundIds["debug_project1_terminated"], "should not find terminated host")
+	assert.False(t, foundIds["debug_no_provision"], "should not find host with no provision options")
+	assert.False(t, foundIds["debug_empty_task"], "should not find host with empty task ID")
+	assert.False(t, foundIds["debug_project1_invalid_task"], "should not find host with invalid task")
+
+	// Test finding debug hosts for project2.
+	found, err = FindTerminatableDebugHostsForProject(ctx, "project2")
+	require.NoError(t, err)
+	require.Len(t, found, 1, "should find exactly 1 debug host for project2")
+	assert.Equal(t, "debug_project2", found[0].Id)
+
+	// Test finding debug hosts for non-existent project.
+	found, err = FindTerminatableDebugHostsForProject(ctx, "nonexistent_project")
+	require.NoError(t, err)
+	assert.Len(t, found, 0, "should find no debug hosts for non-existent project")
 }

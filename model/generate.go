@@ -44,6 +44,10 @@ type GeneratedProject struct {
 	Task           *task.Task
 	ActivationInfo *specificActivationInfo
 	NewTVPairs     *TaskVariantPairs
+	// ExplicitlyGeneratedTasks tracks task/variant pairs from the generated
+	// JSON before dependency resolution. Tasks that get pulled in solely as dependencies of
+	// generated tasks are excluded so that they don't get a GeneratedBy field set.
+	ExplicitlyGeneratedTasks map[TVPair]bool
 }
 
 // MergeGeneratedProjects takes a slice of generated projects and returns a single, deduplicated project.
@@ -145,7 +149,7 @@ func (g *GeneratedProject) NewVersion(ctx context.Context, p *Project, pp *Parse
 		return nil, nil, nil, errors.Wrap(err, "creating config from generated config")
 	}
 	newPP.Id = v.Id
-	p, err = TranslateProject(newPP)
+	p, err = TranslateProject(ctx, newPP)
 	if err != nil {
 		return nil, nil, nil, errors.Wrap(err, TranslateProjectError)
 	}
@@ -166,7 +170,7 @@ func (g *GeneratedProject) Save(ctx context.Context, settings *evergreen.Setting
 	g.Task = t
 
 	if g.Task.GeneratedTasks {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"message": "skipping attempting to update parser project because another generator marked the task complete",
 			"task":    g.Task.Id,
 			"version": g.Task.Version,
@@ -256,12 +260,19 @@ func (g *GeneratedProject) saveNewBuildsAndTasks(ctx context.Context, settings *
 	defer span.End()
 
 	span.SetAttributes(attribute.Int(numGenerateTaskBVAttribute, len(g.BuildVariants)))
-	// Inherit priority from the parent generator task.
-	for i, projBv := range p.BuildVariants {
-		for j := range projBv.Tasks {
-			p.BuildVariants[i].Tasks[j].Priority = g.Task.Priority
+	// Copy the project so we don't mutate a pointer that may be shared with
+	// the translation cache, then inherit priority from the parent generator task.
+	pLocal := *p
+	pLocal.BuildVariants = make([]BuildVariant, len(p.BuildVariants))
+	for i, bv := range p.BuildVariants {
+		pLocal.BuildVariants[i] = bv
+		pLocal.BuildVariants[i].Tasks = make([]BuildVariantTaskUnit, len(bv.Tasks))
+		copy(pLocal.BuildVariants[i].Tasks, bv.Tasks)
+		for j := range pLocal.BuildVariants[i].Tasks {
+			pLocal.BuildVariants[i].Tasks[j].Priority = g.Task.Priority
 		}
 	}
+	p = &pLocal
 
 	existingBuilds, err := build.Find(ctx, build.ByVersion(v.Id))
 	if err != nil {
@@ -274,11 +285,18 @@ func (g *GeneratedProject) saveNewBuildsAndTasks(ctx context.Context, settings *
 
 	newTVPairs, activationInfo := g.GetNewTasksAndActivationInfo(ctx, v, p)
 
+	projectRef, err := FindMergedProjectRef(ctx, p.Identifier, v.Id, true)
+	if err != nil {
+		return errors.Wrapf(err, "finding merged project ref '%s' for version '%s'", p.Identifier, v.Id)
+	}
+	if projectRef == nil {
+		return errors.Errorf("project '%s' not found", p.Identifier)
+	}
+
 	if v.Requester == evergreen.GithubPRRequester {
 		numCheckRuns := p.GetNumCheckRunsFromTaskVariantPairs(newTVPairs)
-		checkRunLimit := settings.GitHubCheckRun.CheckRunLimit
-		if numCheckRuns > checkRunLimit {
-			return errors.Errorf("total number of checkRuns (%d) exceeds maximum limit (%d)", numCheckRuns, checkRunLimit)
+		if err := VerifyCheckRunLimit(numCheckRuns, settings.GitHubCheckRun.CheckRunLimit, projectRef.HasGitHubAppAuth(ctx)); err != nil {
+			return err
 		}
 	}
 
@@ -298,15 +316,6 @@ func (g *GeneratedProject) saveNewBuildsAndTasks(ctx context.Context, settings *
 		} else {
 			newTVPairsForNewVariants.DisplayTasks = append(newTVPairsForNewVariants.DisplayTasks, dispTask)
 		}
-	}
-
-	// This will only be populated for patches, not mainline commits.
-	projectRef, err := FindMergedProjectRef(ctx, p.Identifier, v.Id, true)
-	if err != nil {
-		return errors.Wrapf(err, "finding merged project ref '%s' for version '%s'", p.Identifier, v.Id)
-	}
-	if projectRef == nil {
-		return errors.Errorf("project '%s' not found", p.Identifier)
 	}
 
 	// Compile a lookup table of task IDs for all tasks to be created, both in
@@ -337,7 +346,9 @@ func (g *GeneratedProject) saveNewBuildsAndTasks(ctx context.Context, settings *
 		// If the parent generator is required to finish, then its generated
 		// tasks inherit that requirement.
 		ActivatedTasksAreEssentialToSucceed: g.Task.IsEssentialToSucceed,
+		ExplicitlyGeneratedTasks:            g.ExplicitlyGeneratedTasks,
 	}
+	// This will only be populated for patches, not mainline commits.
 	if evergreen.IsPatchRequester(v.Requester) {
 		patchDoc, err := patch.FindOneId(ctx, v.Id)
 		if err != nil {
@@ -503,9 +514,20 @@ func (g *GeneratedProject) getNewTasksWithDependencies(ctx context.Context, v *V
 		newTVPairs = appendTasks(newTVPairs, bv, p)
 	}
 
+	// Remember which tasks are explicitly generated before dependency expansion
+	// adds tasks that already exist in YAML. Only explicitly generated tasks should
+	// set GeneratedBy.
+	g.ExplicitlyGeneratedTasks = make(map[TVPair]bool, len(newTVPairs.ExecTasks)+len(newTVPairs.DisplayTasks))
+	for _, pair := range newTVPairs.ExecTasks {
+		g.ExplicitlyGeneratedTasks[pair] = true
+	}
+	for _, pair := range newTVPairs.DisplayTasks {
+		g.ExplicitlyGeneratedTasks[pair] = true
+	}
+
 	var err error
-	newTVPairs.ExecTasks, err = IncludeDependenciesWithGenerated(p, newTVPairs.ExecTasks, v.Requester, activationInfo, g.BuildVariants)
-	grip.Warning(message.WrapError(err, message.Fields{
+	newTVPairs.ExecTasks, err = IncludeDependenciesWithGenerated(p, newTVPairs.ExecTasks, v.Requester, v.Branch, activationInfo, g.BuildVariants)
+	grip.Warning(ctx, message.WrapError(err, message.Fields{
 		"message": "error including dependencies for generator",
 		"task":    g.Task.Id,
 	}))
@@ -674,6 +696,12 @@ func (b *specificActivationInfo) taskOrVariantHasSpecificActivation(variant, tas
 
 func (g *GeneratedProject) findTasksAndVariantsWithSpecificActivations(requester string) specificActivationInfo {
 	res := newSpecificActivationInfo()
+
+	taskGroupMap := make(map[string]parserTaskGroup)
+	for _, tg := range g.TaskGroups {
+		taskGroupMap[tg.Name] = tg
+	}
+
 	for _, bv := range g.BuildVariants {
 		// Only consider batchtime for mainline builds. A task/BV will have
 		// specific activation if activate is explicitly set to false;
@@ -688,21 +716,42 @@ func (g *GeneratedProject) findTasksAndVariantsWithSpecificActivations(requester
 		for _, bvt := range bv.Tasks {
 			// If we are doing stepback, we only want to activate specific tasks.
 			if g.Task.ActivatedBy == evergreen.StepbackTaskActivator {
-				info := specificStepbackInfo{task: bvt.Name}
-				if utility.FromBoolPtr(bvt.Activate) {
-					// If the generated task has "activate: true", we should activate it.
-					info.activate = true
-				} else if isStepbackTask(g.Task, bv.Name, bvt.Name) {
-					// If the generated task is one of the ones being stepped back, we should activate it.
-					info.activate = true
+				if tg, isTaskGroup := taskGroupMap[bvt.Name]; isTaskGroup {
+					for _, taskName := range tg.Tasks {
+						info := specificStepbackInfo{task: taskName}
+						if utility.FromBoolPtr(bvt.Activate) {
+							// If the generated task has "activate: true", we should activate it.
+							info.activate = true
+							// Check both the individual task name and the task group name.
+							// Stepback stores the task group name, so we need to check that too.
+						} else if isStepbackTask(g.Task, bv.Name, taskName) || isStepbackTask(g.Task, bv.Name, bvt.Name) {
+							info.activate = true
+						}
+						res.stepbackTasks[bv.Name] = append(res.stepbackTasks[bv.Name], info)
+					}
+				} else {
+					info := specificStepbackInfo{task: bvt.Name}
+					if utility.FromBoolPtr(bvt.Activate) {
+						info.activate = true
+					} else if isStepbackTask(g.Task, bv.Name, bvt.Name) {
+						info.activate = true
+					}
+					res.stepbackTasks[bv.Name] = append(res.stepbackTasks[bv.Name], info)
 				}
-				res.stepbackTasks[bv.Name] = append(res.stepbackTasks[bv.Name], info)
 				continue // Don't consider batchtime/activation if we're stepping generated tasks.
 			}
 			if evergreen.ShouldConsiderBatchtime(requester) && bvt.hasSpecificActivation() {
-				batchTimeTasks = append(batchTimeTasks, bvt.Name)
+				if tg, isTaskGroup := taskGroupMap[bvt.Name]; isTaskGroup {
+					batchTimeTasks = append(batchTimeTasks, tg.Tasks...)
+				} else {
+					batchTimeTasks = append(batchTimeTasks, bvt.Name)
+				}
 			} else if !utility.FromBoolTPtr(bvt.Activate) {
-				batchTimeTasks = append(batchTimeTasks, bvt.Name)
+				if tg, isTaskGroup := taskGroupMap[bvt.Name]; isTaskGroup {
+					batchTimeTasks = append(batchTimeTasks, tg.Tasks...)
+				} else {
+					batchTimeTasks = append(batchTimeTasks, bvt.Name)
+				}
 			}
 		}
 		if len(batchTimeTasks) > 0 {
@@ -804,15 +853,6 @@ func (g *GeneratedProject) addGeneratedProjectToConfig(intermediateProject *Pars
 	return intermediateProject, nil
 }
 
-func variantExistsInGeneratedProject(variants []parserBV, variant string) bool {
-	for bv := range variants {
-		if variants[bv].Name == variant {
-			return true
-		}
-	}
-	return false
-}
-
 // projectMaps is a struct of maps of project fields, which allows efficient comparisons of generated projects to projects.
 type projectMaps struct {
 	buildVariants map[string]struct{}
@@ -867,6 +907,7 @@ func isNonZeroBV(bv parserBV) bool {
 		bv.Disable != nil || len(bv.Tags) > 0 ||
 		bv.BatchTime != nil || bv.Patchable != nil || bv.PatchOnly != nil ||
 		bv.AllowForGitTag != nil || bv.GitTagOnly != nil || len(bv.AllowedRequesters) > 0 ||
+		len(bv.AllowedBranches) > 0 || len(bv.IgnoredBranches) > 0 ||
 		bv.Stepback != nil || bv.DeactivatePrevious != nil || len(bv.RunOn) > 0 {
 		return true
 	}

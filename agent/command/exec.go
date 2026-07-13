@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -22,6 +23,17 @@ import (
 	"github.com/mongodb/jasper/options"
 	"github.com/pkg/errors"
 )
+
+// teardownSignalExitCodes are exit codes that typically indicate the agent terminated the process during cleanup
+// (SIGKILL=9, SIGTERM=15). Note: user background processes may legitimately exit with these codes for unrelated reasons.
+var teardownSignalExitCodes = []int{9, 15}
+
+// isTeardownExit reports whether a process exit should be treated as teardown rather than a real failure.
+// ctx.Err() covers exec/idle timeout cancellation only — it does not fire during killProcs-initiated teardown,
+// which sends signals directly without cancelling the task context first.
+func isTeardownExit(ctx context.Context, info jasper.ProcessInfo) bool {
+	return ctx.Err() != nil || slices.Contains(teardownSignalExitCodes, info.ExitCode)
+}
 
 type subprocessExec struct {
 	Binary    string            `mapstructure:"binary"`
@@ -217,42 +229,10 @@ func addTempDirs(env map[string]string, dir string) {
 func (c *subprocessExec) getProc(ctx context.Context, execPath string, conf *internal.TaskConfig, logger client.LoggerProducer) *jasper.Command {
 	cmd := c.JasperManager().CreateCommand(ctx).Add(append([]string{execPath}, c.Args...)).
 		Background(c.Background).Environment(c.Env).Directory(c.WorkingDir).
+		AppendTags(c.FullDisplayName()).
 		SuppressStandardError(c.IgnoreStandardError).SuppressStandardOutput(c.IgnoreStandardOutput).RedirectErrorToOutput(c.RedirectStandardErrorToOutput).
 		ProcConstructor(func(lctx context.Context, opts *options.Create) (jasper.Process, error) {
-			var cancel context.CancelFunc
-			var ictx context.Context
-			if c.Background {
-				ictx, cancel = context.WithCancel(context.Background())
-			} else {
-				ictx = lctx
-			}
-
-			proc, err := c.JasperManager().CreateProcess(ictx, opts)
-			if err != nil {
-				if cancel != nil {
-					cancel()
-				}
-
-				return proc, errors.WithStack(err)
-			}
-
-			if cancel != nil {
-				grip.Warning(message.WrapError(proc.RegisterTrigger(lctx, func(info jasper.ProcessInfo) {
-					cancel()
-				}), "registering canceller for process"))
-			}
-
-			pid := proc.Info(ctx).PID
-
-			agentutil.TrackProcess(conf.Task.Id, pid, logger.System())
-
-			if c.Background {
-				logger.Execution().Debugf("Running process in the background with pid %d.", pid)
-			} else {
-				logger.Execution().Infof("Started process with pid %d.", pid)
-			}
-
-			return proc, nil
+			return runJasperProcess(lctx, c.JasperManager(), c.Background, opts, conf.Task.Id, logger, conf.BackgroundFailures, c.ContinueOnError, conf.BackgroundCommandFailureEnabled)
 		})
 
 	if !c.IgnoreStandardOutput {
@@ -280,6 +260,96 @@ func (c *subprocessExec) getProc(ctx context.Context, execPath string, conf *int
 	return cmd
 }
 
+// runJasperProcess starts a Jasper process. This does not wait for the process
+// to exit.
+func runJasperProcess(ctx context.Context, jpm jasper.Manager, background bool, opts *options.Create, taskID string, logger client.LoggerProducer, bgFailures chan<- error, continueOnError bool, backgroundCommandFailureEnabled bool) (jasper.Process, error) {
+	var cancel context.CancelFunc
+	var ictx context.Context
+	if background {
+		ictx, cancel = context.WithCancel(context.Background())
+	} else {
+		ictx = ctx
+	}
+
+	// This momentarily sets the nice for this thread back to the default nice
+	// to ensure the process that's about to be created and all of its children
+	// processes use the default nice (child processes inherit the nice of the
+	// parent process). This thread will have no special nice until it's reset
+	// but that should be a brief window.
+	// Passing 0 as the PID refers to the current thread.
+	// Skip entirely if the agent isn't running at elevated priority (e.g. on
+	// debug spawn hosts where it lacks permission to set negative nice).
+	currentNice, niceErr := agentutil.GetNice(0)
+	shouldAdjustNice := niceErr == nil && currentNice < agentutil.DefaultNice
+	if shouldAdjustNice {
+		if niceErr := agentutil.SetNice(0, agentutil.DefaultNice); niceErr != nil {
+			logger.Execution().Warningf(ctx, "Unable to set agent's nice to %d before starting subprocess, subprocess may have non-default nice when it starts. Error: %s", agentutil.DefaultNice, niceErr.Error())
+		}
+	}
+
+	proc, err := jpm.CreateProcess(ictx, opts)
+	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
+
+		return proc, errors.WithStack(err)
+	}
+
+	// Once the child process has started, reset the agent's nice back to the
+	// lower nice value to ensure that this agent thread will have its original
+	// CPU priority.
+	if shouldAdjustNice {
+		if niceErr := agentutil.SetNice(0, agentutil.AgentNice); niceErr != nil {
+			logger.Execution().Warningf(ctx, "Unable to set agent's nice to %d before starting shell subprocess, shell may have non-default nice when it starts. Error: %s", agentutil.AgentNice, niceErr.Error())
+		}
+	}
+
+	if cancel != nil {
+		grip.Warning(ctx, message.WrapError(proc.RegisterTrigger(ctx, func(info jasper.ProcessInfo) {
+			cancel()
+			if !info.Successful {
+				if isTeardownExit(ctx, info) {
+					return
+				}
+				err := errors.Errorf("background command (PID %d) exited with code %d", info.PID, info.ExitCode)
+				// Respect continue_on_err: surface the failure in the task log but do not fail the task.
+				if continueOnError {
+					logger.Task().Warningf(ctx, "Background command failed but continue_on_err is set, task will continue: %s", err)
+					return
+				}
+				if !backgroundCommandFailureEnabled {
+					logger.Task().Infof(ctx, "Background command failed but failure tracking is disabled, task will continue: %s", err)
+					return
+				}
+				select {
+				case bgFailures <- err:
+				default:
+					// Buffer pressure: more failures fired than the agent drained between commands.
+					grip.Debug(ctx, message.Fields{
+						"message":   "background failure channel full, dropping error",
+						"task_id":   taskID,
+						"pid":       info.PID,
+						"exit_code": info.ExitCode,
+					})
+				}
+			}
+		}), "registering canceller for process"))
+	}
+
+	pid := proc.Info(ctx).PID
+
+	agentutil.TrackProcess(ctx, taskID, pid, logger.System())
+
+	if background {
+		logger.Execution().Debugf(ctx, "Running process in the background with PID %d.", pid)
+	} else {
+		logger.Execution().Infof(ctx, "Started process with PID %d.", pid)
+	}
+
+	return proc, nil
+}
+
 // getExecutablePath returns the path to the command executable to run.
 // If the executable is available in the default runtime environment's PATH or
 // it is a file path (i.e. it's not supposed to be found in the PATH), then the
@@ -304,7 +374,7 @@ func (c *subprocessExec) getExecutablePath(logger client.LoggerProducer) (absPat
 		return c.Binary, nil
 	}
 
-	logger.Execution().Debug("could not find executable binary in the default runtime environment PATH, falling back to trying the command's PATH")
+	logger.Execution().Debug(context.Background(), "could not find executable binary in the default runtime environment PATH, falling back to trying the command's PATH")
 
 	originalPath := os.Getenv("PATH")
 	defer func() {
@@ -315,7 +385,7 @@ func (c *subprocessExec) getExecutablePath(logger client.LoggerProducer) (absPat
 		// (e.g. due to having insufficient memory to reset it) , it doesn't
 		// seem worth handling in a better way.
 		if resetErr := os.Setenv("PATH", originalPath); resetErr != nil {
-			logger.Execution().Error(errors.Wrap(resetErr, "resetting agent's PATH env var back to its original state").Error())
+			logger.Execution().Error(context.Background(), errors.Wrap(resetErr, "resetting agent's PATH env var back to its original state").Error())
 		}
 	}()
 
@@ -334,6 +404,7 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 	}
 
 	logger.Execution().WarningWhen(
+		ctx,
 		filepath.IsAbs(c.WorkingDir) && !strings.HasPrefix(c.WorkingDir, conf.WorkDir),
 		message.Fields{
 			"message":         "the working directory is an absolute path without the required prefix",
@@ -347,7 +418,7 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 
 	taskTmpDir, err := getWorkingDirectoryLegacy(conf, "tmp")
 	if err != nil {
-		logger.Execution().Notice(errors.Wrap(err, "getting temporary directory"))
+		logger.Execution().Notice(ctx, errors.Wrap(err, "getting temporary directory"))
 	}
 
 	c.Env = defaultAndApplyExpansionsToEnv(c.Env, modifyEnvOptions{
@@ -373,7 +444,7 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 		return errors.Wrap(err, "resolving executable path")
 	}
 	if err != nil {
-		logger.Execution().Debug(message.WrapError(err, message.Fields{
+		logger.Execution().Debug(ctx, message.WrapError(err, message.Fields{
 			"message":           "found an executable path, but encountered errors while doing so",
 			"working_directory": c.WorkingDir,
 			"background":        c.Background,
@@ -381,7 +452,7 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 			"binary_path":       execPath,
 		}))
 	} else {
-		logger.Execution().Debug(message.Fields{
+		logger.Execution().Debug(ctx, message.Fields{
 			"working_directory": c.WorkingDir,
 			"background":        c.Background,
 			"binary":            c.Binary,
@@ -392,9 +463,9 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 	err = errors.WithStack(c.runCommand(ctx, c.getProc(ctx, execPath, conf, logger), logger))
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		logger.System().Debugf("Canceled command '%s', dumping running processes.", c.Name())
-		logger.System().Debug(message.CollectAllProcesses())
-		logger.Execution().Notice(err)
+		logger.System().Debugf(ctx, "Canceled command '%s', dumping running processes.", c.Name())
+		logger.System().Debug(ctx, message.CollectAllProcesses())
+		logger.Execution().Notice(ctx, err)
 
 		return errors.Wrapf(ctxErr, "canceled while running command '%s'", c.Name())
 	}
@@ -404,7 +475,7 @@ func (c *subprocessExec) Execute(ctx context.Context, comm client.Communicator, 
 
 func (c *subprocessExec) runCommand(ctx context.Context, cmd *jasper.Command, logger client.LoggerProducer) error {
 	if c.Silent {
-		logger.Execution().Info("Executing command in silent mode.")
+		logger.Execution().Info(ctx, "Executing command in silent mode.")
 	}
 
 	err := cmd.Run(ctx)
@@ -415,7 +486,7 @@ func (c *subprocessExec) runCommand(ctx context.Context, cmd *jasper.Command, lo
 	}
 
 	if c.ContinueOnError && err != nil {
-		logger.Execution().Noticef("Script errored, but continue on error is set - continuing task execution. Error: %s.", err)
+		logger.Execution().Noticef(ctx, "Script errored, but continue on error is set - continuing task execution. Error: %s.", err)
 		return nil
 	}
 

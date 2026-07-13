@@ -25,8 +25,7 @@ func TestRepoBuildFromService(t *testing.T) {
 			Allowed:        utility.FalsePtr(),
 			DefaultEnabled: utility.TruePtr(),
 		},
-		RunEveryMainlineCommit:      true,
-		RunEveryMainlineCommitLimit: 20,
+		RunEveryMainlineCommit: true,
 	}}
 	apiRef := &APIProjectRef{}
 	assert.NoError(t, apiRef.BuildFromService(t.Context(), repoRef.ProjectRef))
@@ -40,6 +39,9 @@ func TestRepoBuildFromService(t *testing.T) {
 	require.NotNil(t, apiRef.GitTagVersionsEnabled) // should default
 	assert.False(t, *apiRef.GitTagVersionsEnabled)
 
+	require.NotNil(t, apiRef.DebugSpawnHostsDisabled)
+	assert.True(t, *apiRef.DebugSpawnHostsDisabled)
+
 	require.NotNil(t, apiRef.CommitQueue.Enabled)
 	assert.False(t, *apiRef.CommitQueue.Enabled)
 
@@ -49,8 +51,40 @@ func TestRepoBuildFromService(t *testing.T) {
 
 	require.NotNil(t, apiRef.RunEveryMainlineCommit)
 	assert.True(t, *apiRef.RunEveryMainlineCommit)
-	require.NotNil(t, apiRef.RunEveryMainlineCommitLimit)
-	assert.Equal(t, 20, *apiRef.RunEveryMainlineCommitLimit)
+}
+
+func TestDefaultUnsetBooleansDebugSpawnHostsDisabled(t *testing.T) {
+	t.Run("NilDefaultsToTrue", func(t *testing.T) {
+		apiRef := &APIProjectRef{}
+		assert.Nil(t, apiRef.DebugSpawnHostsDisabled)
+
+		apiRef.DefaultUnsetBooleans()
+
+		require.NotNil(t, apiRef.DebugSpawnHostsDisabled)
+		assert.True(t, *apiRef.DebugSpawnHostsDisabled)
+	})
+
+	t.Run("ExplicitFalseIsPreserved", func(t *testing.T) {
+		apiRef := &APIProjectRef{
+			DebugSpawnHostsDisabled: utility.FalsePtr(),
+		}
+
+		apiRef.DefaultUnsetBooleans()
+
+		require.NotNil(t, apiRef.DebugSpawnHostsDisabled)
+		assert.False(t, *apiRef.DebugSpawnHostsDisabled)
+	})
+
+	t.Run("ExplicitTrueIsPreserved", func(t *testing.T) {
+		apiRef := &APIProjectRef{
+			DebugSpawnHostsDisabled: utility.TruePtr(),
+		}
+
+		apiRef.DefaultUnsetBooleans()
+
+		require.NotNil(t, apiRef.DebugSpawnHostsDisabled)
+		assert.True(t, *apiRef.DebugSpawnHostsDisabled)
+	})
 }
 
 func TestRecursivelyDefaultBooleans(t *testing.T) {

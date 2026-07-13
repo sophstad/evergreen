@@ -73,6 +73,7 @@ func (j *notificationsStatsCollector) Run(ctx context.Context) {
 	}
 	if e != nil {
 		msg["last_processed_at"] = e.ProcessedAt
+		msg["processing_lag_seconds"] = time.Since(e.ProcessedAt).Seconds()
 	}
 
 	nUnprocessed, err := event.CountUnprocessedEvents(ctx)
@@ -91,6 +92,6 @@ func (j *notificationsStatsCollector) Run(ctx context.Context) {
 	msg["pending_notifications_by_type"] = stats
 
 	if ctx.Err() == nil {
-		j.logger.Info(msg)
+		j.logger.Info(ctx, msg)
 	}
 }

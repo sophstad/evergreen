@@ -31,6 +31,7 @@ input TaskLimitsConfigInput {
   maxExecTimeoutSecs: Int!
   maxTaskExecution: Int!
   maxDailyAutomaticRestarts: Int!
+  maxScheduledTasksPerDistro: Int!
 }
 
 type TaskLimitsConfig {
@@ -46,6 +47,7 @@ type TaskLimitsConfig {
   maxExecTimeoutSecs: Int
   maxTaskExecution: Int
   maxDailyAutomaticRestarts: Int
+  maxScheduledTasksPerDistro: Int
 }
 
 input HostInitConfigInput {
@@ -60,18 +62,6 @@ type HostInitConfig {
   provisioningThrottle: Int
   cloudStatusBatchSize: Int
   maxTotalDynamicHosts: Int
-}
-
-input PodLifecycleConfigInput {
-  maxParallelPodRequests: Int!
-  maxPodDefinitionCleanupRate: Int!
-  maxSecretCleanupRate: Int!
-}
-
-type PodLifecycleConfig {
-  maxParallelPodRequests: Int
-  maxPodDefinitionCleanupRate: Int
-  maxSecretCleanupRate: Int
 }
 
 input SchedulerConfigInput {
@@ -93,6 +83,9 @@ input SchedulerConfigInput {
   generateTaskFactor: Int!
   numDependentsFactor: Float!
   stepbackTaskFactor: Int!
+  translateProjectConcurrencyLimit: Int
+  translateProjectCacheBytesLimit: Int
+  translateProjectCacheTTLSeconds: Int
 }
 
 type SchedulerConfig {
@@ -114,6 +107,9 @@ type SchedulerConfig {
   generateTaskFactor: Int
   numDependentsFactor: Float
   stepbackTaskFactor: Int
+  translateProjectConcurrencyLimit: Int
+  translateProjectCacheBytesLimit: Int
+  translateProjectCacheTTLSeconds: Int
 }
 
 input RepotrackerConfigInput {

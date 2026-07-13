@@ -27,7 +27,6 @@ type WaterfallTask struct {
 	DisplayName        string `bson:"display_name" json:"display_name"`
 	DisplayStatusCache string `bson:"display_status_cache" json:"display_status_cache"`
 	Execution          int    `bson:"execution" json:"execution"`
-	Status             string `bson:"status" json:"status"`
 }
 
 type WaterfallBuild struct {
@@ -63,44 +62,9 @@ const (
 	minRevisionLength = 7
 )
 
-// Older versions don't have their build display names saved in the version document.
-// For those missing it, look up their build details.
-// TODO DEVPROD-15118: This function can be removed after 7 February 2026, when the version TTL index applies and all versions include build display names.
-func getBuildDisplayNames(match bson.M) bson.M {
-	match[bsonutil.GetDottedKeyName(VersionBuildVariantsKey, VersionBuildStatusDisplayNameKey)] = bson.M{"$exists": false}
-	return bson.M{
-		"$unionWith": bson.M{
-			"coll": VersionCollection,
-			"pipeline": []bson.M{
-				{"$match": match},
-				{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}},
-				{"$limit": MaxWaterfallVersionLimit},
-				{
-					"$lookup": bson.M{
-						"from":         build.Collection,
-						"localField":   bsonutil.GetDottedKeyName(VersionBuildVariantsKey, VersionBuildStatusIdKey),
-						"foreignField": build.IdKey,
-						"as":           VersionBuildVariantsKey,
-						"pipeline": []bson.M{
-							{
-								"$project": bson.M{
-									build.DisplayNameKey:           1,
-									VersionBuildStatusActivatedKey: 1,
-									VersionBuildStatusIdKey:        build.IdKey,
-									build.BuildVariantKey:          1,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
 // This pipeline matches on versions that have a build with an ID or display name that matches variants
 // It checks if the version with order number versionSearchCutoff is old enough to require a join with the builds collection in order to obtain build variant display names.
-func getBuildVariantFilterPipeline(ctx context.Context, variants []string, caseSensitive bool, match bson.M, projectId string, versionSearchCutoff int, omitInactiveBuilds bool) ([]bson.M, error) {
+func getBuildVariantFilterPipeline(variants []string, caseSensitive bool, match bson.M, omitInactiveBuilds bool) ([]bson.M, error) {
 	pipeline := []bson.M{}
 	match[bsonutil.GetDottedKeyName(VersionBuildVariantsKey, VersionBuildStatusDisplayNameKey)] = bson.M{"$exists": true}
 	pipeline = append(pipeline, bson.M{"$match": match})
@@ -109,18 +73,6 @@ func getBuildVariantFilterPipeline(ctx context.Context, variants []string, caseS
 		matchCopy[key] = match[key]
 	}
 
-	// TODO DEVPROD-15118: Delete conditional getBuildDisplayNames check
-	searchOrder := max(versionSearchCutoff, 1)
-	lastSearchableVersion, err := VersionFindOne(ctx, VersionByProjectIdAndOrder(projectId, searchOrder).WithFields(VersionCreateTimeKey))
-	if err != nil {
-		return []bson.M{}, errors.Wrap(err, "fetching version")
-	}
-
-	buildVariantStatusDate := time.Date(2025, time.February, 7, 0, 0, 0, 0, time.UTC)
-	if lastSearchableVersion != nil && lastSearchableVersion.CreateTime.Before(buildVariantStatusDate) {
-		// Add display names to Version.BuildVariants array.
-		pipeline = append(pipeline, getBuildDisplayNames(matchCopy))
-	}
 	pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
 
 	variantsAsRegex := strings.Join(variants, "|")
@@ -159,6 +111,8 @@ func getBuildVariantFilterPipeline(ctx context.Context, variants []string, caseS
 // GetActiveVersionsByTaskFilters returns limit versions that satisfy a task name or status filter. It also applies any requester and build variant filters.
 // If neither of these filters is specified, use GetActiveWaterfallVersions: it's faster.
 func GetActiveVersionsByTaskFilters(ctx context.Context, projectId string, opts WaterfallOptions, searchOffset int) ([]Version, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetActiveVersionsByTaskFilters")})
+
 	match := bson.M{
 		task.ProjectKey: projectId,
 		task.RequesterKey: bson.M{
@@ -255,7 +209,6 @@ func GetActiveVersionsByTaskFilters(ctx context.Context, projectId string, opts 
 			"newRoot": bson.M{"$arrayElemAt": bson.A{"$" + versionLookupKey, 0}},
 		},
 	})
-	pipeline = append(pipeline, bson.M{"$project": bson.M{VersionBuildVariantsKey: 0}})
 
 	res := []Version{}
 	env := evergreen.GetEnvironment()
@@ -273,6 +226,8 @@ func GetActiveVersionsByTaskFilters(ctx context.Context, projectId string, opts 
 // GetActiveWaterfallVersions returns at most `opts.limit` activated versions for a given project.
 // It performantly applies build variant and requester filters; for task-related filters, see GetActiveVersionsByTaskFilters.
 func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts WaterfallOptions) ([]Version, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetActiveWaterfallVersions")})
+
 	invalidRequesters, _ := utility.StringSliceSymmetricDifference(opts.Requesters, evergreen.SystemVersionRequesterTypes)
 	if len(invalidRequesters) > 0 {
 		return nil, errors.Errorf("invalid requester(s) '%s'; only commit-level requesters can be applied to the waterfall query", invalidRequesters)
@@ -302,21 +257,7 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 	pipeline := []bson.M{}
 
 	if len(opts.Variants) > 0 {
-		var versionSearchCutoff int
-		if pagingForward {
-			versionSearchCutoff = opts.MaxOrder - MaxWaterfallVersionLimit
-		} else if pagingBackward {
-			// When paginating backwards, the order specifies the oldest version that will be investigated in the query. No need to increment by MaxWaterfallVersionLimit
-			versionSearchCutoff = opts.MinOrder
-		} else {
-			mostRecentVersion, err := GetMostRecentWaterfallVersion(ctx, projectId)
-			if err != nil {
-				return nil, errors.Wrap(err, "getting most recent version")
-			}
-			versionSearchCutoff = mostRecentVersion.RevisionOrderNumber - MaxWaterfallVersionLimit
-		}
-
-		buildVariantPipeline, err := getBuildVariantFilterPipeline(ctx, opts.Variants, opts.VariantCaseSensitive, match, projectId, versionSearchCutoff, opts.OmitInactiveBuilds)
+		buildVariantPipeline, err := getBuildVariantFilterPipeline(opts.Variants, opts.VariantCaseSensitive, match, opts.OmitInactiveBuilds)
 		if err != nil {
 			return nil, errors.Wrap(err, "creating build variant filter pipeline")
 		}
@@ -336,7 +277,6 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 		pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
 		pipeline = append(pipeline, bson.M{"$limit": opts.Limit})
 	}
-	pipeline = append(pipeline, bson.M{"$project": bson.M{VersionBuildVariantsKey: 0}})
 
 	res := []Version{}
 	env := evergreen.GetEnvironment()
@@ -353,6 +293,8 @@ func GetActiveWaterfallVersions(ctx context.Context, projectId string, opts Wate
 
 // GetAllWaterfallVersions returns all of a project's versions within an inclusive range of orders.
 func GetAllWaterfallVersions(ctx context.Context, projectId string, minOrder int, maxOrder int) ([]Version, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetAllWaterfallVersions")})
+
 	if minOrder != 0 && maxOrder != 0 && minOrder > maxOrder {
 		return nil, errors.New("minOrder must be less than or equal to maxOrder")
 	}
@@ -378,6 +320,7 @@ func GetAllWaterfallVersions(ctx context.Context, projectId string, minOrder int
 	pipeline := []bson.M{{"$match": match}}
 	pipeline = append(pipeline, bson.M{"$sort": bson.M{VersionRevisionOrderNumberKey: -1}})
 	pipeline = append(pipeline, bson.M{"$limit": MaxWaterfallVersionLimit})
+	// Remove BuildVariants because this field can be enormous and slow down the fetch operation.
 	pipeline = append(pipeline, bson.M{"$project": bson.M{VersionBuildVariantsKey: 0}})
 
 	res := []Version{}
@@ -393,64 +336,90 @@ func GetAllWaterfallVersions(ctx context.Context, projectId string, minOrder int
 	return res, nil
 }
 
-func getVersionTasksPipeline() []bson.M {
-	return []bson.M{
+// GetVersionBuilds returns a list of builds with populated tasks for the given version.
+// Tasks are grouped by display task when applicable - execution tasks are shown under their
+// parent display task, while regular tasks (not part of a display task) are shown individually.
+func GetVersionBuilds(ctx context.Context, versionID string, buildIds []string) ([]WaterfallBuild, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetVersionBuilds")})
+
+	if len(buildIds) == 0 {
+		return []WaterfallBuild{}, nil
+	}
+
+	// Match tasks that are either:
+	// 1. Display tasks (DisplayOnly: true)
+	// 2. Regular tasks that are not part of a display task (DisplayTaskId is empty or doesn't exist)
+	// This excludes execution tasks that are part of a display task.
+	match := bson.M{
+		task.VersionKey:   versionID,
+		task.BuildIdKey:   bson.M{"$in": buildIds},
+		task.RequesterKey: bson.M{"$in": evergreen.SystemVersionRequesterTypes},
+		"$or": []bson.M{
+			{task.DisplayOnlyKey: true},
+			{task.DisplayTaskIdKey: bson.M{"$exists": false}},
+			{task.DisplayTaskIdKey: ""},
+		},
+	}
+
+	pipeline := []bson.M{
+		{"$match": match},
+		{
+			"$project": bson.M{
+				task.IdKey:                 1,
+				task.DisplayNameKey:        1,
+				task.DisplayStatusCacheKey: 1,
+				task.ExecutionKey:          1,
+				task.BuildIdKey:            1,
+			},
+		},
+		{
+			"$group": bson.M{
+				"_id": "$" + task.BuildIdKey,
+				"tasks": bson.M{
+					"$push": bson.M{
+						"_id":                  "$" + task.IdKey,
+						"display_name":         "$" + task.DisplayNameKey,
+						"display_status_cache": "$" + task.DisplayStatusCacheKey,
+						"execution":            "$" + task.ExecutionKey,
+					},
+				},
+			},
+		},
+		{
+			"$set": bson.M{
+				"tasks": bson.M{
+					"$sortArray": bson.M{
+						"input":  "$tasks",
+						"sortBy": bson.M{"display_name": 1},
+					},
+				},
+			},
+		},
 		{
 			"$lookup": bson.M{
 				"from":         build.Collection,
-				"localField":   buildsKey,
+				"localField":   "_id",
 				"foreignField": build.IdKey,
-				"as":           buildsKey,
+				"as":           "build",
 			},
 		},
-		{"$unwind": bson.M{"path": "$" + buildsKey}},
-		// Join all tasks that appear in the build's task cache and overwrite the list of task IDs with partial task documents
+		{"$unwind": "$build"},
 		{
-			"$lookup": bson.M{
-				"from":         task.Collection,
-				"localField":   bsonutil.GetDottedKeyName(buildsKey, build.TasksKey, build.TaskCacheIdKey),
-				"foreignField": task.IdKey,
-				"pipeline": []bson.M{
-					{
-						"$match": bson.M{
-							task.RequesterKey: bson.M{
-								"$in": evergreen.SystemVersionRequesterTypes,
-							},
-						},
-					},
-					// The following projection should exactly match the index on the tasks collection in order to function as a covered query
-					{
-						"$project": bson.M{
-							task.IdKey:                 1,
-							task.DisplayNameKey:        1,
-							task.DisplayStatusCacheKey: 1,
-							task.ExecutionKey:          1,
-							task.StatusKey:             1,
-						},
-					},
-					{"$sort": bson.M{task.DisplayNameKey: 1}},
-				},
-				"as": bsonutil.GetDottedKeyName(buildsKey, build.TasksKey),
+			"$project": bson.M{
+				"_id":           "$build." + build.IdKey,
+				"activated":     "$build." + build.ActivatedKey,
+				"build_variant": "$build." + build.BuildVariantKey,
+				"display_name":  "$build." + build.DisplayNameKey,
+				"version":       "$build." + build.VersionKey,
+				"tasks":         1,
 			},
 		},
+		{"$sort": bson.M{"display_name": 1}},
 	}
-}
-
-// GetVersionBuilds returns a list of builds with populated tasks for a given version.
-func GetVersionBuilds(ctx context.Context, versionId string) ([]WaterfallBuild, error) {
-	ctx = utility.ContextWithAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetVersionBuilds")})
-
-	pipeline := []bson.M{{"$match": bson.M{VersionIdKey: versionId}}}
-	pipeline = append(pipeline, bson.M{"$project": bson.M{VersionBuildVariantsKey: 0}})
-	pipeline = append(pipeline, getVersionTasksPipeline()...)
-
-	// Replace root with the list of builds, sorted by display name.
-	pipeline = append(pipeline, bson.M{"$replaceRoot": bson.M{"newRoot": "$" + buildsKey}})
-	pipeline = append(pipeline, bson.M{"$sort": bson.M{build.DisplayNameKey: 1}})
 
 	res := []WaterfallBuild{}
 	env := evergreen.GetEnvironment()
-	cursor, err := env.DB().Collection(VersionCollection).Aggregate(ctx, pipeline)
+	cursor, err := env.DB().Collection(task.Collection).Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, errors.Wrap(err, "aggregating version builds")
 	}
@@ -464,6 +433,8 @@ func GetVersionBuilds(ctx context.Context, versionId string) ([]WaterfallBuild, 
 // GetNewerActiveWaterfallVersion returns the next newer active version on the waterfall, i.e. a more
 // recent activated version than the current version.
 func GetNewerActiveWaterfallVersion(ctx context.Context, projectId string, version Version) (*Version, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetNewerActiveWaterfallVersion")})
+
 	match := bson.M{
 		VersionIdentifierKey: projectId,
 		VersionRequesterKey: bson.M{
@@ -500,6 +471,8 @@ func GetNewerActiveWaterfallVersion(ctx context.Context, projectId string, versi
 // GetOlderActiveWaterfallVersion returns the next older active version on the waterfall, i.e. an older
 // activated version than the current version.
 func GetOlderActiveWaterfallVersion(ctx context.Context, projectId string, version Version) (*Version, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetOlderActiveWaterfallVersion")})
+
 	match := bson.M{
 		VersionIdentifierKey: projectId,
 		VersionRequesterKey: bson.M{
@@ -537,6 +510,8 @@ func GetOlderActiveWaterfallVersion(ctx context.Context, projectId string, versi
 // githash revision. Notably, it does NOT return the revision order of the version with that githash revision. This
 // is because we want the target commit to be shown in the center of the page.
 func GetOffsetVersionOrderByRevision(ctx context.Context, revision string, projectId string, limit int) (int, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetOffsetVersionOrderByRevision")})
+
 	if len(revision) < minRevisionLength {
 		return 0, errors.New(fmt.Sprintf("at least %d characters must be provided for the revision", minRevisionLength))
 	}
@@ -554,6 +529,8 @@ func GetOffsetVersionOrderByRevision(ctx context.Context, revision string, proje
 // GetOffsetVersionOrderByDate returns the revision order of a system-requested version created on or before the given date,
 // incremented by 1 to account for the Waterfall query being non-inclusive.
 func GetOffsetVersionOrderByDate(ctx context.Context, date time.Time, projectId string) (int, error) {
+	ctx = utility.ContextWithAppendedAttributes(ctx, []attribute.KeyValue{attribute.String(evergreen.AggregationNameOtelAttribute, "GetOffsetVersionOrderByDate")})
+
 	found, err := VersionFindOne(ctx, VersionByProjectIdAndCreateTime(projectId, date).WithFields(VersionRevisionOrderNumberKey))
 	if err != nil {
 		return 0, errors.New(fmt.Sprintf("finding version on or before date '%s': %s", date.Format(time.DateOnly), err.Error()))

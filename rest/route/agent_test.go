@@ -18,9 +18,13 @@ import (
 	"github.com/evergreen-ci/evergreen/mock"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/githubapp"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/model/patch"
+	"github.com/evergreen-ci/evergreen/model/s3lifecycle"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
+	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/gimlet"
 	"github.com/evergreen-ci/utility"
@@ -186,6 +190,173 @@ func TestAgentGetExpansionsAndVars(t *testing.T) {
 	}
 }
 
+func TestExpansionsAndVarsHostOwnership(t *testing.T) {
+	env := &mock.Environment{}
+	require.NoError(t, env.Configure(t.Context()))
+	testutil.ConfigureIntegrationTest(t, env.Settings())
+	require.NoError(t, db.ClearCollections(host.Collection, task.Collection, model.ProjectRefCollection, model.ProjectVarsCollection, fakeparameter.Collection, model.VersionCollection, model.ParserProjectCollection))
+
+	t1 := task.Task{
+		Id:      "t1",
+		Project: "p1",
+		Version: "aaaaaaaaaaff001122334455",
+	}
+	pRef := model.ProjectRef{
+		Id:    "p1",
+		Owner: "evergreen-ci",
+		Repo:  "sample",
+	}
+	vars := &model.ProjectVars{
+		Id:          "p1",
+		Vars:        map[string]string{"a": "1"},
+		PrivateVars: map[string]bool{},
+	}
+	v1 := &model.Version{
+		Id:         "aaaaaaaaaaff001122334455",
+		Revision:   "1234",
+		Requester:  evergreen.GitTagRequester,
+		CreateTime: time.Now(),
+	}
+	pp1 := model.ParserProject{
+		Id: "aaaaaaaaaaff001122334455",
+	}
+	debugHost := host.Host{
+		Id:      "debug_host",
+		IsDebug: true,
+		ProvisionOptions: &host.ProvisionOptions{
+			TaskId: "t1",
+		},
+		ServicePassword: "secret_password",
+	}
+	nonDebugHost := host.Host{
+		Id:              "non_debug_host",
+		RunningTask:     "other_task",
+		ServicePassword: "other_password",
+	}
+	wrongTaskDebugHost := host.Host{
+		Id:      "wrong_task_debug_host",
+		IsDebug: true,
+		ProvisionOptions: &host.ProvisionOptions{
+			TaskId: "other_task",
+		},
+		ServicePassword: "wrong_password",
+	}
+	require.NoError(t, t1.Insert(t.Context()))
+	require.NoError(t, pRef.Insert(t.Context()))
+	require.NoError(t, vars.Insert(t.Context()))
+	require.NoError(t, v1.Insert(t.Context()))
+	require.NoError(t, pp1.Insert(t.Context()))
+	require.NoError(t, debugHost.Insert(t.Context()))
+	require.NoError(t, nonDebugHost.Insert(t.Context()))
+	require.NoError(t, wrongTaskDebugHost.Insert(t.Context()))
+
+	t.Run("UserRequestRejectsNonDebugHost", func(t *testing.T) {
+		userCtx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "test_user"})
+		rh := &getExpansionsAndVarsHandler{settings: env.Settings(), taskID: "t1", hostID: "non_debug_host"}
+		resp := rh.Run(userCtx)
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.Status())
+	})
+
+	t.Run("UserRequestRejectsHostForDifferentTask", func(t *testing.T) {
+		userCtx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "test_user"})
+		rh := &getExpansionsAndVarsHandler{settings: env.Settings(), taskID: "t1", hostID: "wrong_task_debug_host"}
+		resp := rh.Run(userCtx)
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.Status())
+	})
+
+	t.Run("UserRequestAllowsOwnDebugHost", func(t *testing.T) {
+		userCtx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "test_user"})
+		rh := &getExpansionsAndVarsHandler{settings: env.Settings(), taskID: "t1", hostID: "debug_host"}
+		resp := rh.Run(userCtx)
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusOK, resp.Status())
+	})
+
+	t.Run("UserRequestRedactsServicePassword", func(t *testing.T) {
+		userCtx := gimlet.AttachUser(t.Context(), &user.DBUser{Id: "test_user"})
+		rh := &getExpansionsAndVarsHandler{settings: env.Settings(), taskID: "t1", hostID: "debug_host"}
+		resp := rh.Run(userCtx)
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusOK, resp.Status())
+		data, ok := resp.Data().(apimodels.ExpansionsAndVars)
+		require.True(t, ok)
+		assert.Empty(t, data.InternalRedactions[hostServicePasswordPlaceholder])
+	})
+
+	t.Run("TaskRequestStillReturnsServicePassword", func(t *testing.T) {
+		rh := &getExpansionsAndVarsHandler{settings: env.Settings(), taskID: "t1", hostID: "debug_host"}
+		resp := rh.Run(t.Context())
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusOK, resp.Status())
+		data, ok := resp.Data().(apimodels.ExpansionsAndVars)
+		require.True(t, ok)
+		assert.Equal(t, "secret_password", data.InternalRedactions[hostServicePasswordPlaceholder])
+	})
+}
+
+func TestGetDistroViewHostOwnership(t *testing.T) {
+	env := &mock.Environment{}
+	require.NoError(t, env.Configure(t.Context()))
+
+	testutil.ConfigureIntegrationTest(t, env.Settings())
+
+	require.NoError(t, db.ClearCollections(host.Collection))
+
+	debugHost := host.Host{
+		Id:      "debug_host",
+		IsDebug: true,
+		ProvisionOptions: &host.ProvisionOptions{
+			TaskId: "t1",
+		},
+		Distro: distro.Distro{
+			DisableShallowClone: true,
+			ExecUser:            "admin",
+		},
+	}
+	nonDebugHost := host.Host{
+		Id:     "non_debug_host",
+		Distro: distro.Distro{ExecUser: "other"},
+	}
+	wrongTaskDebugHost := host.Host{
+		Id:      "wrong_task_debug_host",
+		IsDebug: true,
+		ProvisionOptions: &host.ProvisionOptions{
+			TaskId: "other_task",
+		},
+		Distro: distro.Distro{ExecUser: "wrong"},
+	}
+	require.NoError(t, debugHost.Insert(t.Context()))
+	require.NoError(t, nonDebugHost.Insert(t.Context()))
+	require.NoError(t, wrongTaskDebugHost.Insert(t.Context()))
+
+	t.Run("UserRequestRejectsNonDebugHost", func(t *testing.T) {
+		rh := &getDistroViewHandler{taskID: "t1", hostID: "non_debug_host"}
+		resp := rh.Run(t.Context())
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.Status())
+	})
+
+	t.Run("UserRequestRejectsHostForDifferentTask", func(t *testing.T) {
+		rh := &getDistroViewHandler{taskID: "t1", hostID: "wrong_task_debug_host"}
+		resp := rh.Run(t.Context())
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.Status())
+	})
+
+	t.Run("UserRequestAllowsOwnDebugHost", func(t *testing.T) {
+		rh := &getDistroViewHandler{taskID: "t1", hostID: "debug_host"}
+		resp := rh.Run(t.Context())
+		require.NotZero(t, resp)
+		assert.Equal(t, http.StatusOK, resp.Status())
+		data, ok := resp.Data().(apimodels.DistroView)
+		require.True(t, ok)
+		assert.True(t, data.DisableShallowClone)
+		assert.Equal(t, "admin", data.ExecUser)
+	})
+}
+
 func TestMarkTaskForReset(t *testing.T) {
 	for tName, tCase := range map[string]func(ctx context.Context, t *testing.T, rh *markTaskForRestartHandler){
 		"FactorySucceeds": func(ctx context.Context, t *testing.T, rh *markTaskForRestartHandler) {
@@ -203,11 +374,15 @@ func TestMarkTaskForReset(t *testing.T) {
 		},
 		"RunSucceeds": func(ctx context.Context, t *testing.T, rh *markTaskForRestartHandler) {
 			rh.taskID = "t2"
-			resp := rh.Run(ctx)
+			foundTask, err := task.FindOneId(ctx, "t2")
+			require.NoError(t, err)
+			require.NotNil(t, foundTask)
+			taskCtx := context.WithValue(ctx, model.ApiTaskKey, foundTask)
+			resp := rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
-			foundTask, err := task.FindOneId(ctx, "t2")
+			foundTask, err = task.FindOneId(ctx, "t2")
 			require.NoError(t, err)
 			require.NotNil(t, foundTask)
 			assert.True(t, foundTask.ResetWhenFinished)
@@ -220,7 +395,11 @@ func TestMarkTaskForReset(t *testing.T) {
 			}))
 			require.NoError(t, foundTask.Archive(ctx))
 			require.NoError(t, foundTask.Reset(ctx, ""))
-			resp = rh.Run(ctx)
+			foundTask, err = task.FindOneId(ctx, "t2")
+			require.NoError(t, err)
+			require.NotNil(t, foundTask)
+			taskCtx = context.WithValue(ctx, model.ApiTaskKey, foundTask)
+			resp = rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusBadRequest, resp.Status())
 
@@ -234,7 +413,11 @@ func TestMarkTaskForReset(t *testing.T) {
 		},
 		"RunSucceedsWithDisplayTask": func(ctx context.Context, t *testing.T, rh *markTaskForRestartHandler) {
 			rh.taskID = "et1"
-			resp := rh.Run(ctx)
+			et1Task, err := task.FindOneId(ctx, "et1")
+			require.NoError(t, err)
+			require.NotNil(t, et1Task)
+			taskCtx := context.WithValue(ctx, model.ApiTaskKey, et1Task)
+			resp := rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -248,7 +431,11 @@ func TestMarkTaskForReset(t *testing.T) {
 			// Should not error if another execution task tries to mark the display task for restart
 			// before the display task has finished
 			rh.taskID = "et2"
-			resp = rh.Run(ctx)
+			et2Task, err := task.FindOneId(ctx, "et2")
+			require.NoError(t, err)
+			require.NotNil(t, et2Task)
+			taskCtx = context.WithValue(ctx, model.ApiTaskKey, et2Task)
+			resp = rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -262,7 +449,11 @@ func TestMarkTaskForReset(t *testing.T) {
 		"SuccessfullyChecksMaxRestartLimit": func(ctx context.Context, t *testing.T, rh *markTaskForRestartHandler) {
 			// Should succeed normally for first task
 			rh.taskID = "t2"
-			resp := rh.Run(ctx)
+			t2Task, err := task.FindOneId(ctx, "t2")
+			require.NoError(t, err)
+			require.NotNil(t, t2Task)
+			taskCtx := context.WithValue(ctx, model.ApiTaskKey, t2Task)
+			resp := rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -275,7 +466,11 @@ func TestMarkTaskForReset(t *testing.T) {
 
 			// Should fail on second task since a limit is in place of 1
 			rh.taskID = "t3"
-			resp = rh.Run(ctx)
+			t3Task, err := task.FindOneId(ctx, "t3")
+			require.NoError(t, err)
+			require.NotNil(t, t3Task)
+			taskCtx = context.WithValue(ctx, model.ApiTaskKey, t3Task)
+			resp = rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusInternalServerError, resp.Status())
 			require.NotNil(t, resp.Data())
@@ -289,7 +484,11 @@ func TestMarkTaskForReset(t *testing.T) {
 			}
 			require.NoError(t, pRef.Replace(t.Context()))
 			rh.taskID = "t4"
-			resp = rh.Run(ctx)
+			t4Task, err := task.FindOneId(ctx, "t4")
+			require.NoError(t, err)
+			require.NotNil(t, t4Task)
+			taskCtx = context.WithValue(ctx, model.ApiTaskKey, t4Task)
+			resp = rh.Run(taskCtx)
 			require.NotZero(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -491,7 +690,11 @@ func TestDownstreamParams(t *testing.T) {
 	r.downstreamParams = parameters
 	require.True(t, ok)
 
-	resp := r.Run(ctx)
+	foundTask, err := task.FindOneId(ctx, "task1")
+	require.NoError(t, err)
+	require.NotNil(t, foundTask)
+	taskCtx := context.WithValue(ctx, model.ApiTaskKey, foundTask)
+	resp := r.Run(taskCtx)
 	assert.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -680,6 +883,263 @@ func TestUpsertCheckRunParse(t *testing.T) {
 
 	assert.Equal(t, "This is my report", utility.FromStringPtr(r.checkRunOutput.Title))
 	assert.Len(t, r.checkRunOutput.Annotations, 1)
+}
+
+func TestGetCheckRunGitHubAppAuth(t *testing.T) {
+	require.NoError(t, db.ClearCollections(
+		model.VersionCollection, model.ParserProjectCollection,
+		githubapp.GitHubAppAuthCollection, model.ProjectRefCollection,
+		fakeparameter.Collection,
+	))
+
+	const (
+		projectID     = "proj"
+		fewVersionID  = "aaaaaaaaaaff001122334400"
+		manyVersionID = "aaaaaaaaaaff001122334401"
+	)
+
+	require.NoError(t, (&model.Version{Id: fewVersionID}).Insert(t.Context()))
+	require.NoError(t, (&model.Version{Id: manyVersionID}).Insert(t.Context()))
+
+	fewCheckRunYAML := `
+buildvariants:
+  - name: bv
+    tasks:
+      - name: task1
+        create_check_run:
+          path_to_outputs: output.json
+tasks:
+  - name: task1
+    commands: []
+`
+	var fewProj model.Project
+	ppFew, err := model.LoadProjectInto(t.Context(), []byte(fewCheckRunYAML), nil, projectID, &fewProj)
+	require.NoError(t, err)
+	ppFew.Id = fewVersionID
+	require.NoError(t, ppFew.Insert(t.Context()))
+
+	manyCheckRunYAML := `
+buildvariants:
+  - name: bv
+    tasks:
+      - name: task0
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task1
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task2
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task3
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task4
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task5
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task6
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task7
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task8
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task9
+        create_check_run:
+          path_to_outputs: output.json
+tasks:
+  - name: task0
+    commands: []
+  - name: task1
+    commands: []
+  - name: task2
+    commands: []
+  - name: task3
+    commands: []
+  - name: task4
+    commands: []
+  - name: task5
+    commands: []
+  - name: task6
+    commands: []
+  - name: task7
+    commands: []
+  - name: task8
+    commands: []
+  - name: task9
+    commands: []
+`
+	var manyProj model.Project
+	ppMany, err := model.LoadProjectInto(t.Context(), []byte(manyCheckRunYAML), nil, projectID, &manyProj)
+	require.NoError(t, err)
+	ppMany.Id = manyVersionID
+	require.NoError(t, ppMany.Insert(t.Context()))
+
+	// Project ref needed for GetAndValidateCheckRunGitHubAppAuth to find a ref and check auth.
+	require.NoError(t, (&model.ProjectRef{Id: projectID}).Insert(t.Context()))
+
+	fewTask := task.Task{Project: projectID, Version: fewVersionID}
+	manyTask := task.Task{Project: projectID, Version: manyVersionID}
+	noVersionTask := task.Task{Project: projectID, Version: "nonexistent_version"}
+
+	t.Run("AuthExistsShouldProceed", func(t *testing.T) {
+		require.NoError(t, githubapp.UpsertGitHubAppAuth(t.Context(), &githubapp.GithubAppAuth{
+			Id: projectID, AppID: 12345, PrivateKey: []byte("fake-private-key"),
+		}))
+		t.Cleanup(func() {
+			require.NoError(t, db.ClearCollections(githubapp.GitHubAppAuthCollection, fakeparameter.Collection))
+		})
+
+		auth, err := model.GetAndValidateCheckRunGitHubAppAuth(t.Context(), &fewTask)
+		require.NotNil(t, auth)
+		assert.NoError(t, err)
+	})
+	t.Run("FewCheckRunsNoAuthShouldProceedWithNilAuth", func(t *testing.T) {
+		auth, err := model.GetAndValidateCheckRunGitHubAppAuth(t.Context(), &fewTask)
+		assert.Nil(t, auth)
+		assert.NoError(t, err)
+	})
+	t.Run("ManyCheckRunsNoAuthShouldError", func(t *testing.T) {
+		auth, err := model.GetAndValidateCheckRunGitHubAppAuth(t.Context(), &manyTask)
+		assert.Nil(t, auth)
+		assert.Error(t, err)
+	})
+	t.Run("ProjectConfigNotFoundShouldError", func(t *testing.T) {
+		auth, err := model.GetAndValidateCheckRunGitHubAppAuth(t.Context(), &noVersionTask)
+		assert.Nil(t, auth)
+		assert.Error(t, err)
+	})
+}
+
+func TestCheckRunHandlerRun(t *testing.T) {
+	const (
+		projectID     = "proj"
+		versionID     = "aaaaaaaaaaff001122334455"
+		manyVersionID = "aaaaaaaaaaff001122334456"
+	)
+	require.NoError(t, db.ClearCollections(
+		task.Collection, patch.Collection,
+		model.VersionCollection, model.ParserProjectCollection,
+		githubapp.GitHubAppAuthCollection, model.ProjectRefCollection,
+	))
+
+	p := patch.Patch{
+		Id:      patch.NewId(versionID),
+		Version: versionID,
+	}
+	require.NoError(t, p.Insert(t.Context()))
+	pMany := patch.Patch{
+		Id:      patch.NewId(manyVersionID),
+		Version: manyVersionID,
+	}
+	require.NoError(t, pMany.Insert(t.Context()))
+
+	require.NoError(t, (&model.Version{Id: versionID}).Insert(t.Context()))
+	require.NoError(t, (&model.Version{Id: manyVersionID}).Insert(t.Context()))
+	require.NoError(t, (&model.ProjectRef{Id: projectID}).Insert(t.Context()))
+
+	// Parser project with >= threshold check runs so the handler returns an error when no auth.
+	manyCheckRunYAML := `
+buildvariants:
+  - name: bv
+    tasks:
+      - name: task0
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task1
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task2
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task3
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task4
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task5
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task6
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task7
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task8
+        create_check_run:
+          path_to_outputs: output.json
+      - name: task9
+        create_check_run:
+          path_to_outputs: output.json
+tasks:
+  - name: task0
+    commands: []
+  - name: task1
+    commands: []
+  - name: task2
+    commands: []
+  - name: task3
+    commands: []
+  - name: task4
+    commands: []
+  - name: task5
+    commands: []
+  - name: task6
+    commands: []
+  - name: task7
+    commands: []
+  - name: task8
+    commands: []
+  - name: task9
+    commands: []
+`
+	var manyProj model.Project
+	ppMany, err := model.LoadProjectInto(t.Context(), []byte(manyCheckRunYAML), nil, projectID, &manyProj)
+	require.NoError(t, err)
+	ppMany.Id = manyVersionID
+	require.NoError(t, ppMany.Insert(t.Context()))
+
+	t.Run("NonGitHubPRRequesterShouldSkip", func(t *testing.T) {
+		t1 := task.Task{
+			Id:        "t1_non_pr",
+			Project:   projectID,
+			Version:   versionID,
+			Requester: evergreen.RepotrackerVersionRequester,
+		}
+		require.NoError(t, t1.Insert(t.Context()))
+		t.Cleanup(func() { require.NoError(t, db.Clear(task.Collection)) })
+
+		h := &checkRunHandler{}
+		taskCtx := context.WithValue(t.Context(), model.ApiTaskKey, &t1)
+		resp := h.Run(taskCtx)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusOK, resp.Status())
+		assert.Contains(t, fmt.Sprintf("%v", resp.Data()), "requester is not a github patch")
+	})
+	t.Run("ManyCheckRunsNoAuthShouldReturnError", func(t *testing.T) {
+		t2 := task.Task{
+			Id:        "t2_many_no_auth",
+			Project:   projectID,
+			Version:   manyVersionID,
+			Requester: evergreen.GithubPRRequester,
+		}
+		require.NoError(t, t2.Insert(t.Context()))
+		defer func() { require.NoError(t, db.Clear(task.Collection)) }()
+
+		h := &checkRunHandler{}
+		taskCtx := context.WithValue(t.Context(), model.ApiTaskKey, &t2)
+		resp := h.Run(taskCtx)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusBadRequest, resp.Status())
+		assert.Contains(t, fmt.Sprintf("%v", resp.Data()), "does not have a GitHub app configured")
+	})
 }
 
 func TestCreateGitHubDynamicAccessToken(t *testing.T) {
@@ -1023,7 +1483,11 @@ func TestStartTaskWithOtelMetadata(t *testing.T) {
 			handler := makeStartTask(env).(*startTaskHandler)
 			require.NoError(t, handler.Parse(ctx, req))
 
-			resp := handler.Run(ctx)
+			foundTask, err := task.FindOneId(ctx, "test-task-id")
+			require.NoError(t, err)
+			require.NotNil(t, foundTask)
+			taskCtx := context.WithValue(ctx, model.ApiTaskKey, foundTask)
+			resp := handler.Run(taskCtx)
 			require.NotNil(t, resp)
 			assert.Equal(t, http.StatusOK, resp.Status())
 
@@ -1037,4 +1501,149 @@ func TestStartTaskWithOtelMetadata(t *testing.T) {
 			assert.Equal(t, tc.expectedDisk, updatedTask.Details.DiskDevices)
 		})
 	}
+}
+
+func TestReportS3Usage(t *testing.T) {
+	ctx := t.Context()
+	t.Cleanup(func() {
+		require.NoError(t, db.ClearCollections(task.Collection, s3lifecycle.Collection, model.VersionCollection))
+	})
+
+	for name, tc := range map[string]struct {
+		insertTask    *task.Task
+		insertVersion *model.Version
+		s3Usage       s3usage.S3Usage
+		final         bool
+		wantStatus    int
+		assertions    func(*testing.T, *task.Task)
+	}{
+		"SavesArtifactAndLogUsage": {
+			insertTask: &task.Task{Id: "t1", Status: evergreen.TaskStarted},
+			s3Usage: s3usage.S3Usage{
+				Artifacts: s3usage.ArtifactMetrics{
+					S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 50, UploadBytes: 2048},
+					Count:           5,
+				},
+				Logs: s3usage.LogMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 10, UploadBytes: 4096}},
+			},
+			wantStatus: http.StatusOK,
+			assertions: func(t *testing.T, dbTask *task.Task) {
+				assert.Equal(t, 50, dbTask.S3Usage.Artifacts.PutRequests)
+				assert.Equal(t, int64(2048), dbTask.S3Usage.Artifacts.UploadBytes)
+				assert.Equal(t, 5, dbTask.S3Usage.Artifacts.Count)
+				assert.Equal(t, 10, dbTask.S3Usage.Logs.PutRequests)
+				assert.Equal(t, int64(4096), dbTask.S3Usage.Logs.UploadBytes)
+			},
+		},
+		"SavesLogOnlyUsage": {
+			insertTask: &task.Task{Id: "t2", Status: evergreen.TaskStarted},
+			s3Usage: s3usage.S3Usage{
+				Logs: s3usage.LogMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 25, UploadBytes: 8192}},
+			},
+			wantStatus: http.StatusOK,
+			assertions: func(t *testing.T, dbTask *task.Task) {
+				assert.Equal(t, 0, dbTask.S3Usage.Artifacts.PutRequests)
+				assert.Equal(t, 25, dbTask.S3Usage.Logs.PutRequests)
+				assert.Equal(t, int64(8192), dbTask.S3Usage.Logs.UploadBytes)
+			},
+		},
+		"FinalCallSkipsVersionIncrementWhenCrashPathAlreadyTracked": {
+			insertTask: &task.Task{
+				Id:      "t4",
+				Status:  evergreen.TaskSystemFailed,
+				Version: "v4",
+				// Non-zero S3Usage signals the crash path already ran TrackVersionS3CostForTask.
+				S3Usage: s3usage.S3Usage{
+					Logs: s3usage.LogMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 3, UploadBytes: 256}},
+				},
+			},
+			insertVersion: &model.Version{Id: "v4"},
+			s3Usage: s3usage.S3Usage{
+				Artifacts: s3usage.ArtifactMetrics{
+					S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 10, UploadBytes: 512},
+					Count:           1,
+				},
+			},
+			final:      true,
+			wantStatus: http.StatusOK,
+			assertions: func(t *testing.T, dbTask *task.Task) {
+				dbVersion, err := model.VersionFindOneId(ctx, "v4")
+				require.NoError(t, err)
+				require.NotNil(t, dbVersion)
+				assert.Equal(t, 0, dbVersion.S3Usage.Artifacts.PutRequests, "version should not be incremented when crash path already tracked costs")
+			},
+		},
+		"FinalCallSavesUsageAndReturnsOk": {
+			insertTask:    &task.Task{Id: "t3", Status: evergreen.TaskStarted, Version: "v3"},
+			insertVersion: &model.Version{Id: "v3"},
+			s3Usage: s3usage.S3Usage{
+				Artifacts: s3usage.ArtifactMetrics{
+					S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 20, UploadBytes: 1024},
+					Count:           2,
+				},
+			},
+			final:      true,
+			wantStatus: http.StatusOK,
+			assertions: func(t *testing.T, dbTask *task.Task) {
+				assert.Equal(t, 20, dbTask.S3Usage.Artifacts.PutRequests)
+				assert.Equal(t, int64(1024), dbTask.S3Usage.Artifacts.UploadBytes)
+				assert.Equal(t, 2, dbTask.S3Usage.Artifacts.Count)
+
+				dbVersion, err := model.VersionFindOneId(ctx, "v3")
+				require.NoError(t, err)
+				require.NotNil(t, dbVersion)
+				assert.Equal(t, 20, dbVersion.S3Usage.Artifacts.PutRequests)
+				assert.Equal(t, int64(1024), dbVersion.S3Usage.Artifacts.UploadBytes)
+				assert.Equal(t, 2, dbVersion.S3Usage.Artifacts.Count)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, db.ClearCollections(task.Collection, s3lifecycle.Collection, model.VersionCollection))
+			require.NoError(t, tc.insertTask.Insert(ctx))
+			if tc.insertVersion != nil {
+				require.NoError(t, tc.insertVersion.Insert(ctx))
+			}
+
+			foundTask, err := task.FindOneId(ctx, tc.insertTask.Id)
+			require.NoError(t, err)
+			require.NotNil(t, foundTask)
+			taskCtx := context.WithValue(ctx, model.ApiTaskKey, foundTask)
+
+			handler := makeReportS3Usage().(*reportS3UsageHandler)
+			handler.taskID = tc.insertTask.Id
+			handler.s3Usage = tc.s3Usage
+			handler.final = tc.final
+			resp := handler.Run(taskCtx)
+			assert.Equal(t, tc.wantStatus, resp.Status())
+
+			if tc.assertions != nil {
+				dbTask, err := task.FindOneId(ctx, tc.insertTask.Id)
+				require.NoError(t, err)
+				require.NotNil(t, dbTask)
+				tc.assertions(t, dbTask)
+			}
+		})
+	}
+}
+
+func TestLogLookupClosureUsesAdminBucketsConfig(t *testing.T) {
+	days90 := 90
+	cfg := &evergreen.BucketsConfig{
+		LogBucket: evergreen.BucketConfig{Name: "log-bucket", ExpirationDays: &days90},
+	}
+	logLookup := func(_ context.Context, bucket, _ string) (int, bool) {
+		return cfg.LogBucketExpirationDays(bucket)
+	}
+
+	t.Run("KnownLogBucketReturnsDays", func(t *testing.T) {
+		days, ok := logLookup(t.Context(), "log-bucket", "")
+		assert.True(t, ok)
+		assert.Equal(t, 90, days)
+	})
+
+	t.Run("UnknownBucketReturnsFalse", func(t *testing.T) {
+		_, ok := logLookup(t.Context(), "artifact-bucket", "")
+		assert.False(t, ok)
+	})
 }

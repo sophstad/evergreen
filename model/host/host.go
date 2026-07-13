@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/evergreen-ci/birch"
 	"github.com/evergreen-ci/certdepot"
 	"github.com/evergreen-ci/evergreen"
@@ -164,8 +163,6 @@ type Host struct {
 	// DockerOptions stores information for creating a container with a specific image and command
 	DockerOptions DockerOptions `bson:"docker_options,omitempty" json:"docker_options"`
 
-	// PortBindings is populated if PublishPorts is specified when creating docker container from task
-	PortBindings PortMap `bson:"port_bindings,omitempty" json:"port_bindings,omitempty"`
 	// InstanceTags stores user-specified tags for instances
 	InstanceTags []Tag `bson:"instance_tags,omitempty" json:"instance_tags,omitempty"`
 
@@ -240,32 +237,10 @@ type VolumeAttachment struct {
 	IsHome     bool   `bson:"is_home" json:"is_home"`
 }
 
-// PortMap maps container port to the parent host ports (container port is formatted as <port>/<protocol>)
-type PortMap map[string][]string
-
-func GetPortMap(m nat.PortMap) PortMap {
-	res := map[string][]string{}
-	for containerPort, bindings := range m {
-		hostPorts := []string{}
-		for _, binding := range bindings {
-			hostPorts = append(hostPorts, binding.HostPort)
-		}
-		if len(hostPorts) > 0 {
-			res[string(containerPort)] = hostPorts
-		}
-	}
-	return res
-}
-
 // DockerOptions contains options for starting a container. This fulfills the
 // ProviderSettings interface to populate container information from the distro
 // settings.
 type DockerOptions struct {
-	// Optional parameters to define a registry name and authentication
-	RegistryName     string `mapstructure:"docker_registry_name" bson:"docker_registry_name,omitempty" json:"docker_registry_name,omitempty"`
-	RegistryUsername string `mapstructure:"docker_registry_user" bson:"docker_registry_user,omitempty" json:"docker_registry_user,omitempty"`
-	RegistryPassword string `mapstructure:"docker_registry_pw" bson:"docker_registry_pw,omitempty" json:"docker_registry_pw,omitempty"`
-
 	// Image is required and specifies the image for the container.
 	// This can be a URL or an image base, to be combined with a registry.
 	Image string `mapstructure:"image_url" bson:"image_url,omitempty" json:"image_url,omitempty"`
@@ -273,31 +248,8 @@ type DockerOptions struct {
 	Method string `mapstructure:"build_type" bson:"build_type,omitempty" json:"build_type,omitempty"`
 	// Command is the command to run on the docker (if not specified, will use the default entrypoint).
 	Command string `mapstructure:"command" bson:"command,omitempty" json:"command,omitempty"`
-	// If PublishPorts is true, any port that's exposed in the image will be published
-	PublishPorts bool `mapstructure:"publish_ports" bson:"publish_ports,omitempty" json:"publish_ports,omitempty"`
-	// If extra hosts are provided,these will be added to /etc/hosts on the container (in the form of hostname:IP)
-	ExtraHosts []string `mapstructure:"extra_hosts" bson:"extra_hosts,omitempty" json:"extra_hosts,omitempty"`
-	// If the container is created from host create, we want to skip building the image with agent
-	SkipImageBuild bool `mapstructure:"skip_build" bson:"skip_build,omitempty" json:"skip_build,omitempty"`
 	// list of container environment variables KEY=VALUE
 	EnvironmentVars []string `mapstructure:"environment_vars" bson:"environment_vars,omitempty" json:"environment_vars,omitempty"`
-	// StdinData is the data to pass to the container command's stdin.
-	StdinData []byte `mapstructure:"stdin_data" bson:"stdin_data,omitempty" json:"stdin_data,omitempty"`
-}
-
-// FromDistroSettings loads the Docker container options from the provider
-// settings.
-func (opts *DockerOptions) FromDistroSettings(d distro.Distro, _ string) error {
-	if len(d.ProviderSettingsList) != 0 {
-		bytes, err := d.ProviderSettingsList[0].MarshalBSON()
-		if err != nil {
-			return errors.Wrap(err, "marshalling provider settings into BSON")
-		}
-		if err := bson.Unmarshal(bytes, opts); err != nil {
-			return errors.Wrap(err, "unmarshalling BSON into Docker provider settings")
-		}
-	}
-	return nil
 }
 
 // Validate checks that the settings from the config file are sane.
@@ -327,9 +279,10 @@ type ProvisionOptions struct {
 	// SetupScript runs after other host provisioning is done (i.e. loading task data/artifacts).
 	SetupScript string `bson:"setup_script" json:"setup_script"`
 
-	// UseOAuth indicates whether to run `evergreen fetch` with static credentials (legacy)
-	// or whether to write the command to a file, and have the user run `evergreen host fetch` (OAuth).
-	UseOAuth bool `bson:"use_oauth" json:"use_oauth"`
+	// SetupStepNumber, if set, indicates the step number that the debug host
+	// should run up to (exclusive) after initializing the daemon. The specified
+	// step will not be executed. Accepts step notation (e.g., "5" or "5.1").
+	SetupStepNumber string `bson:"setup_step_number,omitempty" json:"setup_step_number,omitempty"`
 }
 
 // SpawnOptions holds data which the monitor uses to determine when to terminate hosts spawned by tasks.
@@ -354,6 +307,9 @@ type SpawnOptions struct {
 	// BuildID is the build_id of the build to which this host is pinned. When the build finishes,
 	// this host should be torn down. Only one of TaskID or BuildID should be set.
 	BuildID string `bson:"build_id,omitempty" json:"build_id,omitempty"`
+
+	// ProjectID is the ID of the project that's running the task.
+	ProjectID string `bson:"project_id,omitempty" json:"project_id,omitempty"`
 
 	// Retries is the number of times Evergreen should try to spawn this host.
 	Retries int `bson:"retries,omitempty" json:"retries,omitempty"`
@@ -497,6 +453,7 @@ type HostModifyOptions struct {
 	SleepScheduleOptions       `bson:",inline"`
 	AddHours                   time.Duration `json:"add_hours"` // duration to extend expiration
 	AddTemporaryExemptionHours int           `json:"add_temporary_exemption_hours"`
+	ExtendExpireOnByDay        bool          `json:"extend_expire_on_by_day"` // whether to extend the expire-on tag by one day
 	AttachVolume               string        `json:"attach_volume"`
 	DetachVolume               string        `json:"detach_volume"`
 	SubscriptionType           string        `json:"subscription_type"`
@@ -814,11 +771,7 @@ func (h *Host) IsContainer() bool {
 	return utility.StringSliceContains(evergreen.ProviderContainer, h.Provider)
 }
 
-func (h *Host) NeedsPortBindings() bool {
-	return h.DockerOptions.PublishPorts && h.PortBindings == nil
-}
-
-// CanUpdateSpawnHost is a shared utility function to determine a users permissions to modify a spawn host
+// CanUpdateSpawnHost is a shared utility function to determine a user's permissions to modify a spawn host.
 func CanUpdateSpawnHost(ctx context.Context, h *Host, usr *user.DBUser) bool {
 	if usr.Username() != h.StartedBy {
 		return usr.HasPermission(ctx, gimlet.PermissionOpts{
@@ -872,7 +825,7 @@ func (h *Host) setStatusAndFields(ctx context.Context, newStatus string, query, 
 
 	if h.Status == evergreen.HostTerminated && h.Provider != evergreen.ProviderNameStatic {
 		msg := ErrorHostAlreadyTerminated
-		grip.Warning(message.Fields{
+		grip.Warning(ctx, message.Fields{
 			"message": msg,
 			"host_id": h.Id,
 			"status":  newStatus,
@@ -929,7 +882,7 @@ func (h *Host) setStatusAndFields(ctx context.Context, newStatus string, query, 
 	eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventLoggingTimeout)
 	defer cancel()
 	event.LogHostStatusChanged(eventCtx, h.Id, h.Status, newStatus, user, logs)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":    "host status changed",
 		"host_id":    h.Id,
 		"host_tag":   h.Tag,
@@ -947,7 +900,7 @@ func (h *Host) setStatusAndFields(ctx context.Context, newStatus string, query, 
 func (h *Host) SetStatusAtomically(ctx context.Context, newStatus, user string, logs string) error {
 	if h.Status == evergreen.HostTerminated && h.Provider != evergreen.ProviderNameStatic {
 		msg := ErrorHostAlreadyTerminated
-		grip.Warning(message.Fields{
+		grip.Warning(ctx, message.Fields{
 			"message": msg,
 			"host_id": h.Id,
 			"status":  newStatus,
@@ -974,7 +927,7 @@ func (h *Host) SetStatusAtomically(ctx context.Context, newStatus, user string, 
 	eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventLoggingTimeout)
 	defer cancel()
 	event.LogHostStatusChanged(eventCtx, h.Id, h.Status, newStatus, user, logs)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":    "host status changed atomically",
 		"host_id":    h.Id,
 		"host_tag":   h.Tag,
@@ -1013,7 +966,7 @@ func (h *Host) SetDecommissioned(ctx context.Context, user string, decommissionI
 	}
 	if h.HasContainers {
 		containers, err := h.GetContainers(ctx)
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message": "error getting containers",
 			"host_id": h.Id,
 		}))
@@ -1026,7 +979,7 @@ func (h *Host) SetDecommissioned(ctx context.Context, user string, decommissionI
 				failedContainerIds = append(failedContainerIds, c.Id)
 			}
 		}
-		grip.Warning(message.WrapError(catcher.Resolve(), message.Fields{
+		grip.Warning(ctx, message.WrapError(catcher.Resolve(), message.Fields{
 			"message":  "error decommissioning containers",
 			"host_ids": failedContainerIds,
 		}))
@@ -1087,7 +1040,7 @@ func (h *Host) SetStopped(ctx context.Context, shouldKeepOff bool, user string) 
 	eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventLoggingTimeout)
 	defer cancel()
 	event.LogHostStatusChanged(eventCtx, h.Id, h.Status, evergreen.HostStopped, user, "")
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":    "host stopped",
 		"host_id":    h.Id,
 		"host_tag":   h.Tag,
@@ -1472,26 +1425,6 @@ func (h *Host) SetEC2Metadata(ctx context.Context, params HostMetadataOptions) e
 	return nil
 }
 
-// probably don't want to store the port mapping exactly this way
-func (h *Host) SetPortMapping(ctx context.Context, portsMap PortMap) error {
-	err := UpdateOne(
-		ctx,
-		bson.M{
-			IdKey: h.Id,
-		},
-		bson.M{
-			"$set": bson.M{
-				PortBindingsKey: portsMap,
-			},
-		},
-	)
-	if err != nil {
-		return err
-	}
-	h.PortBindings = portsMap
-	return nil
-}
-
 func (h *Host) UpdateCachedDistroProviderSettings(ctx context.Context, settingsDocuments []*birch.Document) error {
 	err := UpdateOne(
 		ctx,
@@ -1534,7 +1467,7 @@ func (h *Host) MarkAsProvisioned(ctx context.Context) error {
 	}
 
 	event.LogHostProvisioned(ctx, h.Id)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":    "host marked provisioned",
 		"host_id":    h.Id,
 		"host_tag":   h.Tag,
@@ -1599,7 +1532,7 @@ func (h *Host) UpdateStartingToRunning(ctx context.Context) error {
 	h.Status = evergreen.HostRunning
 
 	event.LogHostProvisioned(ctx, h.Id)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":   "host marked provisioned",
 		"host_id":   h.Id,
 		"host_tag":  h.Tag,
@@ -1673,7 +1606,7 @@ func (h *Host) setAwaitingJasperRestart(ctx context.Context, user string) error 
 	}
 
 	event.LogHostJasperRestarting(ctx, h.Id, user)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":               "set needs reprovision",
 		"host_id":               h.Id,
 		"host_tag":              h.Tag,
@@ -1748,7 +1681,7 @@ func (h *Host) setAwaitingReprovisionToNew(ctx context.Context, user string) err
 	}
 
 	event.LogHostConvertingProvisioning(ctx, h.Id, h.Distro.BootstrapSettings.Method, user)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":               "set needs reprovision",
 		"host_id":               h.Id,
 		"host_tag":              h.Tag,
@@ -1886,7 +1819,7 @@ func (h *Host) ClearRunningAndSetLastTask(ctx context.Context, t *task.Task) err
 	eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventLoggingTimeout)
 	defer cancel()
 	event.LogHostRunningTaskCleared(eventCtx, h.Id, h.RunningTask, h.RunningTaskExecution)
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":         "cleared host running task and set last task",
 		"host_id":         h.Id,
 		"host_tag":        h.Tag,
@@ -1907,7 +1840,7 @@ func (h *Host) ClearRunningAndSetLastTask(ctx context.Context, t *task.Task) err
 	h.LastGroup = t.TaskGroup
 	h.LastBuildVariant = t.BuildVariant
 	h.LastVersion = t.Version
-	h.LastProject = t.Version
+	h.LastProject = t.Project
 	h.LastTaskCompletedTime = now
 
 	return nil
@@ -1928,7 +1861,7 @@ func (h *Host) ClearRunningTask(ctx context.Context) error {
 		eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventLoggingTimeout)
 		defer cancel()
 		event.LogHostRunningTaskCleared(eventCtx, h.Id, h.RunningTask, h.RunningTaskExecution)
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":        "cleared host running task",
 			"host_id":        h.Id,
 			"host_tag":       h.Tag,
@@ -2020,7 +1953,7 @@ func (h *Host) UpdateRunningTask(ctx context.Context, env evergreen.Environment,
 
 	res, err := env.DB().Collection(Collection).UpdateOne(ctx, query, update)
 	if err != nil {
-		grip.DebugWhen(db.IsDuplicateKey(err), message.WrapError(err, message.Fields{
+		grip.DebugWhen(ctx, db.IsDuplicateKey(err), message.WrapError(err, message.Fields{
 			"message": "found duplicate running task",
 			"task":    t.Id,
 			"host_id": h.Id,
@@ -2367,7 +2300,7 @@ func buildConditionalProvisioningTimeoutQuery(now time.Time, timeoutCondition bs
 					// agent or 2. failed to prove the agent's
 					// liveliness by continuously pinging the app server
 					// with requests.
-					"$or": []bson.M{
+					"$and": []bson.M{
 						{RunningTaskKey: bson.M{"$exists": false}},
 						{LTCTaskKey: ""},
 					},
@@ -2475,6 +2408,21 @@ var StartedByStatusIndex = bson.D{
 	},
 }
 
+// StartedByCreationTimeIndex is the started_by_1_creation_time_1 index, hinted by
+// IdleEphemeralGroupedByDistroID so its sort by creation_time is served by the index rather than a
+// blocking in-memory sort. status is intentionally omitted: it's matched with an $or, so keying it
+// between started_by and creation_time would break the index sort.
+var StartedByCreationTimeIndex = bson.D{
+	{
+		Key:   StartedByKey,
+		Value: 1,
+	},
+	{
+		Key:   CreateTimeKey,
+		Value: 1,
+	},
+}
+
 // DistroIdStatusIndex is the distro_id_1_status_1 index.
 var DistroIdStatusIndex = bson.D{
 	{
@@ -2500,20 +2448,6 @@ func CountInactiveHostsByProvider(ctx context.Context) ([]InactiveHostCounts, er
 	return counts, nil
 }
 
-// FindAllRunningContainers finds all the containers that are currently running
-func FindAllRunningContainers(ctx context.Context) ([]Host, error) {
-	query := bson.M{
-		ParentIDKey: bson.M{"$exists": true},
-		StatusKey:   evergreen.HostRunning,
-	}
-	hosts, err := Find(ctx, query)
-	if err != nil {
-		return nil, errors.Wrap(err, "finding running containers")
-	}
-
-	return hosts, nil
-}
-
 // FindAllRunningParents finds all running hosts that have child containers
 func FindAllRunningParents(ctx context.Context) ([]Host, error) {
 	query := bson.M{
@@ -2523,21 +2457,6 @@ func FindAllRunningParents(ctx context.Context) ([]Host, error) {
 	hosts, err := Find(ctx, query)
 	if err != nil {
 		return nil, errors.Wrap(err, "finding running parents")
-	}
-
-	return hosts, nil
-}
-
-// FindAllRunningParentsOrdered finds all running hosts with child containers,
-// sorted in order of soonest  to latest LastContainerFinishTime
-func FindAllRunningParentsOrdered(ctx context.Context) ([]Host, error) {
-	query := bson.M{
-		StatusKey:        evergreen.HostRunning,
-		HasContainersKey: true,
-	}
-	hosts, err := Find(ctx, query, options.Find().SetSort(bson.M{LastContainerFinishTimeKey: 1}))
-	if err != nil {
-		return nil, errors.Wrap(err, "finding ordered running parents")
 	}
 
 	return hosts, nil
@@ -2681,37 +2600,6 @@ func (h *Host) UpdateLastContainerFinishTime(ctx context.Context, t time.Time) e
 	return nil
 }
 
-// FindRunningHosts is the underlying query behind the hosts page's table
-func FindRunningHosts(ctx context.Context, includeSpawnHosts bool) ([]Host, error) {
-	query := bson.M{StatusKey: bson.M{"$ne": evergreen.HostTerminated}}
-
-	if !includeSpawnHosts {
-		query[StartedByKey] = evergreen.User
-	}
-
-	pipeline := []bson.M{
-		{
-			"$match": query,
-		},
-		{
-			"$lookup": bson.M{
-				"from":         task.Collection,
-				"localField":   RunningTaskKey,
-				"foreignField": task.IdKey,
-				"as":           "task_full",
-			},
-		},
-		{
-			"$unwind": bson.M{
-				"path":                       "$task_full",
-				"preserveNullAndEmptyArrays": true,
-			},
-		},
-	}
-
-	return Aggregate(ctx, pipeline)
-}
-
 // FindAllHostsSpawnedByTasks finds all running hosts spawned by the
 // `host.create` command.
 func FindAllHostsSpawnedByTasks(ctx context.Context) ([]Host, error) {
@@ -2742,6 +2630,61 @@ func FindHostsSpawnedByTask(ctx context.Context, taskID string, execution int, s
 	return hosts, nil
 }
 
+// FindTerminatableDebugHostsForProject finds all debug hosts associated with a project that are eligible for termination.
+func FindTerminatableDebugHostsForProject(ctx context.Context, projectId string) ([]Host, error) {
+	if projectId == "" {
+		return nil, errors.New("project ID cannot be empty")
+	}
+
+	taskIdKey := bsonutil.GetDottedKeyName(ProvisionOptionsKey, ProvisionOptionsTaskIdKey)
+	query := bson.M{
+		IsDebugKey:  true,
+		UserHostKey: true,
+		StatusKey:   bson.M{"$in": evergreen.StoppableHostStatuses},
+		taskIdKey:   bson.M{"$exists": true, "$ne": ""},
+	}
+
+	hosts, err := Find(ctx, query)
+	if err != nil {
+		return nil, errors.Wrap(err, "finding debug hosts")
+	}
+
+	// Filter hosts by project in application code.
+	// The nil check is necessary because MongoDB may return hosts where the struct field is nil
+	// even if the database field exists.
+	var debugHostsForProject []Host
+	for _, h := range hosts {
+		if h.ProvisionOptions == nil || h.ProvisionOptions.TaskId == "" {
+			continue
+		}
+
+		t, err := task.FindOneId(ctx, h.ProvisionOptions.TaskId)
+		if err != nil {
+			grip.Warning(ctx, message.WrapError(err, message.Fields{
+				"message": "problem finding task for debug host",
+				"host_id": h.Id,
+				"task_id": h.ProvisionOptions.TaskId,
+			}))
+			continue
+		}
+		if t == nil {
+			grip.Warning(ctx, message.Fields{
+				"message": "task not found for debug host",
+				"host_id": h.Id,
+				"task_id": h.ProvisionOptions.TaskId,
+			})
+			continue
+		}
+
+		// Check if task belongs to the target project.
+		if t.Project == projectId {
+			debugHostsForProject = append(debugHostsForProject, h)
+		}
+	}
+
+	return debugHostsForProject, nil
+}
+
 // FindHostsSpawnedByBuild finds hosts spawned by the `createhost` command scoped to a given build.
 func FindHostsSpawnedByBuild(ctx context.Context, buildID string) ([]Host, error) {
 	buildIDKey := bsonutil.GetDottedKeyName(SpawnOptionsKey, SpawnOptionsBuildIDKey)
@@ -2770,20 +2713,6 @@ func FindTerminatedHostsRunningTasks(ctx context.Context) ([]Host, error) {
 	}
 
 	return hosts, nil
-}
-
-// CountContainersOnParents counts how many containers are children of the given group of hosts
-func (hosts HostGroup) CountContainersOnParents(ctx context.Context) (int, error) {
-	ids := hosts.GetHostIds()
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	query := bson.M{
-		StatusKey:   bson.M{"$in": evergreen.UpHostStatus},
-		ParentIDKey: bson.M{"$in": ids},
-	}
-	return Count(ctx, query)
 }
 
 // FindUphostContainersOnParents returns the containers that are children of the given hosts
@@ -2860,7 +2789,7 @@ func (hosts HostGroup) ProvisioningHosts() HostGroup {
 	out := HostGroup{}
 
 	for _, h := range hosts {
-		if utility.StringSliceContains(evergreen.ProvisioningHostStatus, h.Status) {
+		if utility.StringSliceContains(evergreen.ProvisioningHostStatus, h.Status) && h.RunningTask == "" {
 			out = append(out, h)
 		}
 	}
@@ -3246,6 +3175,65 @@ func AggregateSpawnhostData(ctx context.Context) (*SpawnHostUsage, error) {
 	}, nil
 }
 
+// CountDebugSpawnhosts returns the number of active spawn hosts in debug mode.
+func CountDebugSpawnhosts(ctx context.Context) (int, error) {
+	return Count(ctx, bson.M{
+		UserHostKey: true,
+		StatusKey:   bson.M{"$in": evergreen.UpHostStatus},
+		IsDebugKey:  true,
+	})
+}
+
+type spawnHostProjectCount struct {
+	Project string `bson:"project" json:"project"`
+	Count   int    `bson:"count" json:"count"`
+}
+
+// AggregateSpawnhostCountByProject returns the count of active spawn hosts
+// grouped by the project of the task they were created from.
+func AggregateSpawnhostCountByProject(ctx context.Context) ([]spawnHostProjectCount, error) {
+	const taskResult = "task_result"
+	taskIdKey := bsonutil.GetDottedKeyName(ProvisionOptionsKey, ProvisionOptionsTaskIdKey)
+	pipeline := []bson.M{
+		{"$match": bson.M{
+			UserHostKey: true,
+			StatusKey:   bson.M{"$in": evergreen.UpHostStatus},
+			taskIdKey:   bson.M{"$exists": true, "$ne": ""},
+		}},
+		{"$lookup": bson.M{
+			"from":         task.Collection,
+			"localField":   taskIdKey,
+			"foreignField": task.IdKey,
+			"as":           taskResult,
+		}},
+		{"$unwind": bson.M{
+			"path":                       "$" + taskResult,
+			"preserveNullAndEmptyArrays": false,
+		}},
+		{"$group": bson.M{
+			"_id":   "$" + bsonutil.GetDottedKeyName(taskResult, task.ProjectKey),
+			"count": bson.M{"$sum": 1},
+		}},
+		{"$project": bson.M{
+			"_id":     0,
+			"project": "$_id",
+			"count":   "$count",
+		}},
+		{"$sort": bson.M{"count": -1}},
+	}
+
+	cur, err := evergreen.GetEnvironment().DB().Collection(Collection).Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, errors.Wrap(err, "aggregating spawn host counts by project")
+	}
+	var results []spawnHostProjectCount
+	if err = cur.All(ctx, &results); err != nil {
+		return nil, errors.Wrap(err, "decoding spawn host counts by project")
+	}
+
+	return results, nil
+}
+
 // CountSpawnhostsWithNoExpirationByUser returns a count of all hosts associated
 // with a given users that are considered up and should never expire.
 func CountSpawnhostsWithNoExpirationByUser(ctx context.Context, user string) (int, error) {
@@ -3268,6 +3256,30 @@ func CountIntentHosts(ctx context.Context) (int, error) {
 	return Count(ctx, query)
 }
 
+// FindTaskHostsNearingExpiration returns all task hosts that have been up for
+// at least an hour, whose expire-on tag is within the next day, and are
+// currently running a task or completed one within the last 30 minutes.
+func FindTaskHostsNearingExpiration(ctx context.Context) ([]Host, error) {
+	query := bson.M{
+		UserHostKey:  false,
+		StartedByKey: evergreen.User,
+		StatusKey:    bson.M{"$in": []string{evergreen.HostStarting, evergreen.HostRunning, evergreen.HostDecommissioned}},
+		StartTimeKey: bson.M{"$lte": time.Now().Add(-2 * time.Hour)},
+		InstanceTagsKey: bson.M{
+			"$elemMatch": bson.M{
+				instanceTagKeyKey:   evergreen.TagExpireOn,
+				instanceTagValueKey: bson.M{"$lte": time.Now().AddDate(0, 0, 1).Format(evergreen.ExpireOnFormat)},
+			},
+		},
+		"$or": []bson.M{
+			{RunningTaskKey: bson.M{"$exists": true}},
+			{LTCTimeKey: bson.M{"$gte": time.Now().Add(-30 * time.Minute)}},
+		},
+	}
+
+	return Find(ctx, query)
+}
+
 // FindSpawnhostsWithNoExpirationToExtend returns all hosts that are set to never
 // expire but have their expiration time within the next day and are still up.
 func FindSpawnhostsWithNoExpirationToExtend(ctx context.Context) ([]Host, error) {
@@ -3287,6 +3299,34 @@ func makeExpireOnTag(expireOn string) Tag {
 		Value:         expireOn,
 		CanBeModified: false,
 	}
+}
+
+// NextExpireOnTagValue returns the expire-on tag value one day later than the
+// host's current value, without modifying any state.
+func (h *Host) NextExpireOnTagValue() (string, error) {
+	var currentExpireOn string
+	for _, tag := range h.InstanceTags {
+		if tag.Key == evergreen.TagExpireOn {
+			currentExpireOn = tag.Value
+			break
+		}
+	}
+	if currentExpireOn == "" {
+		return "", errors.Errorf("host '%s' has no expire-on tag", h.Id)
+	}
+
+	expireOnTime, err := time.ParseInLocation(evergreen.ExpireOnFormat, currentExpireOn, time.UTC)
+	if err != nil {
+		return "", errors.Wrapf(err, "parsing expire-on tag value '%s' for host '%s'", currentExpireOn, h.Id)
+	}
+	return expireOnTime.AddDate(0, 0, 1).Format(evergreen.ExpireOnFormat), nil
+}
+
+// BumpExpireOnTag updates the host's expire-on tag to the given value, updating
+// both the in-memory host and the database.
+func (h *Host) BumpExpireOnTag(ctx context.Context, newExpireOn string) error {
+	h.addTag(makeExpireOnTag(newExpireOn), true)
+	return errors.Wrapf(h.SetTags(ctx), "updating expire-on tag in DB for host '%s'", h.Id)
 }
 
 // MarkShouldNotExpire marks a host as one that should not expire
@@ -3326,14 +3366,14 @@ func (h *Host) MarkShouldNotExpire(ctx context.Context, expireOnValue, userTimeZ
 		if err != nil {
 			return errors.Wrap(err, "creating default sleep schedule for host being marked unexpirable that has invalid schedule")
 		}
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":            "host is being marked unexpirable but has an invalid sleep schedule, setting it to the default sleep schedule",
 			"host_id":            h.Id,
 			"started_by":         h.StartedBy,
 			"old_sleep_schedule": h.SleepSchedule,
 			"new_sleep_schedule": schedule,
 		})
-		grip.Error(message.WrapError(h.UpdateSleepSchedule(ctx, *schedule, time.Now()), message.Fields{
+		grip.Error(ctx, message.WrapError(h.UpdateSleepSchedule(ctx, *schedule, time.Now()), message.Fields{
 			"message":    "could not set default sleep schedule for host being marked unexpirable that currently has an invalid schedule",
 			"host_id":    h.Id,
 			"started_by": h.StartedBy,
@@ -3718,28 +3758,6 @@ func CountVirtualWorkstationsByInstanceType(ctx context.Context) ([]VirtualWorks
 	return data, nil
 }
 
-// ClearDockerStdinData clears the Docker stdin data from the host.
-func (h *Host) ClearDockerStdinData(ctx context.Context) error {
-	if len(h.DockerOptions.StdinData) == 0 {
-		return nil
-	}
-
-	dockerStdinDataKey := bsonutil.GetDottedKeyName(DockerOptionsKey, DockerOptionsStdinDataKey)
-	if err := UpdateOne(ctx, bson.M{
-		IdKey: h.Id,
-	},
-		bson.M{
-			"$unset": bson.M{dockerStdinDataKey: true},
-		},
-	); err != nil {
-		return err
-	}
-
-	h.DockerOptions.StdinData = nil
-
-	return nil
-}
-
 // nonAlphanumericRegexp matches any character that is not an alphanumeric
 // character ([0-9A-Za-z]).
 var nonAlphanumericRegexp = regexp.MustCompile("[[:^alnum:]]+")
@@ -3965,7 +3983,7 @@ func (h *Host) SetTemporaryExemption(ctx context.Context, exemptUntil time.Time)
 	} else {
 		extendedBy = exemptUntil.Sub(now)
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"message":                  "creating/extending temporary exemption from the sleep schedule",
 		"host_id":                  h.Id,
 		"distro_id":                h.Distro.Id,

@@ -35,6 +35,7 @@ func LastRevision() cli.Command {
 		saveFlagName                      = "save"
 		reuseFlagName                     = "reuse"
 		listFlagName                      = "list"
+		includePeriodicFlagName           = "include-periodic"
 	)
 	return cli.Command{
 		Name:  "last-revision",
@@ -90,6 +91,10 @@ func LastRevision() cli.Command {
 				Name:  listFlagName,
 				Usage: "instead of searching for a revision, list all saved last revision criteria groups",
 			},
+			cli.BoolFlag{
+				Name:  includePeriodicFlagName,
+				Usage: "include periodic builds when searching for a matching revision",
+			},
 		),
 		Before: mergeBeforeFuncs(setPlainLogger,
 			func(c *cli.Context) error {
@@ -138,7 +143,7 @@ func LastRevision() cli.Command {
 				if reuseCriteria && searchCriteriaSpecified {
 					return errors.New("cannot both reuse criteria and also specify other search criteria")
 				}
-				if listCriteria && (searchCriteriaSpecified || c.IsSet(lookbackLimitFlagName) || c.IsSet(timeoutFlagName) || c.IsSet(knownIssuesAreSuccessFlagName) || c.IsSet(projectFlagName)) {
+				if listCriteria && (searchCriteriaSpecified || c.IsSet(lookbackLimitFlagName) || c.IsSet(timeoutFlagName) || c.IsSet(knownIssuesAreSuccessFlagName) || c.IsSet(projectFlagName) || c.IsSet(includePeriodicFlagName)) {
 					// List criteria doesn't accept any other flags.
 					return errors.New("cannot both list criteria and also specify search criteria")
 				}
@@ -159,6 +164,7 @@ func LastRevision() cli.Command {
 			saveCriteriaName := c.String(saveFlagName)
 			reuseCriteriaName := c.String(reuseFlagName)
 			listCriteria := c.Bool(listFlagName)
+			includePeriodicBuilds := c.Bool(includePeriodicFlagName)
 
 			conf, err := NewClientSettings(confPath)
 			if err != nil {
@@ -225,7 +231,7 @@ func LastRevision() cli.Command {
 			var matchingVersion *model.APIVersion
 			for numRevisionsSearched := 0; numRevisionsSearched < versionLookbackLimit; numRevisionsSearched += maxVersionBatchSize {
 				numRevisionsToSearch := min(maxVersionBatchSize, versionLookbackLimit-numRevisionsSearched)
-				latestVersions, err := client.GetRecentVersionsForProject(ctx, c.String(projectFlagName), evergreen.RepotrackerVersionRequester, orderNum, numRevisionsToSearch)
+				latestVersions, err := fetchVersionBatch(ctx, client, c.String(projectFlagName), includePeriodicBuilds, orderNum, numRevisionsToSearch)
 				if err != nil {
 					return errors.Wrap(err, "getting latest versions for project")
 				}
@@ -265,6 +271,14 @@ func LastRevision() cli.Command {
 			return nil
 		},
 	}
+}
+
+func fetchVersionBatch(ctx context.Context, c client.Communicator, projectID string, includePeriodicBuilds bool, orderNum, limit int) ([]model.APIVersion, error) {
+	requesters := []string{evergreen.RepotrackerVersionRequester}
+	if includePeriodicBuilds {
+		requesters = append(requesters, evergreen.AdHocRequester)
+	}
+	return c.GetRecentVersionsForProject(ctx, projectID, requesters, orderNum, limit)
 }
 
 func printLastRevision(v *model.APIVersion, modules []model.APIManifestModule, jsonOutput bool) error {
@@ -498,9 +512,9 @@ func (c *lastRevisionCriteria) shouldApply(bv, bvDisplayName string) bool {
 	return false
 }
 
-// check returns whether the the criteria applies to the build and if so, if it
+// check returns whether the criteria applies to the build and if so, if it
 // passes all the criteria. This returns true if the criteria does not apply.
-func (c *lastRevisionCriteria) check(info lastRevisionBuildInfo) bool {
+func (c *lastRevisionCriteria) check(ctx context.Context, info lastRevisionBuildInfo) bool {
 	if !c.shouldApply(info.buildVariant, info.buildVariantDisplayName) {
 		// The criteria does not apply to this build variant, so it
 		// automatically passes checks.
@@ -508,7 +522,7 @@ func (c *lastRevisionCriteria) check(info lastRevisionBuildInfo) bool {
 	}
 
 	if info.successProportion() < c.minSuccessProportion {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"message":                    "build does not meet minimum successful tasks proportion",
 			"version_id":                 info.versionID,
 			"build_id":                   info.buildID,
@@ -521,7 +535,7 @@ func (c *lastRevisionCriteria) check(info lastRevisionBuildInfo) bool {
 	}
 
 	if info.finishedProportion() < c.minFinishedProportion {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"message":                    "build does not meet minimum finished tasks proportion",
 			"version_id":                 info.versionID,
 			"build_id":                   info.buildID,
@@ -545,7 +559,7 @@ func (c *lastRevisionCriteria) check(info lastRevisionBuildInfo) bool {
 			continue
 		}
 		if !isSuccessfulTask(tsk, c.knownIssuesAreSuccess) {
-			grip.Debug(message.Fields{
+			grip.Debug(ctx, message.Fields{
 				"message":                    "build has required task but it was not successful",
 				"version_id":                 info.versionID,
 				"build_id":                   info.buildID,
@@ -566,7 +580,7 @@ func (c *lastRevisionCriteria) check(info lastRevisionBuildInfo) bool {
 // version is found.
 func findLatestMatchingVersion(ctx context.Context, c client.Communicator, latestVersions []model.APIVersion, criteria []lastRevisionCriteria) (*model.APIVersion, error) {
 	for _, v := range latestVersions {
-		grip.Debug(message.Fields{
+		grip.Debug(ctx, message.Fields{
 			"message":    "checking version",
 			"version_id": utility.FromStringPtr(v.Id),
 			"revision":   utility.FromStringPtr(v.Revision),
@@ -645,7 +659,7 @@ func checkBuildPassesCriteria(ctx context.Context, c client.Communicator, b mode
 		return true, nil
 	}
 
-	grip.Debug(message.Fields{
+	grip.Debug(ctx, message.Fields{
 		"message":                    "checking build for last revision criteria",
 		"build_id":                   utility.FromStringPtr(b.Id),
 		"build_variant":              utility.FromStringPtr(b.BuildVariant),
@@ -682,7 +696,7 @@ func checkBuildPassesCriteria(ctx context.Context, c client.Communicator, b mode
 
 	for _, c := range criteria {
 		buildInfo := newLastRevisionBuildInfo(b, tasks, c.knownIssuesAreSuccess)
-		passesCriteria := c.check(buildInfo)
+		passesCriteria := c.check(ctx, buildInfo)
 		if !passesCriteria {
 			return false, nil
 		}

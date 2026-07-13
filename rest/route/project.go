@@ -10,9 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/evergreen-ci/cocoa"
 	"github.com/evergreen-ci/evergreen"
-	"github.com/evergreen-ci/evergreen/cloud"
 	dbModel "github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/parsley"
@@ -115,11 +113,12 @@ func (p *projectGetHandler) Run(ctx context.Context) gimlet.Responder {
 	}
 
 	projects = projects[:lastIndex]
-	for _, proj := range projects {
+	for i := range projects {
+		projects[i].RedactSecrets()
 		projectModel := &model.APIProjectRef{}
 		// Because this is route to accessible to non-admins, only return basic fields.
-		if err = projectModel.BuildPublicFields(ctx, proj); err != nil {
-			return gimlet.MakeJSONInternalErrorResponder(errors.Wrapf(err, "converting project '%s' to API model", proj.Id))
+		if err = projectModel.BuildPublicFields(ctx, projects[i]); err != nil {
+			return gimlet.MakeJSONInternalErrorResponder(errors.Wrapf(err, "converting project '%s' to API model", projects[i].Id))
 		}
 		if err = resp.AddData(projectModel); err != nil {
 			return gimlet.MakeJSONInternalErrorResponder(errors.Wrapf(err, "adding response data for project '%s'", utility.FromStringPtr(projectModel.Id)))
@@ -329,12 +328,6 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 	}
 
 	if h.newProjectRef.Enabled {
-		var hasHook bool
-		hasHook, err = dbModel.SetTracksPushEvents(ctx, h.newProjectRef)
-		if err != nil {
-			return gimlet.MakeJSONErrorResponder(errors.Wrapf(err, "setting project tracks push events for project '%s' in '%s/%s'", h.project, h.newProjectRef.Owner, h.newProjectRef.Repo))
-		}
-
 		var allAliases []model.APIProjectAlias
 		if mergedProjectRef.AliasesNeeded() {
 			allAliases, err = data.FindMergedProjectAliases(ctx, utility.FromStringPtr(h.apiNewProjectRef.Id), mergedProjectRef.RepoRefId, h.apiNewProjectRef.Aliases, false)
@@ -345,10 +338,6 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 
 		// verify enabling PR testing valid
 		if mergedProjectRef.IsPRTestingEnabled() && !h.originalProject.IsPRTestingEnabled() {
-			if !hasHook {
-				return gimlet.MakeJSONErrorResponder(errors.New("cannot enable PR testing in this repo without first enabling GitHub webhooks"))
-			}
-
 			if !hasAliasDefined(allAliases, evergreen.GithubPRAlias) {
 				return gimlet.MakeJSONErrorResponder(errors.New("cannot enable PR testing without a PR patch definition"))
 			}
@@ -374,10 +363,6 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 
 		// verify enabling commit queue valid
 		if mergedProjectRef.CommitQueue.IsEnabled() && !h.originalProject.CommitQueue.IsEnabled() {
-			if !hasHook {
-				return gimlet.MakeJSONErrorResponder(errors.New("cannot enable commit queue without first enabling GitHub webhooks"))
-			}
-
 			if !hasAliasDefined(allAliases, evergreen.CommitQueueAlias) {
 				return gimlet.MakeJSONErrorResponder(errors.New("cannot enable commit queue without a commit queue patch definition"))
 			}
@@ -416,7 +401,7 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 
 	newRevision := utility.FromStringPtr(h.apiNewProjectRef.Revision)
 	if newRevision != "" {
-		if err = dbModel.UpdateProjectRevision(ctx, h.project, newRevision); err != nil {
+		if err = dbModel.UpdateLastRevision(ctx, h.project, newRevision); err != nil {
 			return gimlet.MakeJSONErrorResponder(err)
 		}
 		h.newProjectRef.RepotrackerError = &dbModel.RepositoryErrorDetails{
@@ -425,43 +410,6 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 			MergeBaseRevision: "",
 		}
 	}
-
-	var vault cocoa.Vault
-	if len(h.apiNewProjectRef.DeleteContainerSecrets) != 0 || len(h.apiNewProjectRef.ContainerSecrets) != 0 {
-		smClient, err := cloud.MakeSecretsManagerClient(ctx, h.settings)
-		if err != nil {
-			return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "initializing Secrets Manager client"))
-		}
-		v, err := cloud.MakeSecretsManagerVault(smClient)
-		if err != nil {
-			return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "initializing Secrets Manager vault"))
-		}
-		vault = v
-	}
-
-	// This intentionally deletes the container secrets from external storage
-	// before updating the project ref. Deleting the secrets before updating the
-	// project ref ensures that the cloud secrets are cleaned up before removing
-	// references to them in the project ref.
-	remainingSecretsAfterDeletion, err := data.DeleteContainerSecrets(ctx, vault, h.originalProject, h.apiNewProjectRef.DeleteContainerSecrets)
-	if err != nil {
-		return gimlet.MakeJSONInternalErrorResponder(errors.Wrap(err, "deleting container secrets"))
-	}
-
-	var updatedContainerSecrets []dbModel.ContainerSecret
-	for _, containerSecret := range h.newProjectRef.ContainerSecrets {
-		if utility.StringSliceContains(h.apiNewProjectRef.DeleteContainerSecrets, containerSecret.Name) {
-			continue
-		}
-		updatedContainerSecrets = append(updatedContainerSecrets, containerSecret)
-	}
-
-	allContainerSecrets, err := dbModel.ValidateContainerSecrets(h.settings, h.newProjectRef.Id, remainingSecretsAfterDeletion, updatedContainerSecrets)
-	if err != nil {
-		return gimlet.MakeJSONErrorResponder(errors.Wrap(err, "invalid container secrets"))
-	}
-
-	h.newProjectRef.ContainerSecrets = allContainerSecrets
 
 	if h.originalProject.Restricted != mergedProjectRef.Restricted {
 		if mergedProjectRef.IsRestricted() {
@@ -488,16 +436,6 @@ func (h *projectIDPatchHandler) Run(ctx context.Context) gimlet.Responder {
 	if err = h.newProjectRef.Replace(ctx); err != nil {
 		return gimlet.MakeJSONInternalErrorResponder(errors.Wrapf(err, "updating project '%s'", h.newProjectRef.Id))
 	}
-
-	// Under the hood, this is updating the container secrets in the DB project
-	// ref, but this function's copy of the in-memory project ref won't reflect
-	// those changes. We log an error here instead of returning, so that this
-	// doesn't prevent the rest of the operations.
-	grip.Error(message.WrapError(data.UpsertContainerSecrets(ctx, vault, allContainerSecrets), message.Fields{
-		"message":            "problem upserting container secrets",
-		"project_id":         h.newProjectRef.Id,
-		"project_identifier": h.newProjectRef.Identifier,
-	}))
 
 	if err = data.UpdateProjectVars(ctx, h.newProjectRef.Id, &h.apiNewProjectRef.Variables, false); err != nil { // destructively modifies h.apiNewProjectRef.Variables
 		return gimlet.MakeJSONInternalErrorResponder(errors.Wrapf(err, "updating variables for project '%s'", h.project))
@@ -806,7 +744,12 @@ func (h *projectIDGetHandler) Run(ctx context.Context) gimlet.Responder {
 //
 // GET /rest/v2/projects/{project_id}/versions
 
-const defaultVersionLimit = 20
+const defaultVersionLimit = 5
+
+// maxVersionLimit bounds how many versions a single request may fetch. Each returned version carries
+// its embedded build-variant status (and, with include_builds, looked-up build documents), so an
+// unbounded limit lets one request materialize gigabytes server-side and can OOM the process.
+const maxVersionLimit = 100
 
 type getProjectVersionsHandler struct {
 	projectName string
@@ -825,18 +768,19 @@ func makeGetProjectVersionsHandler() gimlet.RouteHandler {
 //	@Tags			versions
 //	@Router			/projects/{project_id}/versions [get]
 //	@Security		Api-User || Api-Key
-//	@Param			project_id			path	string	true	"the project ID"
-//	@Param			skip				query	int		false	"Number of versions to skip."
-//	@Param			limit				query	int		false	"The number of versions to be returned per page of pagination. Defaults to 20."
-//	@Param			start				query	int		false	"The version order number to start at, for pagination. Will return the versions that are less than (and therefore older) the revision number specified."
-//	@Param			revision_end		query	int		false	"Will return the versions that are greater than (and therefore more recent) or equal to revision number specified."
-//	@Param			requester			query	string	false	"Returns versions for this requester only. Defaults to gitter_request (caused by git commit, aka the repotracker requester). Can also be set to patch_request, github_pull_request, trigger_request (Project Trigger versions) , github_merge_request (GitHub merge queue),, and ad_hoc (periodic builds)."
-//	@Param			include_builds		query	bool	false	"If set, will return some information for each build in the version."
-//	@Param			by_build_variant	query	string	false	"If set, will only include information for this build, and only return versions with this build activated. Must have include_builds set."
-//	@Param			include_tasks		query	bool	false	"If set, will return some information for each task in the included builds. This is only allowed if include_builds is set."
-//	@Param			by_task				query	string	false	"If set, will only include information for this task, and will only return versions with this task activated. Must have include_tasks set."
-//	@Param			created_after		query	string	false	"Timestamp to look for applicable versions after or equal to create_time."
-//	@Param			created_before		query	string	false	"Timestamp to look for applicable versions before or equal to create_time."
+//	@Param			project_id			path	string		true	"the project ID"
+//	@Param			skip				query	int			false	"Number of versions to skip."
+//	@Param			limit				query	int			false	"The number of versions to be returned per page of pagination. Defaults to 5, and cannot exceed 100."
+//	@Param			start				query	int			false	"The version order number to start at, for pagination. Will return the versions that are less than (and therefore older) the revision number specified."
+//	@Param			revision_end		query	int			false	"Will return the versions that are greater than (and therefore more recent) or equal to revision number specified."
+//	@Param			requester			query	string		false	"Returns versions for this requester only. Defaults to gitter_request (caused by git commit, aka the repotracker requester). Can also be set to patch_request, github_pull_request, trigger_request (Project Trigger versions) , github_merge_request (GitHub merge queue), and ad_hoc (periodic builds). Can be specified multiple times to include multiple requesters."
+//	@Param			requesters			body	[]string	false	"Returns versions for all specified requesters. Overridden by the requester query parameter if both are set."
+//	@Param			include_builds		query	bool		false	"If set, will return some information for each build in the version."
+//	@Param			by_build_variant	query	string		false	"If set, will only include information for this build, and only return versions with this build activated. Must have include_builds set."
+//	@Param			include_tasks		query	bool		false	"If set, will return some information for each task in the included builds. This is only allowed if include_builds is set."
+//	@Param			by_task				query	string		false	"If set, will only include information for this task, and will only return versions with this task activated. Must have include_tasks set."
+//	@Param			created_after		query	string		false	"Timestamp to look for applicable versions after or equal to create_time."
+//	@Param			created_before		query	string		false	"Timestamp to look for applicable versions before or equal to create_time."
 //	@Success		200					{array}	model.APIVersion
 func (h *getProjectVersionsHandler) Factory() gimlet.RouteHandler {
 	return &getProjectVersionsHandler{}
@@ -852,6 +796,15 @@ func (h *getProjectVersionsHandler) Parse(ctx context.Context, r *http.Request) 
 	if len(b) > 0 {
 		if err := json.Unmarshal(b, &h.opts); err != nil {
 			return errors.Wrap(err, "unmarshalling JSON request body into version options")
+		}
+		if len(h.opts.Requesters) == 0 {
+			// Consider the legacy single-value "requester" body field.
+			var legacyBody struct {
+				Requester string `json:"requester"`
+			}
+			if err := json.Unmarshal(b, &legacyBody); err == nil && legacyBody.Requester != "" {
+				h.opts.Requesters = []string{legacyBody.Requester}
+			}
 		}
 	}
 
@@ -873,6 +826,9 @@ func (h *getProjectVersionsHandler) Parse(ctx context.Context, r *http.Request) 
 	}
 	if h.opts.Limit < 1 {
 		return errors.New("limit must be a positive integer")
+	}
+	if h.opts.Limit > maxVersionLimit {
+		return errors.Errorf("limit cannot exceed %d", maxVersionLimit)
 	}
 
 	startStr := params.Get("start")
@@ -908,13 +864,13 @@ func (h *getProjectVersionsHandler) Parse(ctx context.Context, r *http.Request) 
 		h.opts.CreatedBefore = createdBefore
 	}
 
-	requester := params.Get("requester")
-	if requester != "" {
-		h.opts.Requester = requester
+	if requesters := params["requester"]; len(requesters) > 0 {
+		h.opts.Requesters = requesters
 	}
-	if h.opts.Requester == "" {
-		h.opts.Requester = evergreen.RepotrackerVersionRequester
+	if len(h.opts.Requesters) == 0 {
+		h.opts.Requesters = []string{evergreen.RepotrackerVersionRequester}
 	}
+
 	return nil
 }
 
@@ -954,14 +910,13 @@ func (h *getProjectVersionsHandler) Run(ctx context.Context) gimlet.Responder {
 // modifyProjectVersionsHandler is a RequestHandler for setting the priority of versions.
 type modifyProjectVersionsHandler struct {
 	projectId string
-	url       string
 	opts      dbModel.ModifyVersionsOptions
 	startTime time.Time
 	endTime   time.Time
 }
 
-func makeModifyProjectVersionsHandler(url string) gimlet.RouteHandler {
-	return &modifyProjectVersionsHandler{url: url}
+func makeModifyProjectVersionsHandler() gimlet.RouteHandler {
+	return &modifyProjectVersionsHandler{}
 }
 
 // Factory creates an instance of the handler.
@@ -982,7 +937,7 @@ func makeModifyProjectVersionsHandler(url string) gimlet.RouteHandler {
 //	@Param			by_task				query	string	false	"If set, will only include information for this task, and will only return versions with this task activated. Must have include_tasks set."
 //	@Success		200
 func (h *modifyProjectVersionsHandler) Factory() gimlet.RouteHandler {
-	return &modifyProjectVersionsHandler{url: h.url}
+	return &modifyProjectVersionsHandler{}
 }
 
 func (h *modifyProjectVersionsHandler) Parse(ctx context.Context, r *http.Request) error {
@@ -1065,13 +1020,12 @@ func (h *modifyProjectVersionsHandler) Run(ctx context.Context) gimlet.Responder
 type getProjectTasksHandler struct {
 	projectName string
 	taskName    string
-	url         string
 
 	opts model.GetProjectTasksOpts
 }
 
-func makeGetProjectTasksHandler(url string) gimlet.RouteHandler {
-	return &getProjectTasksHandler{url: url}
+func makeGetProjectTasksHandler() gimlet.RouteHandler {
+	return &getProjectTasksHandler{}
 }
 
 // Factory creates an instance of the handler.
@@ -1086,7 +1040,7 @@ func makeGetProjectTasksHandler(url string) gimlet.RouteHandler {
 //	@Param			{object}	body	model.GetProjectTasksOpts	false	"parameters"
 //	@Success		200			{array}	model.APITask
 func (h *getProjectTasksHandler) Factory() gimlet.RouteHandler {
-	return &getProjectTasksHandler{url: h.url}
+	return &getProjectTasksHandler{}
 }
 
 func (h *getProjectTasksHandler) Parse(ctx context.Context, r *http.Request) error {
@@ -1270,7 +1224,7 @@ func (p *GetProjectAliasResultsHandler) Parse(ctx context.Context, r *http.Reque
 func (p *GetProjectAliasResultsHandler) Run(ctx context.Context) gimlet.Responder {
 	proj, err := dbModel.FindProjectFromVersionID(ctx, p.version)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message": "error getting project for version",
 		}))
 		return gimlet.MakeJSONInternalErrorResponder(errors.Errorf("getting project for version '%s'", p.version))
@@ -1308,7 +1262,7 @@ func (p *GetPatchTriggerAliasHandler) Parse(ctx context.Context, r *http.Request
 func (p *GetPatchTriggerAliasHandler) Run(ctx context.Context) gimlet.Responder {
 	proj, err := dbModel.FindMergedProjectRef(ctx, p.projectID, "", true)
 	if err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message": "error getting project",
 			"project": p.projectID,
 		}))

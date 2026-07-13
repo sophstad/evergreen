@@ -37,7 +37,7 @@ func UtilizationBasedHostAllocator(ctx context.Context, hostAllocatorData *HostA
 	}
 
 	if distro.Provider != evergreen.ProviderNameDocker && numExistingHosts >= distro.HostAllocatorSettings.MaximumHosts {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":        "distro is at max hosts",
 			"distro":         distro.Id,
 			"existing_hosts": numExistingHosts,
@@ -53,7 +53,7 @@ func UtilizationBasedHostAllocator(ctx context.Context, hostAllocatorData *HostA
 		numNewHostsToRequest := minimumHostsThreshold - numExistingHosts
 
 		if numNewHostsToRequest > 0 {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"runner":                     RunnerName,
 				"message":                    "requesting new hosts for disabled distro",
 				"distro":                     distro.Id,
@@ -93,12 +93,11 @@ func UtilizationBasedHostAllocator(ctx context.Context, hostAllocatorData *HostA
 			distro,
 			taskGroupData,
 			distro.HostAllocatorSettings.FutureHostFraction,
-			hostAllocatorData.ContainerPool,
 			hostAllocatorData.DistroQueueInfo.MaxDurationThreshold,
 			maxHosts)
 
 		if err != nil {
-			return 0, len(freeHosts), errors.Wrapf(err, "error calculating hosts for distro %s", distro.Id)
+			return 0, len(freeHosts), errors.Wrapf(err, "calculating hosts for distro '%s'", distro.Id)
 		}
 
 		// add up total number of hosts needed for all groups
@@ -132,7 +131,7 @@ func UtilizationBasedHostAllocator(ctx context.Context, hostAllocatorData *HostA
 // evalHostUtilization calculates the number of hosts needed by taking the total task scheduled task time
 // and dividing it by the target duration. Request however many hosts are needed to achieve that minus the
 // number of free hosts
-func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData TaskGroupData, futureHostFraction float64, containerPool *evergreen.ContainerPool, maxDurationThreshold time.Duration, maxHosts int) (int, int, error) {
+func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData TaskGroupData, futureHostFraction float64, maxDurationThreshold time.Duration, maxHosts int) (int, int, error) {
 	existingHosts := taskGroupData.Hosts
 	taskGroupInfo := taskGroupData.Info
 	numLongRunningTasks := taskGroupInfo.CountDurationOverThreshold
@@ -146,17 +145,6 @@ func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData Tas
 	// Why do we do this here?
 	if ctx.Err() != nil {
 		return 0, 0, errors.New("context canceled, not evaluating host utilization")
-	}
-
-	if containerPool != nil {
-		parentDistro, err := distro.FindOneId(ctx, containerPool.Distro)
-		if err != nil {
-			return 0, 0, errors.Wrap(err, "error finding parent distros")
-		}
-		if parentDistro == nil {
-			return 0, 0, errors.Errorf("distro '%s' not found", containerPool.Distro)
-		}
-		maxHosts = parentDistro.HostAllocatorSettings.MaximumHosts * containerPool.MaxContainers
 	}
 
 	// Determine the number of expected free hosts by summing the number of free hosts with the
@@ -179,7 +167,8 @@ func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData Tas
 	if d.HostAllocatorSettings.FeedbackRule == evergreen.HostAllocatorWaitsOverThreshFeedback {
 		numHostsForOverdueTasks = taskGroupInfo.CountWaitOverThreshold
 	}
-	numNewHosts = calcNewHostsNeeded(totalShortRunningTasksExpectedDuration, maxDurationThreshold, expectedNumFreeHosts, numLongRunningTasks, numHostsForOverdueTasks, roundDown)
+	numNewHosts = calcNewHostsNeeded(totalShortRunningTasksExpectedDuration, maxDurationThreshold,
+		expectedNumFreeHosts, numLongRunningTasks, numHostsForOverdueTasks, taskGroupInfo.CountDepFilledMergeQueueTasks, roundDown)
 
 	// don't start more hosts than new tasks. This can happen if the task queue is mostly long tasks
 	if numNewHosts > taskGroupInfo.Count {
@@ -187,20 +176,7 @@ func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData Tas
 	}
 
 	// enforce the max hosts cap
-	if isMaxHostsCapacity(maxHosts, containerPool, numNewHosts, len(existingHosts)) {
-		// TODO (DEVPROD-18957): remove log once the distro max host auto-tuning
-		// logic is working effectively.
-		grip.InfoWhen(evergreen.IsEc2Provider(d.Provider) && numNewHosts > 0 && numNewHosts+len(existingHosts) > maxHosts, message.Fields{
-			"message":                     "dynamically allocated distro needs to create more hosts than distro max hosts allows",
-			"target_distro_hosts":         numNewHosts + len(existingHosts),
-			"target_distro_hosts_deficit": numNewHosts + len(existingHosts) - maxHosts,
-			"target_num_new_hosts":        numNewHosts,
-			"num_existing_hosts":          len(existingHosts),
-			"max_hosts":                   maxHosts,
-			"distro":                      d.Id,
-			"provider":                    d.Provider,
-			"ticket":                      "DEVPROD-18957",
-		})
+	if isMaxHostsCapacity(maxHosts, numNewHosts, len(existingHosts)) {
 		numNewHosts = maxHosts - len(existingHosts)
 	}
 
@@ -226,7 +202,7 @@ func evalHostUtilization(ctx context.Context, d distro.Distro, taskGroupData Tas
 		"task_group_name": taskGroupInfo.Name,
 	}
 	avgMakespan := totalShortRunningTasksExpectedDuration / time.Duration(maxHosts)
-	grip.AlertWhen(avgMakespan > dynamicDistroRuntimeAlertThreshold, underWaterAlert)
+	grip.AlertWhen(ctx, avgMakespan > dynamicDistroRuntimeAlertThreshold, underWaterAlert)
 
 	return numNewHosts, expectedNumFreeHosts, nil
 }
@@ -275,10 +251,10 @@ func groupByTaskGroup(runningHosts []host.Host, distroQueueInfo model.DistroQueu
 // sum of the expected durations of all short-running (<= maxDurationPerHost) tasks that have their
 // dependencies met. It attempts to allocate enough hosts to run all short running tasks within
 // maxDurationPerHost, plus one host for each long-running task with runtime > maxDurationPerHost,
-// plus (optionally) one host for each task that have been waiting maxDurationPerHost since its dependencies
-// were met.
+// plus one host for each dependency-filled merge queue task, plus (optionally) one host for each
+// task that have been waiting maxDurationPerHost since its dependencies were met.
 func calcNewHostsNeeded(totalShortRunningTasksExpectedDuration, maxDurationPerHost time.Duration,
-	expectedNumFreeHosts, numLongRunningTasks, numHostsForOverdueTasks int, roundDown bool) int {
+	expectedNumFreeHosts, numLongRunningTasks, numHostsForOverdueTasks, numMergeQueueTasks int, roundDown bool) int {
 
 	// Calculate the number of hosts needed to run the full totalShortRunningTasksExpectedDuration within
 	// the maxDurationPerHost turnaround requirement
@@ -286,7 +262,7 @@ func calcNewHostsNeeded(totalShortRunningTasksExpectedDuration, maxDurationPerHo
 
 	// Subtract the number of hosts that we expect to be free, add the number of long-running tasks,
 	// and add the number of overdue tasks to get the final number of hosts that need to be spun up
-	numNewHostsNeeded := numHostsForTurnaroundRequirement - float64(expectedNumFreeHosts) + float64(numLongRunningTasks) + float64(numHostsForOverdueTasks)
+	numNewHostsNeeded := numHostsForTurnaroundRequirement - float64(expectedNumFreeHosts) + float64(numLongRunningTasks) + float64(numHostsForOverdueTasks) + float64(numMergeQueueTasks)
 
 	// If we need less than 1 new host but have no existing hosts, return 1 host
 	// so that small queues are not stranded
@@ -405,17 +381,7 @@ func getSoonToBeFreeHosts(ctx context.Context, existingHosts []host.Host, future
 	return freeHosts, nil
 }
 
-// isMaxHostsCapacity returns true if the max number of containers are already running
-func isMaxHostsCapacity(maxHosts int, pool *evergreen.ContainerPool, numNewHosts, numExistingHosts int) bool {
-
-	if pool != nil {
-		if numNewHosts > (maxHosts*pool.MaxContainers)-numExistingHosts {
-			return true
-		}
-	}
-
-	if numNewHosts+numExistingHosts > maxHosts {
-		return true
-	}
-	return false
+// isMaxHostsCapacity returns true if spawning numNewHosts would exceed the distro's maximum host count.
+func isMaxHostsCapacity(maxHosts, numNewHosts, numExistingHosts int) bool {
+	return numNewHosts+numExistingHosts > maxHosts
 }

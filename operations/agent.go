@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/evergreen-ci/evergreen/agent"
 	"github.com/evergreen-ci/evergreen/agent/command"
 	"github.com/evergreen-ci/evergreen/agent/globals"
+	agentutil "github.com/evergreen-ci/evergreen/agent/util"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/mongodb/grip/recovery"
@@ -37,8 +40,6 @@ func Agent() cli.Command {
 		statusPortFlagName                 = "status_port"
 		cleanupFlagName                    = "cleanup"
 		modeFlagName                       = "mode"
-		podIDFlagName                      = "pod_id"
-		podSecretFlagName                  = "pod_secret"
 		versionFlagName                    = "version"
 		sendTaskLogsToGlobalSenderFlagName = "global_task_logs"
 	)
@@ -59,16 +60,6 @@ func Agent() cli.Command {
 				Name:   agentHostSecretFlagName,
 				Usage:  "secret for the current host (applies only to host mode)",
 				EnvVar: evergreen.HostSecretEnvVar,
-			},
-			cli.StringFlag{
-				Name:   podIDFlagName,
-				Usage:  "the ID of the pod that the agent is running on (applies only to pod mode)",
-				EnvVar: "POD_ID",
-			},
-			cli.StringFlag{
-				Name:   podSecretFlagName,
-				Usage:  "the secret for the pod that the agent is running on (applies only to pod mode)",
-				EnvVar: "POD_SECRET",
 			},
 			cli.StringFlag{
 				Name:  agentAPIServerURLFlagName,
@@ -103,7 +94,7 @@ func Agent() cli.Command {
 			},
 			cli.StringFlag{
 				Name:  modeFlagName,
-				Usage: "the mode that the agent should run in (host, pod)",
+				Usage: "the mode that the agent should run in (host)",
 				Value: "host",
 			},
 			cli.BoolFlag{
@@ -133,9 +124,6 @@ func Agent() cli.Command {
 				case string(globals.HostMode):
 					catcher.Add(requireStringFlag(agentHostIDFlagName)(c))
 					catcher.Add(requireStringFlag(agentHostSecretFlagName)(c))
-				case string(globals.PodMode):
-					catcher.Add(requireStringFlag(podIDFlagName)(c))
-					catcher.Add(requireStringFlag(podSecretFlagName)(c))
 				default:
 					return errors.Errorf("invalid mode '%s'", mode)
 				}
@@ -155,8 +143,6 @@ func Agent() cli.Command {
 			opts := agent.Options{
 				HostID:                     c.String(agentHostIDFlagName),
 				HostSecret:                 c.String(agentHostSecretFlagName),
-				PodID:                      c.String(podIDFlagName),
-				PodSecret:                  c.String(podSecretFlagName),
 				Mode:                       globals.Mode(c.String(modeFlagName)),
 				StatusPort:                 c.Int(statusPortFlagName),
 				LogPrefix:                  c.String(logPrefixFlagName),
@@ -172,17 +158,17 @@ func Agent() cli.Command {
 			// env vars to prevent them from being inherited by task
 			// subprocesses (e.g. shell.exec).
 			if err := os.Unsetenv(evergreen.HostIDEnvVar); err != nil {
-				return errors.Wrapf(err, "unsetting %s env var", evergreen.HostIDEnvVar)
+				return errors.Wrapf(err, "unsetting '%s' env var", evergreen.HostIDEnvVar)
 			}
 			if err := os.Unsetenv(evergreen.HostSecretEnvVar); err != nil {
-				return errors.Wrapf(err, "unsetting %s env var", evergreen.HostSecretEnvVar)
+				return errors.Wrapf(err, "unsetting '%s' env var", evergreen.HostSecretEnvVar)
 			}
 
 			if err := os.MkdirAll(opts.WorkingDirectory, 0777); err != nil {
 				return errors.Wrapf(err, "creating working directory '%s'", opts.WorkingDirectory)
 			}
 
-			grip.Info(message.Fields{
+			grip.Info(context.Background(), message.Fields{
 				"message":            "starting agent",
 				"commands":           command.RegisteredCommandNames(),
 				"dir":                opts.WorkingDirectory,
@@ -211,7 +197,17 @@ func Agent() cli.Command {
 				return errors.Wrap(err, "setting up global logger")
 			}
 			agt.SetDefaultLogger(sender)
-			agt.SetHomeDirectory()
+			agt.SetHomeDirectory(ctx)
+
+			grip.Warning(ctx, message.WrapError(setNiceAllThreads(agentutil.AgentNice), message.Fields{
+				"message": "could not set nice on agent process and all of its threads, some threads may proceed with default nice",
+			}))
+			// -900 puts the agent 900 points below any subprocess running at the
+			// default oom_score_adj of 0, so subprocesses are always preferred
+			// OOM targets while the agent remains eligible as a last resort.
+			grip.Warning(ctx, message.WrapError(agentutil.SetOOMScoreAdj(-900), message.Fields{
+				"message": "could not set oom_score_adj on agent process, agent may be targeted by the OOM killer",
+			}))
 
 			err = agt.Start(ctx)
 			if err != nil {
@@ -222,13 +218,54 @@ func Agent() cli.Command {
 				// Although we still want to return an error, it's an acceptable state for an agent to be unauthorized
 				// as ec2 doesn't immediately shut down hosts, so avoid logging it as an emergency.
 				isUnauthorizedErr := strings.Contains(err.Error(), "401 (Unauthorized)")
-				grip.EmergencyWhen(!isUnauthorizedErr, message.WrapError(err, msg))
+				grip.EmergencyWhen(ctx, !isUnauthorizedErr, message.WrapError(err, msg))
 				return err
 			}
 
 			return nil
 		},
 	}
+}
+
+// setNiceAllThreads sets the nice for all currently-running threads in this
+// process.
+func setNiceAllThreads(nice int) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
+	catcher := grip.NewBasicCatcher()
+
+	// We want to ensure all threads use the same nice so they get CPU priority.
+	// This is not as straightforward as it sounds.
+	//
+	// Threads inherit the nice of their parent process/thread. The Go runtime
+	// pre-initializes several threads, so by the time the main thread begins
+	// running (i.e. this thread), those other threads won't inherit the nice
+	// from the main thread because they already exist. Because of that, the
+	// main thread has to update both itself and all other existing threads in
+	// the process to ensure that they all use the same nice; otherwise, a
+	// goroutine that's assigned to on one of the other thread will end up with
+	// the default nice.
+	//
+	// This sets the nice on all threads by reading all thread IDs for this
+	// process and setting the nice on each one.
+	entries, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		catcher.Wrap(err, "reading thread IDs for this process")
+		return catcher.Resolve()
+	}
+
+	for _, entry := range entries {
+		tid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		catcher.Wrapf(agentutil.SetNice(tid, nice), "setting agent nice on thread '%s'", tid)
+	}
+
+	return nil
 }
 
 func hardShutdownForSignals(ctx context.Context, serviceCanceler context.CancelFunc, closeAgent func(context.Context)) {
@@ -239,7 +276,7 @@ func hardShutdownForSignals(ctx context.Context, serviceCanceler context.CancelF
 	select {
 	case <-ctx.Done():
 	case <-sigChan:
-		grip.Info("service exiting after receiving signal")
+		grip.Info(ctx, "service exiting after receiving signal")
 	}
 
 	// Close may not succeed if the context is cancelled, but this is a

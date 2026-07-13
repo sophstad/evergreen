@@ -43,6 +43,30 @@ func TestFindDistroById(t *testing.T) {
 	assert.NotEqual(found.Id, -1, "The _ids should not match")
 }
 
+func TestHasAnyByIdOrAlias(t *testing.T) {
+	require.NoError(t, db.ClearCollections(Collection))
+	d := Distro{Id: "distro", Aliases: []string{"distro-alias"}}
+	require.NoError(t, d.Insert(t.Context()))
+
+	for _, tc := range []struct {
+		name     string
+		ids      []string
+		expected bool
+	}{
+		{name: "MatchesByID", ids: []string{"distro"}, expected: true},
+		{name: "MatchesByAlias", ids: []string{"distro-alias"}, expected: true},
+		{name: "MatchesWhenAnyIDInListMatches", ids: []string{"nonexistent", "distro"}, expected: true},
+		{name: "DoesNotMatchUnknownID", ids: []string{"nonexistent"}, expected: false},
+		{name: "DoesNotMatchEmptyList", ids: []string{}, expected: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, err := HasAnyByIdOrAlias(t.Context(), tc.ids)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, found)
+		})
+	}
+}
+
 func TestFindAllDistros(t *testing.T) {
 	testConfig := testutil.TestConfig()
 	assert := assert.New(t)
@@ -190,23 +214,6 @@ func TestValidateContainerPoolDistros(t *testing.T) {
 	assert.Contains(err.Error(), "distro not found for container pool 'test-pool-3'")
 }
 
-func TestGetDistroIds(t *testing.T) {
-	assert := assert.New(t)
-	distros := DistroGroup{
-		Distro{
-			Id: "d1",
-		},
-		Distro{
-			Id: "d2",
-		},
-		Distro{
-			Id: "d3",
-		},
-	}
-	ids := distros.GetDistroIds()
-	assert.Equal([]string{"d1", "d2", "d3"}, ids)
-}
-
 func TestGetImageID(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -219,8 +226,8 @@ func TestGetImageID(t *testing.T) {
 		legacyOnly     bool
 	}{
 		{
-			name:           "Ec2OnDemand",
-			provider:       evergreen.ProviderNameEc2OnDemand,
+			name:           "Ec2Fleet",
+			provider:       evergreen.ProviderNameEc2Fleet,
 			key:            "ami",
 			value:          "imageID",
 			expectedOutput: "imageID",
@@ -371,12 +378,26 @@ func TestGetResolvedHostAllocatorSettings(t *testing.T) {
 	assert.Equal(t, evergreen.HostsOverallocatedTerminate, resolved0.HostsOverallocatedRule)
 
 	settings1 := &evergreen.Settings{Scheduler: config0, ReleaseMode: releaseModeConfig}
+
+	// Release mode does not apply the max hosts factor when the distro is not using auto-tuning.
 	resolved1, err := d0.GetResolvedHostAllocatorSettings(settings1)
 	assert.NoError(t, err)
-
-	// Factor in release mode when enabled.
-	assert.Equal(t, 20, resolved1.MaximumHosts)
+	assert.Equal(t, 10, resolved1.MaximumHosts)
 	assert.Equal(t, time.Duration(300)*time.Second, resolved1.AcceptableHostIdleTime)
+
+	// Release mode applies the max hosts factor when the distro is using auto-tuning.
+	d0.HostAllocatorSettings.AutoTuneMaximumHosts = true
+	d0.HostAllocatorSettings.MaximumHosts = 10
+	resolved1, err = d0.GetResolvedHostAllocatorSettings(settings1)
+	assert.NoError(t, err)
+	assert.Equal(t, 20, resolved1.MaximumHosts)
+
+	// Release mode does not apply the max hosts factor when the factor is not configured.
+	d0.HostAllocatorSettings.MaximumHosts = 10
+	settingsNoFactor := &evergreen.Settings{Scheduler: config0, ReleaseMode: evergreen.ReleaseModeConfig{IdleTimeSecondsOverride: 300}}
+	resolved1, err = d0.GetResolvedHostAllocatorSettings(settingsNoFactor)
+	assert.NoError(t, err)
+	assert.Equal(t, 10, resolved1.MaximumHosts)
 }
 
 func TestGetResolvedPlannerSettings(t *testing.T) {
@@ -577,7 +598,7 @@ func TestLogDistroModifiedWithDistroData(t *testing.T) {
 
 	oldDistro := Distro{
 		Id:       "rainbow-lollipop",
-		Provider: evergreen.ProviderNameEc2OnDemand,
+		Provider: evergreen.ProviderNameEc2Fleet,
 		ProviderSettingsList: []*birch.Document{
 			birch.NewDocument().Set(birch.EC.String("ami", "ami-0")),
 			birch.NewDocument().Set(birch.EC.SliceString("groups", []string{"group1", "group2"})),
@@ -586,7 +607,7 @@ func TestLogDistroModifiedWithDistroData(t *testing.T) {
 
 	d := Distro{
 		Id:       "rainbow-lollipop",
-		Provider: evergreen.ProviderNameEc2OnDemand,
+		Provider: evergreen.ProviderNameEc2Fleet,
 		ProviderSettingsList: []*birch.Document{
 			birch.NewDocument().Set(birch.EC.String("ami", "ami-123456")),
 			birch.NewDocument().Set(birch.EC.SliceString("groups", []string{"group1", "group2"})),

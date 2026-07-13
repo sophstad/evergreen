@@ -13,6 +13,7 @@ query Other {
     singleTaskDistro {
       projectTasksPairs {
         projectId
+        displayName
         allowedTasks
         allowedBVs
       }
@@ -73,11 +74,11 @@ query Other {
       collectorEndpoint
       collectorInternalEndpoint
       collectorAPIKey
+      traceUrlTemplate
     }
     projectCreation {
       totalProjectLimit
       repoProjectLimit
-      jiraProject
       repoExceptions {
         owner
         repo

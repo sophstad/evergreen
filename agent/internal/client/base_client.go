@@ -16,6 +16,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model/artifact"
 	"github.com/evergreen-ci/evergreen/model/manifest"
 	patchmodel "github.com/evergreen-ci/evergreen/model/patch"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/testlog"
 	"github.com/evergreen-ci/evergreen/model/testresult"
@@ -364,8 +365,9 @@ func (c *baseCommunicator) makeSender(ctx context.Context, tsk *task.Task, confi
 	senderOpts := task.EvergreenSenderOptions{
 		LevelInfo:     levelInfo,
 		FlushInterval: time.Minute,
+		S3Usage:       config.S3Usage,
 	}
-	sender, err = task.NewTaskLogSender(ctx, *tsk, senderOpts, logType)
+	sender, err = task.NewTaskLogSender(ctx, tsk, senderOpts, logType)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating Evergreen task log sender")
 	}
@@ -603,6 +605,43 @@ func (c *baseCommunicator) AttachFiles(ctx context.Context, taskData TaskData, t
 	}
 	defer resp.Body.Close()
 
+	return nil
+}
+
+func (c *baseCommunicator) ReportS3Usage(ctx context.Context, taskData TaskData, usage s3usage.S3Usage, final bool) error {
+	if usage.IsZero() {
+		return nil
+	}
+
+	info := requestInfo{
+		method:   http.MethodPost,
+		taskData: &taskData,
+	}
+	info.setTaskPathSuffix("s3_usage")
+	if final {
+		info.path += "?final=true"
+	}
+	resp, err := c.retryRequest(ctx, info, usage)
+	if err != nil {
+		return util.RespError(resp, errors.Wrap(err, "reporting S3 usage").Error())
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+func (c *baseCommunicator) ReportHighExecTimeout(ctx context.Context, taskData TaskData, execTimeoutSecs int) error {
+	info := requestInfo{
+		method:   http.MethodPost,
+		taskData: &taskData,
+	}
+	info.setTaskPathSuffix("high_exec_timeout")
+	body := apimodels.HighExecTimeoutReport{ExecTimeoutSecs: execTimeoutSecs}
+	resp, err := c.retryRequest(ctx, info, body)
+	if err != nil {
+		return util.RespError(resp, errors.Wrap(err, "reporting high exec timeout").Error())
+	}
+	defer resp.Body.Close()
 	return nil
 }
 
@@ -934,6 +973,21 @@ func (c *baseCommunicator) UpsertCheckRun(ctx context.Context, td TaskData, chec
 		return util.RespError(resp, errors.Wrap(err, "upserting checkRun").Error())
 	}
 
+	defer resp.Body.Close()
+	return nil
+}
+
+// MarkMergeQueueGitRefNotFound marks a merge queue patch's GitRefNotFound field.
+func (c *baseCommunicator) MarkMergeQueueGitRefNotFound(ctx context.Context, td TaskData) error {
+	info := requestInfo{
+		method:   http.MethodPatch,
+		taskData: &td,
+	}
+	info.setTaskPathSuffix("mark_git_ref_not_found")
+	resp, err := c.retryRequest(ctx, info, nil)
+	if err != nil {
+		return util.RespError(resp, errors.Wrap(err, "marking git ref not found").Error())
+	}
 	defer resp.Body.Close()
 	return nil
 }

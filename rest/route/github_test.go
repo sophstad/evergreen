@@ -82,7 +82,7 @@ func (s *GithubWebhookRouteSuite) SetupTest() {
 	var err error
 	s.prBody, err = os.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "pull_request.json"))
 	s.NoError(err)
-	s.Len(s.prBody, 24073)
+	s.Len(s.prBody, 32977)
 	s.pushBody, err = os.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "push_event.json"))
 	s.NoError(err)
 	s.Len(s.pushBody, 7378)
@@ -115,7 +115,7 @@ func (s *GithubWebhookRouteSuite) TestAddIntentAndFailsWithDuplicate() {
 	doc := &model.ProjectRef{
 		Owner:            "evergreen-ci",
 		Repo:             "evergreen",
-		Branch:           "105bbb4b34e7da59c42cb93d92954710b1f101ee",
+		Branch:           "main",
 		Enabled:          true,
 		BatchTime:        10,
 		Id:               "ident0",
@@ -129,14 +129,13 @@ func (s *GithubWebhookRouteSuite) TestAddIntentAndFailsWithDuplicate() {
 	s.h.event = event
 	s.h.msgID = "1"
 
-	ctx := context.Background()
-	resp := s.h.Run(ctx)
+	resp := s.h.Run(s.T().Context())
 	s.Equal(http.StatusOK, resp.Status())
 	count, err := db.CountQ(s.T().Context(), patch.IntentCollection, db.Query(bson.M{}))
 	s.NoError(err)
 	s.Equal(1, count)
 
-	resp = s.h.Run(ctx)
+	resp = s.h.Run(s.T().Context())
 	s.NotEqual(http.StatusOK, resp.Status())
 	count, err = db.CountQ(s.T().Context(), patch.IntentCollection, db.Query(bson.M{}))
 	s.NoError(err)
@@ -477,6 +476,7 @@ func TestHandleGitHubMergeGroup(t *testing.T) {
 	}
 	for testCase, test := range map[string]func(*testing.T){
 		"githubMergeQueueSelected": func(t *testing.T) {
+			p.CommitQueue.Enabled = utility.TruePtr()
 			require.NoError(t, p.Insert(t.Context()))
 			response := gh.handleMergeGroupChecksRequested(t.Context(), event)
 			// check for error returned by GitHub merge queue handler
@@ -484,15 +484,112 @@ func TestHandleGitHubMergeGroup(t *testing.T) {
 			assert.Contains(t, str, "message ID cannot be empty")
 			assert.NotContains(t, str, "200")
 		},
+		"githubMergeQueueDisabled": func(t *testing.T) {
+			p.CommitQueue.Enabled = utility.FalsePtr()
+			require.NoError(t, p.Insert(t.Context()))
+			response := gh.handleMergeGroupChecksRequested(t.Context(), event)
+			assert.Nil(t, response)
+		},
 		"nonexistentProject": func(t *testing.T) {
 			response := gh.handleMergeGroupChecksRequested(t.Context(), event)
-			// check for error returned by GitHub merge queue handler
-			str := fmt.Sprintf("%#v", response)
-			assert.Contains(t, str, "no matching project ref")
-			assert.NotContains(t, str, "200")
+			assert.Nil(t, response)
 		},
 	} {
 		require.NoError(t, db.ClearCollections(model.ProjectRefCollection))
 		t.Run(testCase, test)
+	}
+}
+
+func TestHandleMergeGroupDestroyedCancelsPatches(t *testing.T) {
+	ctx := t.Context()
+	assert.NoError(t, db.ClearCollections(patch.Collection, model.VersionCollection, model.ProjectRefCollection))
+
+	org := "mongodb"
+	repo := "mongo"
+	headSHA := "abc123"
+	headRef := "refs/heads/gh-readonly-queue/main/pr-515-9cd8a2532bcddf58369aa82eb66ba88e2323c056"
+	versionID := "version1"
+	projectID := "my-project"
+	reason := "dequeued"
+
+	projectRef := &model.ProjectRef{
+		Id:      projectID,
+		Owner:   org,
+		Repo:    repo,
+		Enabled: true,
+	}
+	assert.NoError(t, projectRef.Insert(ctx))
+
+	assert.NoError(t, db.Insert(ctx, model.VersionCollection, bson.M{
+		"_id":    versionID,
+		"status": evergreen.VersionStarted,
+	}))
+
+	patchDoc := patch.Patch{
+		Id:      mgobson.NewObjectId(),
+		Project: projectID,
+		GithubMergeData: thirdparty.GithubMergeGroup{
+			Org:     org,
+			Repo:    repo,
+			HeadSHA: headSHA,
+		},
+		Version: versionID,
+		Status:  evergreen.VersionStarted,
+	}
+	assert.NoError(t, db.Insert(ctx, patch.Collection, patchDoc))
+
+	gh := &githubHookApi{
+		msgID:     "test-msg-id",
+		eventType: "merge_group",
+	}
+
+	event := &github.MergeGroupEvent{
+		Org:  &github.Organization{Login: &org},
+		Repo: &github.Repository{Name: &repo},
+		MergeGroup: &github.MergeGroup{
+			HeadSHA: &headSHA,
+			HeadRef: &headRef,
+		},
+		Reason: &reason,
+	}
+
+	resp := gh.handleMergeGroupDestroyed(ctx, event)
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.Status())
+
+	v, err := model.VersionFindOneId(ctx, versionID)
+	assert.NoError(t, err)
+	require.NotNil(t, v)
+	assert.False(t, utility.FromBoolPtr(v.Activated))
+}
+
+func TestShouldSkipWebhookPersonalStaging(t *testing.T) {
+	ctx := t.Context()
+
+	for testCase, tc := range map[string]struct {
+		stagingEnvironment string
+		fromApp            bool
+		expectSkip         bool
+	}{
+		"PersonalStagingSkipsAppWebhook": {
+			stagingEnvironment: "mine",
+			fromApp:            true,
+			expectSkip:         true,
+		},
+		"PersonalStagingAcceptsRepoWebhook": {
+			stagingEnvironment: "mine",
+			fromApp:            false,
+			expectSkip:         false,
+		},
+	} {
+		t.Run(testCase, func(t *testing.T) {
+			handler := &githubHookApi{
+				settings: &evergreen.Settings{
+					Ui: evergreen.UIConfig{StagingEnvironment: tc.stagingEnvironment},
+				},
+			}
+			result := handler.shouldSkipWebhook(ctx, "owner", "repo", tc.fromApp)
+			assert.Equal(t, tc.expectSkip, result)
+		})
 	}
 }

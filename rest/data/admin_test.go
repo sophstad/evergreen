@@ -130,17 +130,23 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.Equal(len(testSettings.AuthConfig.Github.Users), len(settingsFromConnector.AuthConfig.Github.Users))
 	s.Equal(testSettings.AuthConfig.Multi.ReadWrite[0], settingsFromConnector.AuthConfig.Multi.ReadWrite[0])
 	s.EqualValues(testSettings.AuthConfig.Kanopy.Issuer, settingsFromConnector.AuthConfig.Kanopy.Issuer)
+	s.Equal(testSettings.OktaServiceConfig.ClientID, settingsFromConnector.OktaServiceConfig.ClientID)
+	s.Equal(testSettings.OktaServiceConfig.ClientSecret, settingsFromConnector.OktaServiceConfig.ClientSecret)
+	s.Equal(testSettings.OktaServiceConfig.Scopes, settingsFromConnector.OktaServiceConfig.Scopes)
+	s.Equal(testSettings.OktaServiceConfig.Audience, settingsFromConnector.OktaServiceConfig.Audience)
+	s.Equal(testSettings.OktaServiceConfig.Issuer, settingsFromConnector.OktaServiceConfig.Issuer)
+	s.EqualValues(testSettings.Buckets.RetryFailedLogMoveLookbackDays, settingsFromConnector.Buckets.RetryFailedLogMoveLookbackDays)
+	s.EqualValues(testSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun, settingsFromConnector.Buckets.RetryFailedLogMoveMaxJobsPerRun)
+	s.EqualValues(testSettings.Buckets.TestResultsBucket, settingsFromConnector.Buckets.TestResultsBucket)
 	s.Equal(testSettings.Buckets.Credentials.Key, settingsFromConnector.Buckets.Credentials.Key)
 	s.Equal(testSettings.Buckets.Credentials.Secret, settingsFromConnector.Buckets.Credentials.Secret)
+	s.Equal(testSettings.Buckets.Credentials.Bucket, settingsFromConnector.Buckets.Credentials.Bucket)
 	s.Equal(testSettings.FWS.URL, settingsFromConnector.FWS.URL)
 	s.EqualValues(testSettings.HostJasper.URL, settingsFromConnector.HostJasper.URL)
 	s.EqualValues(testSettings.HostInit.HostThrottle, settingsFromConnector.HostInit.HostThrottle)
 	s.EqualValues(testSettings.HostInit.ProvisioningThrottle, settingsFromConnector.HostInit.ProvisioningThrottle)
 	s.EqualValues(testSettings.HostInit.CloudStatusBatchSize, settingsFromConnector.HostInit.CloudStatusBatchSize)
 	s.EqualValues(testSettings.HostInit.MaxTotalDynamicHosts, settingsFromConnector.HostInit.MaxTotalDynamicHosts)
-	s.EqualValues(testSettings.PodLifecycle.MaxParallelPodRequests, settingsFromConnector.PodLifecycle.MaxParallelPodRequests)
-	s.EqualValues(testSettings.PodLifecycle.MaxPodDefinitionCleanupRate, settingsFromConnector.PodLifecycle.MaxPodDefinitionCleanupRate)
-	s.EqualValues(testSettings.PodLifecycle.MaxSecretCleanupRate, settingsFromConnector.PodLifecycle.MaxSecretCleanupRate)
 	s.EqualValues(testSettings.Jira.PersonalAccessToken, settingsFromConnector.Jira.PersonalAccessToken)
 
 	s.Equal(level.Info.String(), settingsFromConnector.LoggerConfig.DefaultLevel)
@@ -173,18 +179,12 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.EqualValues(testSettings.ReleaseMode.TargetTimeSecondsOverride, settingsFromConnector.ReleaseMode.TargetTimeSecondsOverride)
 	s.EqualValues(testSettings.Scheduler.TaskFinder, settingsFromConnector.Scheduler.TaskFinder)
 	s.EqualValues(testSettings.ServiceFlags.HostInitDisabled, settingsFromConnector.ServiceFlags.HostInitDisabled)
-	s.EqualValues(testSettings.ServiceFlags.PodInitDisabled, settingsFromConnector.ServiceFlags.PodInitDisabled)
-	s.EqualValues(testSettings.ServiceFlags.PodAllocatorDisabled, settingsFromConnector.ServiceFlags.PodAllocatorDisabled)
-	s.EqualValues(testSettings.ServiceFlags.UnrecognizedPodCleanupDisabled, settingsFromConnector.ServiceFlags.UnrecognizedPodCleanupDisabled)
 	s.EqualValues(testSettings.ServiceFlags.LargeParserProjectsDisabled, settingsFromConnector.ServiceFlags.LargeParserProjectsDisabled)
 	s.EqualValues(testSettings.ServiceFlags.CloudCleanupDisabled, settingsFromConnector.ServiceFlags.CloudCleanupDisabled)
 	s.EqualValues(testSettings.ServiceFlags.SleepScheduleDisabled, settingsFromConnector.ServiceFlags.SleepScheduleDisabled)
-	s.EqualValues(testSettings.ServiceFlags.StaticAPIKeysDisabled, settingsFromConnector.ServiceFlags.StaticAPIKeysDisabled)
-	s.EqualValues(testSettings.ServiceFlags.JWTTokenForCLIDisabled, settingsFromConnector.ServiceFlags.JWTTokenForCLIDisabled)
 	s.EqualValues(testSettings.ServiceFlags.SystemFailedTaskRestartDisabled, settingsFromConnector.ServiceFlags.SystemFailedTaskRestartDisabled)
 	s.EqualValues(testSettings.ServiceFlags.CPUDegradedModeDisabled, settingsFromConnector.ServiceFlags.CPUDegradedModeDisabled)
 	s.EqualValues(testSettings.ServiceFlags.ElasticIPsDisabled, settingsFromConnector.ServiceFlags.ElasticIPsDisabled)
-	s.EqualValues(testSettings.ServiceFlags.UseGitForGitHubFilesDisabled, settingsFromConnector.ServiceFlags.UseGitForGitHubFilesDisabled)
 	s.EqualValues(testSettings.Slack.Level, settingsFromConnector.Slack.Level)
 	s.EqualValues(testSettings.Slack.Options.Channel, settingsFromConnector.Slack.Options.Channel)
 	s.ElementsMatch(testSettings.SleepSchedule.PermanentlyExemptHosts, settingsFromConnector.SleepSchedule.PermanentlyExemptHosts)
@@ -199,6 +199,7 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.EqualValues(testSettings.Tracer.Enabled, settingsFromConnector.Tracer.Enabled)
 	s.EqualValues(testSettings.Tracer.CollectorEndpoint, settingsFromConnector.Tracer.CollectorEndpoint)
 	s.EqualValues(testSettings.Tracer.CollectorInternalEndpoint, settingsFromConnector.Tracer.CollectorInternalEndpoint)
+	s.EqualValues(testSettings.Tracer.TraceURLTemplate, settingsFromConnector.Tracer.TraceURLTemplate)
 
 	// Check that secrets are stored in the parameter manager.
 	paramMgr := evergreen.GetEnvironment().ParameterManager()
@@ -232,8 +233,10 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	paramSettings, err := evergreen.GetConfig(ctx)
 	s.Require().NoError(err)
 	s.Equal(testSettings.AuthConfig.Okta.ClientID, paramSettings.AuthConfig.Okta.ClientID)
+	s.EqualValues(testSettings.Buckets.TestResultsBucket, paramSettings.Buckets.TestResultsBucket)
 	s.Equal(testSettings.Buckets.Credentials.Key, paramSettings.Buckets.Credentials.Key)
 	s.Equal(testSettings.Buckets.Credentials.Secret, paramSettings.Buckets.Credentials.Secret)
+	s.Equal(testSettings.Buckets.Credentials.Bucket, paramSettings.Buckets.Credentials.Bucket)
 	s.Equal(testSettings.Jira.PersonalAccessToken, paramSettings.Jira.PersonalAccessToken)
 	s.Equal(testSettings.Providers.AWS.EC2Keys[0].Key, paramSettings.Providers.AWS.EC2Keys[0].Key)
 	s.Equal(testSettings.Providers.AWS.EC2Keys[0].Secret, paramSettings.Providers.AWS.EC2Keys[0].Secret)
@@ -333,8 +336,12 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.EqualValues(testSettings.AuthConfig.Kanopy.Issuer, settingsFromConnector.AuthConfig.Kanopy.Issuer)
 	s.Equal(testSettings.FWS.URL, settingsFromConnector.FWS.URL)
 	s.EqualValues(testSettings.Jira.PersonalAccessToken, settingsFromConnector.Jira.PersonalAccessToken)
+	s.EqualValues(testSettings.Buckets.RetryFailedLogMoveLookbackDays, settingsFromConnector.Buckets.RetryFailedLogMoveLookbackDays)
+	s.EqualValues(testSettings.Buckets.RetryFailedLogMoveMaxJobsPerRun, settingsFromConnector.Buckets.RetryFailedLogMoveMaxJobsPerRun)
+	s.EqualValues(testSettings.Buckets.TestResultsBucket, settingsFromConnector.Buckets.TestResultsBucket)
 	s.Equal(testSettings.Buckets.Credentials.Key, settingsFromConnector.Buckets.Credentials.Key)
 	s.Equal(testSettings.Buckets.Credentials.Secret, settingsFromConnector.Buckets.Credentials.Secret)
+	s.Equal(testSettings.Buckets.Credentials.Bucket, settingsFromConnector.Buckets.Credentials.Bucket)
 
 	s.Equal(level.Info.String(), settingsFromConnector.LoggerConfig.DefaultLevel)
 
@@ -357,18 +364,12 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.EqualValues(testSettings.RepoTracker.MaxConcurrentRequests, settingsFromConnector.RepoTracker.MaxConcurrentRequests)
 	s.EqualValues(testSettings.Scheduler.TaskFinder, settingsFromConnector.Scheduler.TaskFinder)
 	s.EqualValues(testSettings.ServiceFlags.HostInitDisabled, settingsFromConnector.ServiceFlags.HostInitDisabled)
-	s.EqualValues(testSettings.ServiceFlags.PodInitDisabled, settingsFromConnector.ServiceFlags.PodInitDisabled)
-	s.EqualValues(testSettings.ServiceFlags.PodAllocatorDisabled, settingsFromConnector.ServiceFlags.PodAllocatorDisabled)
-	s.EqualValues(testSettings.ServiceFlags.UnrecognizedPodCleanupDisabled, settingsFromConnector.ServiceFlags.UnrecognizedPodCleanupDisabled)
 	s.EqualValues(testSettings.ServiceFlags.LargeParserProjectsDisabled, settingsFromConnector.ServiceFlags.LargeParserProjectsDisabled)
 	s.EqualValues(testSettings.ServiceFlags.CloudCleanupDisabled, settingsFromConnector.ServiceFlags.CloudCleanupDisabled)
 	s.EqualValues(testSettings.ServiceFlags.SleepScheduleDisabled, settingsFromConnector.ServiceFlags.SleepScheduleDisabled)
-	s.EqualValues(testSettings.ServiceFlags.StaticAPIKeysDisabled, settingsFromConnector.ServiceFlags.StaticAPIKeysDisabled)
-	s.EqualValues(testSettings.ServiceFlags.JWTTokenForCLIDisabled, settingsFromConnector.ServiceFlags.JWTTokenForCLIDisabled)
 	s.EqualValues(testSettings.ServiceFlags.SystemFailedTaskRestartDisabled, settingsFromConnector.ServiceFlags.SystemFailedTaskRestartDisabled)
 	s.EqualValues(testSettings.ServiceFlags.CPUDegradedModeDisabled, settingsFromConnector.ServiceFlags.CPUDegradedModeDisabled)
 	s.EqualValues(testSettings.ServiceFlags.ElasticIPsDisabled, settingsFromConnector.ServiceFlags.ElasticIPsDisabled)
-	s.EqualValues(testSettings.ServiceFlags.UseGitForGitHubFilesDisabled, settingsFromConnector.ServiceFlags.UseGitForGitHubFilesDisabled)
 	s.EqualValues(testSettings.Slack.Level, settingsFromConnector.Slack.Level)
 	s.EqualValues(testSettings.Slack.Options.Channel, settingsFromConnector.Slack.Options.Channel)
 	s.ElementsMatch(testSettings.SleepSchedule.PermanentlyExemptHosts, settingsFromConnector.SleepSchedule.PermanentlyExemptHosts)
@@ -384,6 +385,7 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.EqualValues(testSettings.Tracer.Enabled, settingsFromConnector.Tracer.Enabled)
 	s.EqualValues(testSettings.Tracer.CollectorEndpoint, settingsFromConnector.Tracer.CollectorEndpoint)
 	s.EqualValues(testSettings.Tracer.CollectorInternalEndpoint, settingsFromConnector.Tracer.CollectorInternalEndpoint)
+	s.EqualValues(testSettings.Tracer.TraceURLTemplate, settingsFromConnector.Tracer.TraceURLTemplate)
 }
 
 func (s *AdminDataSuite) TestRestart() {
@@ -422,31 +424,4 @@ func (s *AdminDataSuite) TestGetBanner() {
 	s.NoError(err)
 	s.Equal("banner text", text)
 	s.Equal(string(evergreen.Important), theme)
-}
-
-func (s *AdminDataSuite) TestGetNecessaryServiceFlags() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	settings := &evergreen.Settings{
-		ServiceFlags: evergreen.ServiceFlags{
-			HostInitDisabled:               true,
-			RepotrackerDisabled:            true,
-			TaskDispatchDisabled:           false,
-			PodInitDisabled:                true,
-			CloudCleanupDisabled:           false,
-			StaticAPIKeysDisabled:          true,
-			JWTTokenForCLIDisabled:         false,
-			UnrecognizedPodCleanupDisabled: true,
-		},
-	}
-	s.NoError(evergreen.UpdateConfig(ctx, settings))
-
-	flags, err := GetNecessaryServiceFlags(ctx)
-	s.NoError(err)
-	neccesaryFlags := evergreen.ServiceFlags{
-		StaticAPIKeysDisabled:  true,
-		JWTTokenForCLIDisabled: false,
-	}
-	s.Equal(neccesaryFlags, flags)
 }

@@ -9,7 +9,6 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/agent/internal"
 	"github.com/evergreen-ci/evergreen/agent/internal/client"
-	agentutil "github.com/evergreen-ci/evergreen/agent/util"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
@@ -118,14 +117,14 @@ func (c *shellExec) ParseParams(params map[string]any) error {
 
 // Execute starts the shell with its given parameters.
 func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger client.LoggerProducer, conf *internal.TaskConfig) error {
-	logger.Execution().Debug("Preparing script...")
+	logger.Execution().Debug(ctx, "Preparing script...")
 
 	// We do this before expanding expansions so that expansions are not logged.
 	if c.Silent {
-		logger.Execution().Infof("Executing script with shell '%s' (source hidden)...",
+		logger.Execution().Infof(ctx, "Executing script with shell '%s' (source hidden)...",
 			c.Shell)
 	} else {
-		logger.Execution().Infof("Executing script with shell '%s':\n%s",
+		logger.Execution().Infof(ctx, "Executing script with shell '%s':\n%s",
 			c.Shell, c.Script)
 	}
 
@@ -134,7 +133,7 @@ func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger c
 		return errors.WithStack(err)
 	}
 
-	logger.Execution().WarningWhen(filepath.IsAbs(c.WorkingDir) && !strings.HasPrefix(c.WorkingDir, conf.WorkDir),
+	logger.Execution().WarningWhen(ctx, filepath.IsAbs(c.WorkingDir) && !strings.HasPrefix(c.WorkingDir, conf.WorkDir),
 		fmt.Sprintf("The working directory is an absolute path [%s], which isn't supported except when prefixed by '%s'.",
 			c.WorkingDir, conf.WorkDir))
 
@@ -145,7 +144,7 @@ func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger c
 
 	taskTmpDir, err := getWorkingDirectoryLegacy(conf, "tmp")
 	if err != nil {
-		logger.Execution().Notice(errors.Wrap(err, "getting task temporary directory"))
+		logger.Execution().Notice(ctx, errors.Wrap(err, "getting task temporary directory"))
 	}
 
 	c.Env = defaultAndApplyExpansionsToEnv(c.Env, modifyEnvOptions{
@@ -158,13 +157,14 @@ func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger c
 		addToPath:              c.AddToPath,
 	})
 
-	logger.Execution().Debug(message.Fields{
+	logger.Execution().Debug(ctx, message.Fields{
 		"working_directory": c.WorkingDir,
 		"shell":             c.Shell,
 	})
 
 	cmd := c.JasperManager().CreateCommand(ctx).
 		Background(c.Background).Directory(c.WorkingDir).Environment(c.Env).Append(c.Shell).
+		AppendTags(c.FullDisplayName()).
 		SuppressStandardError(c.IgnoreStandardError).SuppressStandardOutput(c.IgnoreStandardOutput).RedirectErrorToOutput(c.RedirectStandardErrorToOutput).
 		ProcConstructor(func(lctx context.Context, opts *options.Create) (jasper.Process, error) {
 			if c.ExecuteAsString {
@@ -173,41 +173,7 @@ func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger c
 				opts.StandardInput = strings.NewReader(c.Script)
 			}
 
-			var cancel context.CancelFunc
-			var ictx context.Context
-			if c.Background {
-				ictx, cancel = context.WithCancel(context.Background())
-			} else {
-				ictx = lctx
-			}
-
-			var proc jasper.Process
-			proc, err = c.JasperManager().CreateProcess(ictx, opts)
-			if err != nil {
-				if cancel != nil {
-					cancel()
-				}
-
-				return proc, errors.WithStack(err)
-			}
-
-			if cancel != nil {
-				grip.Warning(message.WrapError(proc.RegisterTrigger(lctx, func(info jasper.ProcessInfo) {
-					cancel()
-				}), "registering cancellation for process"))
-			}
-
-			pid := proc.Info(ctx).PID
-
-			agentutil.TrackProcess(conf.Task.Id, pid, logger.System())
-
-			if c.Background {
-				logger.Execution().Debugf("Running process with PID %d in the background.", pid)
-			} else {
-				logger.Execution().Infof("Running process with PID %d.", pid)
-			}
-
-			return proc, nil
+			return runJasperProcess(lctx, c.JasperManager(), c.Background, opts, conf.Task.Id, logger, conf.BackgroundFailures, c.ContinueOnError, conf.BackgroundCommandFailureEnabled)
 		})
 
 	if !c.IgnoreStandardOutput {
@@ -240,14 +206,14 @@ func (c *shellExec) Execute(ctx context.Context, _ client.Communicator, logger c
 	}
 	err = errors.Wrapf(err, "shell script encountered problem")
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		logger.System().Debugf("Canceled command '%s', dumping running processes.", c.Name())
-		logger.System().Debug(message.CollectAllProcesses())
-		logger.Execution().Notice(err)
+		logger.System().Debugf(ctx, "Canceled command '%s', dumping running processes.", c.Name())
+		logger.System().Debug(ctx, message.CollectAllProcesses())
+		logger.Execution().Notice(ctx, err)
 		return errors.Wrapf(ctxErr, "canceled while running command '%s'", c.Name())
 	}
 
 	if c.ContinueOnError && err != nil {
-		logger.Execution().Noticef("Script errored, but continue on error is set - continuing task execution. Error: %s.", err)
+		logger.Execution().Noticef(ctx, "Script errored, but continue on error is set - continuing task execution. Error: %s.", err)
 		return nil
 	}
 

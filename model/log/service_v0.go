@@ -65,9 +65,9 @@ func (s *logServiceV0) Get(ctx context.Context, getOpts GetOptions) (LogIterator
 	return it, nil
 }
 
-func (s *logServiceV0) Append(ctx context.Context, logName string, sequence int, lines []LogLine) error {
+func (s *logServiceV0) Append(ctx context.Context, logName string, sequence int, lines []LogLine) (int64, int, error) {
 	if len(lines) == 0 {
-		return nil
+		return 0, 0, nil
 	}
 
 	var rawLines []byte
@@ -76,7 +76,20 @@ func (s *logServiceV0) Append(ctx context.Context, logName string, sequence int,
 	}
 
 	key := fmt.Sprintf("%s/%s", logName, s.createChunkKey(sequence, lines[0].Timestamp, lines[len(lines)-1].Timestamp, len(lines)))
-	return errors.Wrap(s.bucket.Put(ctx, key, bytes.NewReader(rawLines)), "writing log chunk to bucket")
+	// S3 buckets report post-compression bytes; non-S3 fall through to plain Put and incur no S3 cost.
+	var puts int
+	var uploadedBytes int64
+	var err error
+	if pc, ok := s.bucket.(pail.StreamPutCounterWithBytes); ok {
+		puts, uploadedBytes, err = pc.PutWithCountAndBytes(ctx, key, bytes.NewReader(rawLines))
+	} else {
+		err = s.bucket.Put(ctx, key, bytes.NewReader(rawLines))
+	}
+	if err != nil {
+		return 0, puts, errors.Wrap(err, "writing log chunk to bucket")
+	}
+
+	return uploadedBytes, puts, nil
 }
 
 // getLogChunks maps each logical log to its chunk files stored in pail-backed

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,11 +12,17 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	s3svc "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/evergreen-ci/evergreen/agent/internal"
 	"github.com/evergreen-ci/evergreen/agent/internal/client"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/evergreen-ci/pail"
 	"github.com/evergreen-ci/utility"
 	"github.com/mongodb/grip/send"
 	"github.com/pkg/errors"
@@ -130,6 +137,22 @@ func TestS3GetValidateParams(t *testing.T) {
 
 			})
 
+			Convey("version_id should be parsed correctly", func() {
+
+				params := map[string]any{
+					"aws_key":     "key",
+					"aws_secret":  "secret",
+					"remote_file": "remote",
+					"bucket":      "bck",
+					"local_file":  "local",
+					"version_id":  "abc123",
+				}
+				So(cmd.ParseParams(params), ShouldBeNil)
+				So(cmd.validate(), ShouldBeNil)
+				So(cmd.VersionID, ShouldEqual, "abc123")
+
+			})
+
 		})
 
 	})
@@ -232,6 +255,7 @@ func TestS3GetFetchesFiles(t *testing.T) {
 	tconf := &internal.TaskConfig{
 		Task:    task.Task{},
 		WorkDir: temproot,
+		S3Usage: &s3usage.S3Usage{},
 	}
 
 	t.Run("GetOptionalDoesNotError", func(t *testing.T) {
@@ -295,6 +319,82 @@ func TestS3GetFetchesFiles(t *testing.T) {
 		assert.Equal(t, b, payload)
 	})
 
+	t.Run("GetPlainFileWithVersionID", func(t *testing.T) {
+		remoteFile := fmt.Sprintf("tests/%s/%s", t.Name(), id)
+		putFilePath := filepath.Join(temproot, "upload-version-file.txt")
+		getFilePath := filepath.Join(temproot, "download-version-file.txt")
+
+		originalPayload := []byte("original content")
+		updatedPayload := []byte("updated content")
+
+		// Upload the first version of the file.
+		require.NoError(t, os.WriteFile(putFilePath, originalPayload, 0755))
+
+		putCommand := s3PutFactory()
+		putParams := map[string]any{
+			"aws_key":           accessKeyID,
+			"aws_secret":        secretAccessKey,
+			"aws_session_token": token,
+			"local_file":        putFilePath,
+			"remote_file":       remoteFile,
+			"bucket":            bucketName,
+			"region":            region,
+			"content_type":      "text/plain",
+			"permissions":       "private",
+		}
+
+		require.NoError(t, putCommand.ParseParams(putParams))
+		require.NoError(t, putCommand.Execute(ctx, comm, logger, tconf))
+
+		// Use the AWS SDK to retrieve the version ID of the first upload.
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(region),
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, token)),
+		)
+		require.NoError(t, err)
+
+		s3Client := s3svc.NewFromConfig(awsCfg)
+		versions, err := s3Client.ListObjectVersions(ctx, &s3svc.ListObjectVersionsInput{
+			Bucket: aws.String(bucketName),
+			Prefix: aws.String(remoteFile),
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, versions.Versions)
+
+		firstVersionID := aws.ToString(versions.Versions[0].VersionId)
+		if firstVersionID == "" || firstVersionID == "null" {
+			t.Skip("bucket does not have versioning enabled, skipping version ID test")
+		}
+
+		// Overwrite the same key with different content.
+		require.NoError(t, os.WriteFile(putFilePath, updatedPayload, 0755))
+
+		putCommand2 := s3PutFactory()
+		require.NoError(t, putCommand2.ParseParams(putParams))
+		require.NoError(t, putCommand2.Execute(ctx, comm, logger, tconf))
+
+		// Fetch by the first version ID and verify we get the original
+		// content, not the latest.
+		getCommand := s3GetFactory()
+		getParams := map[string]any{
+			"aws_key":           accessKeyID,
+			"aws_secret":        secretAccessKey,
+			"aws_session_token": token,
+			"local_file":        getFilePath,
+			"remote_file":       remoteFile,
+			"bucket":            bucketName,
+			"region":            region,
+			"version_id":        firstVersionID,
+		}
+
+		require.NoError(t, getCommand.ParseParams(getParams))
+		require.NoError(t, getCommand.Execute(ctx, comm, logger, tconf))
+
+		b, err := os.ReadFile(getFilePath)
+		require.NoError(t, err)
+		assert.Equal(t, originalPayload, b)
+	})
+
 	t.Run("GetTarFile", func(t *testing.T) {
 		remoteTarFile := fmt.Sprintf("tests/%s/%s.tgz", t.Name(), id)
 		putTarFilePath := filepath.Join(temproot, "upload-file.tgz")
@@ -338,4 +438,42 @@ func TestS3GetFetchesFiles(t *testing.T) {
 
 		assert.Equal(t, tarb, payload)
 	})
+}
+
+// mockGetToWriterBucket is a minimal mock that implements pail.FastGetS3Bucket
+// so tests can control what GetToWriter returns without hitting real S3.
+type mockGetToWriterBucket struct {
+	pail.FastGetS3Bucket
+	fn    func() error
+	calls int
+}
+
+func (m *mockGetToWriterBucket) GetToWriter(_ context.Context, _ string, _ io.WriterAt) error {
+	m.calls++
+	return m.fn()
+}
+
+func TestGetWithRetryDoesNotRetryOnKeyNotFound(t *testing.T) {
+	ctx := t.Context()
+
+	mock := &mockGetToWriterBucket{
+		fn: func() error { return pail.NewKeyNotFoundError("key does not exist") },
+	}
+
+	comm := client.NewMock("http://localhost.com")
+	tsk := task.Task{Id: "mock_id", Secret: "mock_secret"}
+	logger, err := comm.GetLoggerProducer(ctx, &tsk, nil)
+	require.NoError(t, err)
+
+	cmd := &s3get{
+		RemoteFile: "nonexistent-key",
+		Bucket:     "test-bucket",
+		LocalFile:  filepath.Join(t.TempDir(), "download.txt"),
+		bucket:     mock,
+	}
+
+	err = cmd.getWithRetry(ctx, logger)
+	require.Error(t, err)
+	assert.True(t, pail.IsKeyNotFoundError(err))
+	assert.Equal(t, 1, mock.calls, "should not retry when key does not exist")
 }

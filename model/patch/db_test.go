@@ -3,6 +3,7 @@ package patch
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/evergreen-ci/utility"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 func TestMostRecentByUserAndProject(t *testing.T) {
@@ -75,81 +77,111 @@ func TestMostRecentByUserAndProject(t *testing.T) {
 	assert.NotNil(t, p)
 	assert.Equal(t, p.Id, previousPatch.Id)
 }
-func TestByPatchNameStatusesMergeQueuePaginatedRequestersOption(t *testing.T) {
+func TestProjectOrUserPatchesRequestersOption(t *testing.T) {
+	assert.NoError(t, db.EnsureIndex(Collection, mongo.IndexModel{Keys: ProjectCreateTimeIndex}))
+
 	for tName, tCase := range map[string]func(ctx context.Context, t *testing.T){
 		"EmptyRequestersList": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
+			opts := ProjectOrUserPatchesOptions{
 				Project:    utility.ToStringPtr("evergreen"),
 				Requesters: []string{},
+				CountLimit: 10000,
 			}
 
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
+			assert.NoError(t, err)
+			require.Len(t, patches, 3)
+
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
 			assert.NoError(t, err)
 			assert.Equal(t, 3, count)
-			require.Len(t, patches, 3)
 		},
 		"GithubPRRequester": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
+			opts := ProjectOrUserPatchesOptions{
 				Project:    utility.ToStringPtr("evergreen"),
 				Requesters: []string{evergreen.GithubPRRequester},
+				CountLimit: 10000,
 			}
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
 			assert.NoError(t, err)
-			assert.Equal(t, 1, count)
 			require.Len(t, patches, 1)
 			assert.Equal(t, "GH PR Patch", patches[0].Description)
+
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
+			assert.NoError(t, err)
+			assert.Equal(t, 1, count)
 		},
 		"GithubMergeRequester": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
+			opts := ProjectOrUserPatchesOptions{
 				Project:    utility.ToStringPtr("evergreen"),
 				Requesters: []string{evergreen.GithubMergeRequester},
+				CountLimit: 10000,
 			}
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
 			assert.NoError(t, err)
-			assert.Equal(t, 1, count)
 			require.Len(t, patches, 1)
 			assert.Equal(t, "GH Merge Patch", patches[0].Description)
-		},
-		"PatchVersionRequester": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
-				Project:    utility.ToStringPtr("evergreen"),
-				Requesters: []string{evergreen.PatchVersionRequester},
-			}
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
 			assert.NoError(t, err)
 			assert.Equal(t, 1, count)
+		},
+		"PatchVersionRequester": func(ctx context.Context, t *testing.T) {
+			opts := ProjectOrUserPatchesOptions{
+				Project:    utility.ToStringPtr("evergreen"),
+				Requesters: []string{evergreen.PatchVersionRequester},
+				CountLimit: 10000,
+			}
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
+			assert.NoError(t, err)
 			require.Len(t, patches, 1)
 			assert.Equal(t, "Patch Request Patch", patches[0].Description)
+
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
+			assert.NoError(t, err)
+			assert.Equal(t, 1, count)
 		},
 		"MultipleRequesters": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
+			opts := ProjectOrUserPatchesOptions{
 				Project:    utility.ToStringPtr("evergreen"),
 				Requesters: []string{evergreen.PatchVersionRequester, evergreen.GithubMergeRequester},
+				CountLimit: 10000,
 			}
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
 			assert.NoError(t, err)
-			assert.Equal(t, 2, count)
 			require.Len(t, patches, 2)
 			assert.Equal(t, "GH Merge Patch", patches[0].Description)
 			assert.Equal(t, "Patch Request Patch", patches[1].Description)
+
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
+			assert.NoError(t, err)
+			assert.Equal(t, 2, count)
 		},
 		"NoRequestersList": func(ctx context.Context, t *testing.T) {
-			opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
-				Project: utility.ToStringPtr("evergreen"),
+			opts := ProjectOrUserPatchesOptions{
+				Project:    utility.ToStringPtr("evergreen"),
+				CountLimit: 10000,
 			}
-			patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			patches, err := ProjectOrUserPatchesPage(ctx, opts)
 			assert.NoError(t, err)
-			assert.Equal(t, 3, count)
 			require.Len(t, patches, 3)
 
-			opts = ByPatchNameStatusesMergeQueuePaginatedOptions{
-				Project:    utility.ToStringPtr("evergreen"),
-				Requesters: []string{},
-			}
-			patches, count, err = ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+			count, err := ProjectOrUserPatchesCount(ctx, opts)
 			assert.NoError(t, err)
 			assert.Equal(t, 3, count)
+
+			opts = ProjectOrUserPatchesOptions{
+				Project:    utility.ToStringPtr("evergreen"),
+				Requesters: []string{},
+				CountLimit: 10000,
+			}
+			patches, err = ProjectOrUserPatchesPage(ctx, opts)
+			assert.NoError(t, err)
 			require.Len(t, patches, 3)
+
+			count, err = ProjectOrUserPatchesCount(ctx, opts)
+			assert.NoError(t, err)
+			assert.Equal(t, 3, count)
 		},
 	} {
 		t.Run(tName, func(t *testing.T) {
@@ -185,8 +217,9 @@ func TestByPatchNameStatusesMergeQueuePaginatedRequestersOption(t *testing.T) {
 		})
 	}
 }
-func TestByPatchNameStatusesMergeQueuePaginated(t *testing.T) {
+func TestProjectOrUserPatchesCombined(t *testing.T) {
 	assert.NoError(t, db.ClearCollections(Collection))
+	assert.NoError(t, db.EnsureIndex(Collection, mongo.IndexModel{Keys: ProjectCreateTimeIndex}))
 
 	now := time.Now()
 	for i := 0; i < 10; i++ {
@@ -205,49 +238,236 @@ func TestByPatchNameStatusesMergeQueuePaginated(t *testing.T) {
 		}
 		assert.NoError(t, patch.Insert(t.Context()))
 	}
-	opts := ByPatchNameStatusesMergeQueuePaginatedOptions{
-		Project: utility.ToStringPtr("evergreen"),
+	opts := ProjectOrUserPatchesOptions{
+		Project:    utility.ToStringPtr("evergreen"),
+		CountLimit: 10000,
 	}
 	ctx := context.TODO()
-	patches, count, err := ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+	patches, err := ProjectOrUserPatchesPage(ctx, opts)
 	assert.NoError(t, err)
-	assert.Equal(t, 10, count)
 	assert.Len(t, patches, 10)
 
-	// Test pagination
-	opts = ByPatchNameStatusesMergeQueuePaginatedOptions{
-		Project: utility.ToStringPtr("evergreen"),
-		Limit:   5,
-		Page:    0,
-	}
-	patches, count, err = ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+	count, err := ProjectOrUserPatchesCount(ctx, opts)
 	assert.NoError(t, err)
 	assert.Equal(t, 10, count)
+
+	// Test pagination
+	opts = ProjectOrUserPatchesOptions{
+		Project:    utility.ToStringPtr("evergreen"),
+		Limit:      5,
+		Page:       0,
+		CountLimit: 10000,
+	}
+	patches, err = ProjectOrUserPatchesPage(ctx, opts)
+	assert.NoError(t, err)
 	assert.Len(t, patches, 5)
 	assert.Equal(t, "patch 0", patches[0].Description)
 
-	opts = ByPatchNameStatusesMergeQueuePaginatedOptions{
-		Project: utility.ToStringPtr("evergreen"),
-		Limit:   5,
-		Page:    1,
-	}
-	patches, count, err = ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+	count, err = ProjectOrUserPatchesCount(ctx, opts)
 	assert.NoError(t, err)
 	assert.Equal(t, 10, count)
+
+	opts = ProjectOrUserPatchesOptions{
+		Project:    utility.ToStringPtr("evergreen"),
+		Limit:      5,
+		Page:       1,
+		CountLimit: 10000,
+	}
+	patches, err = ProjectOrUserPatchesPage(ctx, opts)
+	assert.NoError(t, err)
 	assert.Len(t, patches, 5)
 	assert.Equal(t, "patch 5", patches[0].Description)
 
-	opts = ByPatchNameStatusesMergeQueuePaginatedOptions{
-		Project:        utility.ToStringPtr("evergreen"),
-		OnlyMergeQueue: utility.TruePtr(),
-	}
-	patches, count, err = ByPatchNameStatusesMergeQueuePaginated(ctx, opts)
+	count, err = ProjectOrUserPatchesCount(ctx, opts)
 	assert.NoError(t, err)
-	assert.Equal(t, 5, count)
+	assert.Equal(t, 10, count)
+
+	opts = ProjectOrUserPatchesOptions{
+		Project:    utility.ToStringPtr("evergreen"),
+		Requesters: []string{evergreen.GithubMergeRequester},
+		CountLimit: 10000,
+	}
+	patches, err = ProjectOrUserPatchesPage(ctx, opts)
+	assert.NoError(t, err)
 	assert.Len(t, patches, 5)
 	for _, patch := range patches {
 		assert.True(t, evergreen.IsGithubMergeQueueRequester(patch.GetRequester()))
 	}
+
+	count, err = ProjectOrUserPatchesCount(ctx, opts)
+	assert.NoError(t, err)
+	assert.Equal(t, 5, count)
+}
+
+func TestProjectOrUserPatchesResults(t *testing.T) {
+	assert.NoError(t, db.ClearCollections(Collection))
+	assert.NoError(t, db.EnsureIndex(Collection, mongo.IndexModel{Keys: ProjectCreateTimeIndex}))
+
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		isCommitQueue := i%2 == 0
+		createTime := time.Duration(i) * time.Minute
+
+		patch := Patch{
+			Id:          bson.NewObjectId(),
+			Project:     "evergreen",
+			CreateTime:  now.Add(-createTime),
+			Description: fmt.Sprintf("patch %d", i),
+		}
+		if isCommitQueue {
+			patch.Alias = evergreen.CommitQueueAlias
+			patch.GithubMergeData.HeadSHA = "head_sha_value"
+		}
+		assert.NoError(t, patch.Insert(t.Context()))
+	}
+
+	ctx := context.TODO()
+
+	t.Run("ReturnsAllPatches", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project: utility.ToStringPtr("evergreen"),
+		}
+		patches, err := ProjectOrUserPatchesPage(ctx, opts)
+		assert.NoError(t, err)
+		assert.Len(t, patches, 10)
+	})
+
+	t.Run("Pagination", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project: utility.ToStringPtr("evergreen"),
+			Limit:   5,
+			Page:    0,
+		}
+		patches, err := ProjectOrUserPatchesPage(ctx, opts)
+		assert.NoError(t, err)
+		assert.Len(t, patches, 5)
+		assert.Equal(t, "patch 0", patches[0].Description)
+
+		opts.Page = 1
+		patches, err = ProjectOrUserPatchesPage(ctx, opts)
+		assert.NoError(t, err)
+		assert.Len(t, patches, 5)
+		assert.Equal(t, "patch 5", patches[0].Description)
+	})
+
+	t.Run("FiltersMergeQueuePatches", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("evergreen"),
+			Requesters: []string{evergreen.GithubMergeRequester},
+		}
+		patches, err := ProjectOrUserPatchesPage(ctx, opts)
+		assert.NoError(t, err)
+		assert.Len(t, patches, 5)
+		for _, patch := range patches {
+			assert.True(t, evergreen.IsGithubMergeQueueRequester(patch.GetRequester()))
+		}
+	})
+
+	t.Run("ExcludesPatchDiff", func(t *testing.T) {
+		// Insert a patch with large diff data
+		patchWithDiff := Patch{
+			Id:          bson.NewObjectId(),
+			Project:     "evergreen",
+			CreateTime:  now,
+			Description: "patch with diff",
+			Patches: []ModulePatch{
+				{
+					PatchSet: PatchSet{
+						Patch: "large diff content here",
+					},
+				},
+			},
+		}
+		assert.NoError(t, patchWithDiff.Insert(t.Context()))
+
+		opts := ProjectOrUserPatchesOptions{
+			Project:   utility.ToStringPtr("evergreen"),
+			PatchName: "patch with diff",
+		}
+		patches, err := ProjectOrUserPatchesPage(ctx, opts)
+		assert.NoError(t, err)
+		require.Len(t, patches, 1)
+		// Verify that the diff data was excluded
+		assert.Empty(t, patches[0].Patches[0].PatchSet.Patch)
+	})
+}
+
+func TestProjectOrUserPatchesCount(t *testing.T) {
+	assert.NoError(t, db.ClearCollections(Collection))
+	assert.NoError(t, db.EnsureIndex(Collection, mongo.IndexModel{Keys: ProjectCreateTimeIndex}))
+
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		isCommitQueue := i%2 == 0
+		createTime := time.Duration(i) * time.Minute
+
+		patch := Patch{
+			Id:          bson.NewObjectId(),
+			Project:     "evergreen",
+			CreateTime:  now.Add(-createTime),
+			Description: fmt.Sprintf("patch %d", i),
+		}
+		if isCommitQueue {
+			patch.Alias = evergreen.CommitQueueAlias
+			patch.GithubMergeData.HeadSHA = "head_sha_value"
+		}
+		assert.NoError(t, patch.Insert(t.Context()))
+	}
+
+	ctx := context.TODO()
+
+	t.Run("CountsAllPatches", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("evergreen"),
+			CountLimit: 10000,
+		}
+		count, err := ProjectOrUserPatchesCount(ctx, opts)
+		assert.NoError(t, err)
+		assert.Equal(t, 10, count)
+	})
+
+	t.Run("CountsMergeQueuePatches", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("evergreen"),
+			Requesters: []string{evergreen.GithubMergeRequester},
+			CountLimit: 10000,
+		}
+		count, err := ProjectOrUserPatchesCount(ctx, opts)
+		assert.NoError(t, err)
+		assert.Equal(t, 5, count)
+	})
+
+	t.Run("CountsWithPatchNameFilter", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("evergreen"),
+			PatchName:  "patch 5",
+			CountLimit: 10000,
+		}
+		count, err := ProjectOrUserPatchesCount(ctx, opts)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, count)
+	})
+
+	t.Run("ReturnsZeroForNoMatches", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("nonexistent"),
+			PatchName:  "nonexistent patch",
+			CountLimit: 10000,
+		}
+		count, err := ProjectOrUserPatchesCount(ctx, opts)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, count)
+	})
+
+	t.Run("ReturnsMaxInt32WhenHittingLimit", func(t *testing.T) {
+		opts := ProjectOrUserPatchesOptions{
+			Project:    utility.ToStringPtr("evergreen"),
+			CountLimit: 5, // Set limit lower than actual count
+		}
+		count, err := ProjectOrUserPatchesCount(ctx, opts)
+		assert.NoError(t, err)
+		assert.Equal(t, math.MaxInt32, count)
+	})
 }
 
 func TestGetFinalizedChildPatchIdsForPatch(t *testing.T) {
@@ -379,4 +599,309 @@ func TestConsolidatePatchesForUser(t *testing.T) {
 	assert.NoError(t, err)
 	require.NotNil(t, usr)
 	assert.Equal(t, 9, usr.PatchNumber)
+}
+
+func TestMarkMergeQueuePatchesRemovedFromQueue(t *testing.T) {
+	assert.NoError(t, db.ClearCollections(Collection, "versions"))
+
+	originalTime := time.Now().Add(-time.Hour).UTC().Round(time.Millisecond)
+
+	// Create test versions for version status checks
+	version1 := bson.NewObjectId().Hex() // succeeded version
+	version2 := bson.NewObjectId().Hex() // failed version
+	version3 := bson.NewObjectId().Hex() // running version
+
+	assert.NoError(t, db.Insert(t.Context(), "versions", bson.M{
+		"_id":         version1,
+		"status":      evergreen.VersionSucceeded,
+		"finish_time": time.Now(),
+	}))
+	assert.NoError(t, db.Insert(t.Context(), "versions", bson.M{
+		"_id":         version2,
+		"status":      evergreen.VersionFailed,
+		"finish_time": time.Now(),
+	}))
+	assert.NoError(t, db.Insert(t.Context(), "versions", bson.M{
+		"_id":         version3,
+		"status":      evergreen.VersionStarted,
+		"finish_time": time.Time{},
+	}))
+
+	finishedTime := time.Now()
+
+	patches := []Patch{
+		{
+			//GitRefNotFound + invalidated
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:            "mongodb",
+				Repo:           "mongo",
+				HeadSHA:        "abc123",
+				GitRefNotFound: true,
+			},
+			Version:    version2,
+			Status:     evergreen.VersionFailed,
+			FinishTime: finishedTime,
+		},
+		{
+			// Version succeeded + invalidated
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "mongodb",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+			Version:    version1,
+			Status:     evergreen.VersionSucceeded,
+			FinishTime: finishedTime,
+		},
+		{
+			// Version failed + invalidated (no git error)
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "mongodb",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+			Version:    version2,
+			Status:     evergreen.VersionFailed,
+			FinishTime: finishedTime,
+		},
+		{
+			// Version failed but removed before finish (invalidated while running)
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "mongodb",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+			Version:    version2,
+			Status:     evergreen.VersionFailed,
+			FinishTime: time.Now().Add(time.Hour), // Finish time is in the future relative to removal time
+		},
+		{
+			// No version yet + invalidated
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "mongodb",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+		},
+		{
+			// Running version + invalidated
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "mongodb",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+			Version: version3,
+			Status:  evergreen.VersionStarted,
+		},
+		{
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:                "mongodb",
+				Repo:               "mongo",
+				HeadSHA:            "abc123",
+				RemovedFromQueueAt: originalTime,
+				RemovalReason:      "original reason",
+			},
+		},
+		{
+			Id: bson.NewObjectId(),
+			GithubMergeData: thirdparty.GithubMergeGroup{
+				Org:     "other-org",
+				Repo:    "mongo",
+				HeadSHA: "abc123",
+			},
+		},
+	}
+	for _, p := range patches {
+		assert.NoError(t, db.Insert(t.Context(), Collection, p))
+	}
+
+	updatedPatches, err := MarkMergeQueuePatchesRemovedFromQueue(t.Context(), "mongodb", "mongo", "abc123", thirdparty.MergeQueueReasonInvalidated)
+	assert.NoError(t, err)
+	assert.Len(t, updatedPatches, 6)
+
+	// GitRefNotFound + invalidated
+	p, err := FindOneId(t.Context(), patches[0].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.False(t, p.GithubMergeData.RemovedFromQueueAt.IsZero())
+	assert.Equal(t, thirdparty.MergeQueueReasonInvalidated, p.GithubMergeData.RemovalReason)
+	assert.True(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// Version succeeded + invalidated
+	p, err = FindOneId(t.Context(), patches[1].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// Version failed + invalidated
+	p, err = FindOneId(t.Context(), patches[2].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.False(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// Version failed but removed before finish (invalidated while running)
+	p, err = FindOneId(t.Context(), patches[3].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// No version yet + invalidated
+	p, err = FindOneId(t.Context(), patches[4].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// Running version + invalidated
+	p, err = FindOneId(t.Context(), patches[5].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.GithubMergeData.InvalidatedByUpstream)
+
+	// Already removed patch should not be updated
+	p, err = FindOneId(t.Context(), patches[6].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.Equal(t, originalTime, p.GithubMergeData.RemovedFromQueueAt.UTC())
+	assert.Equal(t, "original reason", p.GithubMergeData.RemovalReason)
+
+	// Different org patch should not be updated
+	p, err = FindOneId(t.Context(), patches[7].Id.Hex())
+	assert.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.GithubMergeData.RemovedFromQueueAt.IsZero())
+
+	updatedPatches, err = MarkMergeQueuePatchesRemovedFromQueue(t.Context(), "mongodb", "mongo", "different-sha", "reason")
+	assert.NoError(t, err)
+	assert.Len(t, updatedPatches, 0)
+
+	_, err = MarkMergeQueuePatchesRemovedFromQueue(t.Context(), "mongodb", "mongo", "", "reason")
+	assert.Error(t, err)
+
+	_, err = MarkMergeQueuePatchesRemovedFromQueue(t.Context(), "mongodb", "mongo", "abc123", "")
+	assert.Error(t, err)
+}
+
+func TestSetMergeQueueMetricsEmitStatusPersistsStatus(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, db.ClearCollections(Collection)) })
+
+	p := Patch{Id: bson.NewObjectId()}
+	require.NoError(t, db.Insert(t.Context(), Collection, p))
+
+	require.NoError(t, SetMergeQueueMetricsEmitStatus(t.Context(), p.Id, MergeQueueMetricsEmitStatusSuccess))
+
+	updated, err := FindOneId(t.Context(), p.Id.Hex())
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, MergeQueueMetricsEmitStatusSuccess, updated.MergeQueueMetricsEmitStatus)
+}
+
+func TestClaimMergeQueueMetricsEmitSucceedsWhenStatusUnset(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, db.ClearCollections(Collection)) })
+
+	p := Patch{Id: bson.NewObjectId()}
+	require.NoError(t, db.Insert(t.Context(), Collection, p))
+
+	claimed, err := ClaimMergeQueueMetricsEmit(t.Context(), p.Id)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+
+	updated, err := FindOneId(t.Context(), p.Id.Hex())
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, MergeQueueMetricsEmitStatusSuccess, updated.MergeQueueMetricsEmitStatus)
+}
+
+func TestClaimMergeQueueMetricsEmitFailsWhenAlreadySuccess(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, db.ClearCollections(Collection)) })
+
+	p := Patch{
+		Id:                          bson.NewObjectId(),
+		MergeQueueMetricsEmitStatus: MergeQueueMetricsEmitStatusSuccess,
+	}
+	require.NoError(t, db.Insert(t.Context(), Collection, p))
+
+	claimed, err := ClaimMergeQueueMetricsEmit(t.Context(), p.Id)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+}
+
+func TestClaimMergeQueueMetricsEmitFailsWhenAlreadyFailed(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, db.ClearCollections(Collection)) })
+
+	p := Patch{
+		Id:                          bson.NewObjectId(),
+		MergeQueueMetricsEmitStatus: MergeQueueMetricsEmitStatusFailed,
+	}
+	require.NoError(t, db.Insert(t.Context(), Collection, p))
+
+	claimed, err := ClaimMergeQueueMetricsEmit(t.Context(), p.Id)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+}
+
+func TestFindFinalizedMergeQueuePatchesMissingCompletionMetricsExcludesNonEligiblePatches(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, db.ClearCollections(Collection)) })
+
+	projectID := "my-project"
+	now := time.Now()
+
+	eligible := Patch{
+		Id:         bson.NewObjectId(),
+		Project:    projectID,
+		Alias:      evergreen.CommitQueueAlias,
+		Status:     evergreen.VersionSucceeded,
+		CreateTime: now,
+		FinishTime: now,
+	}
+	stillRunning := Patch{
+		Id:         bson.NewObjectId(),
+		Project:    projectID,
+		Alias:      evergreen.CommitQueueAlias,
+		Status:     evergreen.VersionStarted,
+		CreateTime: now,
+	}
+	webhookReceived := Patch{
+		Id:         bson.NewObjectId(),
+		Project:    projectID,
+		Alias:      evergreen.CommitQueueAlias,
+		Status:     evergreen.VersionSucceeded,
+		CreateTime: now,
+		FinishTime: now,
+		GithubMergeData: thirdparty.GithubMergeGroup{
+			RemovedFromQueueAt: now.Add(-5 * time.Minute),
+		},
+	}
+	alreadyEmitted := Patch{
+		Id:                          bson.NewObjectId(),
+		Project:                     projectID,
+		Alias:                       evergreen.CommitQueueAlias,
+		Status:                      evergreen.VersionSucceeded,
+		CreateTime:                  now,
+		FinishTime:                  now,
+		MergeQueueMetricsEmitStatus: MergeQueueMetricsEmitStatusSuccess,
+	}
+	failedEmit := Patch{
+		Id:                          bson.NewObjectId(),
+		Project:                     projectID,
+		Alias:                       evergreen.CommitQueueAlias,
+		Status:                      evergreen.VersionSucceeded,
+		CreateTime:                  now,
+		FinishTime:                  now,
+		MergeQueueMetricsEmitStatus: MergeQueueMetricsEmitStatusFailed,
+	}
+	require.NoError(t, db.InsertMany(t.Context(), Collection, eligible, stillRunning, webhookReceived, alreadyEmitted, failedEmit))
+
+	patches, err := FindFinalizedMergeQueuePatchesMissingCompletionMetrics(t.Context(), projectID)
+	require.NoError(t, err)
+	require.Len(t, patches, 2)
+	patchIDs := []bson.ObjectId{patches[0].Id, patches[1].Id}
+	assert.Contains(t, patchIDs, eligible.Id)
+	assert.Contains(t, patchIDs, failedEmit.Id)
 }

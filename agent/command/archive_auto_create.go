@@ -30,6 +30,9 @@ type autoArchiveCreate struct {
 	// directory, e.g. "*.auto", "results.out", "ignore/**"
 	ExcludeFiles []string `mapstructure:"exclude_files" plugin:"expand"`
 
+	// Verbose enables per-file logging during archive creation.
+	Verbose bool `mapstructure:"verbose"`
+
 	base
 }
 
@@ -61,19 +64,29 @@ func (c *autoArchiveCreate) Execute(ctx context.Context,
 	c.Target = GetWorkingDirectory(conf, c.Target)
 
 	var filenames []string
+	var directoryArchive bool
 	if len(c.Include) == 0 && len(c.ExcludeFiles) == 0 {
 		// If using the whole source directory, skip the unnecessary search for
 		// matching files.
 		filenames = []string{c.SourceDir}
+		logger.Task().Infof(ctx, "Archiving entire directory: %s", c.SourceDir)
+		directoryArchive = true
 	} else {
 		files, _, err := findContentsToArchive(ctx, c.SourceDir, c.Include, c.ExcludeFiles)
 		if err != nil {
 			return errors.Wrap(err, "finding files to archive")
 		}
 
+		if len(files) == 0 {
+			logger.Task().Warning(ctx, "No files to archive.")
+		}
+
 		filenames = make([]string, len(files))
 		for idx := range files {
 			filenames[idx] = files[idx].path
+			if c.Verbose {
+				logger.Task().Infof(ctx, "Adding to archive: %s", filenames[idx])
+			}
 		}
 	}
 
@@ -81,11 +94,14 @@ func (c *autoArchiveCreate) Execute(ctx context.Context,
 		return errors.Wrapf(err, "constructing auto archive '%s'", c.Target)
 	}
 
-	logger.Task().Info(message.Fields{
-		"target":    c.Target,
-		"num_files": len(filenames),
-		"message":   "successfully created archive",
-	})
+	fields := message.Fields{
+		"target":  c.Target,
+		"message": "successfully created archive",
+	}
+	if !directoryArchive {
+		fields["num_files"] = len(filenames)
+	}
+	logger.Task().Info(ctx, fields)
 
 	return nil
 }

@@ -34,6 +34,32 @@ func TestFleet(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, "i-12345", h.Id)
 		},
+		"SpawnHostWithOnDemandProvider": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
+			h.Distro.Provider = evergreen.ProviderNameEc2Fleet
+			spawnedHost, err := m.SpawnHost(ctx, h)
+			require.NoError(t, err)
+			require.NotNil(t, spawnedHost)
+			assert.Equal(t, "i-12345", spawnedHost.Id)
+		},
+		"SpawnFleetHostTerminatesPreexistingInstanceBeforeLaunch": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
+			h.Id = "evg-distro-20260518093717-1234567890"
+
+			preexistingID := "i-preexisting-from-prior-attempt"
+			client.DescribeInstancesOutput = &ec2.DescribeInstancesOutput{
+				Reservations: []types.Reservation{{
+					Instances: []types.Instance{{InstanceId: aws.String(preexistingID)}},
+				}},
+			}
+
+			ec2Settings := &EC2ProviderSettings{}
+			require.NoError(t, ec2Settings.FromDistroSettings(h.Distro, ""))
+
+			require.NoError(t, m.spawnFleetHost(ctx, h, ec2Settings))
+
+			require.NotNil(t, client.TerminateInstancesInput)
+			assert.Equal(t, []string{preexistingID}, client.TerminateInstancesInput.InstanceIds, "pre-existing instance should be terminated before new launch")
+			assert.NotEqual(t, preexistingID, h.Id, "spawned host should have a new instance ID")
+		},
 		"GetInstanceStatusesReturnsMultipleHostStatusesAndCachesData": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
 			h1 := h
 			h2 := host.Host{
@@ -240,12 +266,49 @@ func TestFleet(t *testing.T) {
 			assert.Equal(t, StatusNonExistent, info.Status)
 		},
 		"TerminateInstance": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
+			h.Id = "i-12345"
+			require.NoError(t, db.Clear(host.Collection))
+			require.NoError(t, h.Insert(ctx))
+
 			assert.NoError(t, m.TerminateInstance(ctx, h, "evergreen", ""))
 
 			assert.Len(t, client.TerminateInstancesInput.InstanceIds, 1)
-			assert.Equal(t, "h1", client.TerminateInstancesInput.InstanceIds[0])
+			assert.Equal(t, "i-12345", client.TerminateInstancesInput.InstanceIds[0])
 
-			hDb, err := host.FindOneId(ctx, "h1")
+			hDb, err := host.FindOneId(ctx, "i-12345")
+			assert.NoError(t, err)
+			assert.Equal(t, evergreen.HostTerminated, hDb.Status)
+		},
+		"TerminateInstanceWithIntentHostID": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
+			h.Id = "evg-distro-20260518093717-1234567890"
+			require.NoError(t, db.Clear(host.Collection))
+			require.NoError(t, h.Insert(ctx))
+
+			client.Instance = &types.Instance{
+				InstanceId: aws.String("i-real-instance"),
+			}
+
+			assert.NoError(t, m.TerminateInstance(ctx, h, "evergreen", ""))
+
+			assert.Len(t, client.TerminateInstancesInput.InstanceIds, 1)
+			assert.Equal(t, "i-real-instance", client.TerminateInstancesInput.InstanceIds[0])
+
+			hDb, err := host.FindOneId(ctx, h.Id)
+			assert.NoError(t, err)
+			assert.Equal(t, evergreen.HostTerminated, hDb.Status)
+		},
+		"TerminateInstanceWithIntentHostIDNotFoundInCloud": func(ctx context.Context, t *testing.T, m *ec2FleetManager, client *awsClientMock, h *host.Host) {
+			h.Id = "evg-distro-20260518093717-1234567890"
+			require.NoError(t, db.Clear(host.Collection))
+			require.NoError(t, h.Insert(ctx))
+
+			client.RequestGetInstanceInfoError = noReservationError
+
+			assert.NoError(t, m.TerminateInstance(ctx, h, "evergreen", ""))
+
+			assert.Nil(t, client.TerminateInstancesInput, "should not call TerminateInstances when instance is not found")
+
+			hDb, err := host.FindOneId(ctx, h.Id)
 			assert.NoError(t, err)
 			assert.Equal(t, evergreen.HostTerminated, hDb.Status)
 		},
@@ -489,6 +552,20 @@ func TestCleanup(t *testing.T) {
 		require.NotZero(t, dbIPAddr2)
 		assert.Equal(t, h2.Tag, dbIPAddr2.HostTag, "IP address should remain associated with running host")
 	})
+}
+
+func TestGetManagerForEc2Fleet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	env := &mock.Environment{}
+	require.NoError(t, env.Configure(ctx))
+
+	mgr, err := GetManager(ctx, env, ManagerOpts{Provider: evergreen.ProviderNameEc2Fleet})
+	require.NoError(t, err)
+	require.NotNil(t, mgr)
+	_, ok := mgr.(*ec2FleetManager)
+	assert.True(t, ok, "ec2-fleet provider should return an ec2FleetManager")
 }
 
 func TestInstanceTypeAZCache(t *testing.T) {

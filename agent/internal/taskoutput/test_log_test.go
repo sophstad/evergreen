@@ -1,10 +1,10 @@
 package taskoutput
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"github.com/evergreen-ci/evergreen/agent/internal/redactor"
 	"github.com/evergreen-ci/evergreen/agent/util"
 	"github.com/evergreen-ci/evergreen/model/log"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/testlog"
 	"github.com/evergreen-ci/utility"
@@ -24,8 +25,7 @@ import (
 )
 
 func TestAppendTestLog(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	tsk := &task.Task{
 		Id:           "id",
@@ -50,11 +50,15 @@ func TestAppendTestLog(t *testing.T) {
 		TaskExecution: 5,
 	}
 
+	initedS3Usage := &s3usage.S3Usage{}
+	initedS3Usage.Init()
+
 	for _, testCase := range []struct {
 		name           string
 		input          []string
 		expectedOutput []string
 		redactOpts     redactor.RedactionOptions
+		s3Usage        *s3usage.S3Usage
 	}{
 		{
 			name:           "Newlines",
@@ -71,12 +75,18 @@ func TestAppendTestLog(t *testing.T) {
 				InternalRedactions: util.NewDynamicExpansions(map[string]string{"another_secret": "DEADC0DE"}),
 			},
 		},
+		{
+			name:           "NonNilS3Usage",
+			input:          []string{"log line 1"},
+			expectedOutput: []string{"log line 1"},
+			s3Usage:        initedS3Usage,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			tsk.TaskOutputInfo.TestLogs.BucketConfig.Name = t.TempDir()
 			testLog.Lines = testCase.input
 
-			require.NoError(t, AppendTestLog(ctx, tsk, testCase.redactOpts, testLog))
+			require.NoError(t, AppendTestLog(ctx, tsk, testCase.redactOpts, testLog, testCase.s3Usage))
 			it, err := tsk.GetTestLogs(ctx, task.TestLogGetOptions{LogPaths: []string{testLog.Name}})
 			require.NoError(t, err)
 
@@ -93,8 +103,7 @@ func TestAppendTestLog(t *testing.T) {
 }
 
 func TestTestLogDirectoryHandlerRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	comm := client.NewMock("url")
 
@@ -202,9 +211,75 @@ func TestTestLogDirectoryHandlerRun(t *testing.T) {
 	}
 }
 
+func TestTestLogDirectoryHandlerSymlink(t *testing.T) {
+	ctx := t.Context()
+
+	comm := client.NewMock("url")
+
+	t.Run("SymlinkedFileIngestedInFull", func(t *testing.T) {
+		tsk, h := setupTestTestLogDirectoryHandler(t, comm, redactor.RedactionOptions{}, 32)
+
+		targetDir := t.TempDir()
+		targetPath := filepath.Join(targetDir, "real.log")
+		inputLines := []string{
+			"Line 1 of the symlinked log file content.",
+			"Line 2 with more bytes to cross sequence size.",
+			"Line 3 keeps going past the seqSize threshold.",
+			"Line 4 is the last line of the target file.",
+		}
+		require.NoError(t, os.WriteFile(targetPath, []byte(strings.Join(inputLines, "\n")+"\n"), 0777))
+		require.NoError(t, os.Symlink(targetPath, filepath.Join(h.dir, "symlink.log")))
+
+		require.NoError(t, h.run(ctx))
+
+		it, err := tsk.GetTestLogs(ctx, task.TestLogGetOptions{LogPaths: []string{"symlink.log"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, it.Close()) })
+		var persistedLines []string
+		for it.Next() {
+			persistedLines = append(persistedLines, it.Item().Data)
+		}
+		require.NoError(t, it.Err())
+		assert.Equal(t, inputLines, persistedLines)
+	})
+
+	t.Run("BrokenSymlinkSkipped", func(t *testing.T) {
+		tsk, h := setupTestTestLogDirectoryHandler(t, comm, redactor.RedactionOptions{}, 32)
+
+		require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "does_not_exist"), filepath.Join(h.dir, "broken.log")))
+
+		require.NoError(t, h.run(ctx))
+
+		it, err := tsk.GetTestLogs(ctx, task.TestLogGetOptions{LogPaths: []string{"broken.log"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, it.Close()) })
+		assert.False(t, it.Next(), "broken symlink should produce no ingested lines")
+		require.NoError(t, it.Err())
+	})
+
+	t.Run("DirectorySymlinkSkippedWithWarning", func(t *testing.T) {
+		tsk, h := setupTestTestLogDirectoryHandler(t, comm, redactor.RedactionOptions{}, 32)
+
+		targetDir := t.TempDir()
+		require.NoError(t, os.Symlink(targetDir, filepath.Join(h.dir, "dir_link")))
+
+		require.NoError(t, h.run(ctx))
+
+		it, err := tsk.GetTestLogs(ctx, task.TestLogGetOptions{LogPaths: []string{"dir_link"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, it.Close()) })
+		assert.False(t, it.Next(), "directory symlink should not produce any ingested log content")
+		require.NoError(t, it.Err())
+
+		sawWarning := slices.ContainsFunc(comm.GetTaskLogs(tsk.Id), func(line log.LogLine) bool {
+			return line.Priority == level.Warning && strings.Contains(line.Data, "targets a directory")
+		})
+		assert.True(t, sawWarning, "expected a warning explaining the directory symlink was skipped")
+	})
+}
+
 func TestTestLogDirectoryHandlerGetSpecFile(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	comm := client.NewMock("url")
 	getRawLinesAndFormatter := func(format testLogFormat) ([]string, func(log.LogLine) string) {
@@ -286,9 +361,9 @@ func TestTestLogDirectoryHandlerGetSpecFile(t *testing.T) {
 			// accordance with their format.
 			it, err := tsk.GetTestLogs(ctx, task.TestLogGetOptions{LogPaths: []string{logPath}})
 			require.NoError(t, err)
-			defer func() {
+			t.Cleanup(func() {
 				assert.NoError(t, it.Close())
-			}()
+			})
 			var persistedRawLines []string
 			for it.Next() {
 				persistedRawLines = append(persistedRawLines, formatLine(it.Item()))
@@ -409,7 +484,7 @@ func setupTestTestLogDirectoryHandler(t *testing.T, comm *client.Mock, redactOpt
 			},
 		},
 	}
-	logger, err := comm.GetLoggerProducer(context.TODO(), tsk, nil)
+	logger, err := comm.GetLoggerProducer(t.Context(), tsk, nil)
 	require.NoError(t, err)
 	handlerOpts := directoryHandlerOpts{
 		redactorOpts: redactOpts,

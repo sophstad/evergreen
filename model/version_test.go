@@ -10,7 +10,10 @@ import (
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
+	mgobson "github.com/evergreen-ci/evergreen/db/mgo/bson"
 	"github.com/evergreen-ci/evergreen/model/build"
+	"github.com/evergreen-ci/evergreen/model/cost"
+	"github.com/evergreen-ci/evergreen/model/s3usage"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/utility"
 	. "github.com/smartystreets/goconvey/convey"
@@ -83,44 +86,6 @@ func TestVersionSortByCreateTime(t *testing.T) {
 	assert.Equal("4", versions[2].Id)
 	assert.Equal("5", versions[3].Id)
 	assert.Equal("100", versions[4].Id)
-}
-
-func TestFindLastPeriodicBuild(t *testing.T) {
-	assert := assert.New(t)
-	assert.NoError(db.Clear(VersionCollection))
-	now := time.Now()
-	v1 := Version{
-		Id:              "v1",
-		PeriodicBuildID: "a",
-		Identifier:      "myProj",
-		CreateTime:      now.Add(-10 * time.Minute),
-	}
-	assert.NoError(v1.Insert(t.Context()))
-	v2 := Version{
-		Id:              "v2",
-		PeriodicBuildID: "a",
-		Identifier:      "myProj",
-		CreateTime:      now.Add(-5 * time.Minute),
-	}
-	assert.NoError(v2.Insert(t.Context()))
-	v3 := Version{
-		Id:              "v3",
-		PeriodicBuildID: "b",
-		Identifier:      "myProj",
-		CreateTime:      now,
-	}
-	assert.NoError(v3.Insert(t.Context()))
-	v4 := Version{
-		Id:              "v4",
-		PeriodicBuildID: "a",
-		Identifier:      "someProj",
-		CreateTime:      now,
-	}
-	assert.NoError(v4.Insert(t.Context()))
-
-	mostRecent, err := FindLastPeriodicBuild(t.Context(), "myProj", "a")
-	assert.NoError(err)
-	assert.Equal(v2.Id, mostRecent.Id)
 }
 
 func TestBuildVariantsStatusUnmarshal(t *testing.T) {
@@ -209,7 +174,7 @@ func TestGetVersionsWithTaskOptions(t *testing.T) {
 	}
 
 	// test with tasks
-	opts := GetVersionsOptions{Requester: evergreen.RepotrackerVersionRequester, IncludeBuilds: true, IncludeTasks: true,
+	opts := GetVersionsOptions{Requesters: []string{evergreen.RepotrackerVersionRequester}, IncludeBuilds: true, IncludeTasks: true,
 		Limit: 2}
 
 	versions, err := GetVersionsWithOptions(t.Context(), "my_ident", opts)
@@ -227,7 +192,7 @@ func TestGetVersionsWithTaskOptions(t *testing.T) {
 	assert.Equal(t, "t1", versions[1].Builds[0].Tasks[0].Id)
 
 	// test with tasks and ByBuildVariant and ByTask
-	opts = GetVersionsOptions{Requester: evergreen.RepotrackerVersionRequester, IncludeBuilds: true, IncludeTasks: true,
+	opts = GetVersionsOptions{Requesters: []string{evergreen.RepotrackerVersionRequester}, IncludeBuilds: true, IncludeTasks: true,
 		ByBuildVariant: "my_bv", ByTask: "my_task", Limit: 2}
 
 	versions, err = GetVersionsWithOptions(t.Context(), "my_ident", opts)
@@ -351,7 +316,7 @@ func TestGetVersionsWithOptions(t *testing.T) {
 	}
 	assert.NoError(t, t2.Insert(t.Context()))
 
-	opts := GetVersionsOptions{Requester: evergreen.RepotrackerVersionRequester}
+	opts := GetVersionsOptions{Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err := GetVersionsWithOptions(t.Context(), "my_ident", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 4)
@@ -359,7 +324,7 @@ func TestGetVersionsWithOptions(t *testing.T) {
 	require.Empty(t, versions[0].Builds)
 
 	// filter out versions with no builds/tasks
-	opts = GetVersionsOptions{IncludeBuilds: true, IncludeTasks: true, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{IncludeBuilds: true, IncludeTasks: true, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_ident", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 1)
@@ -376,7 +341,7 @@ func TestGetVersionsWithOptions(t *testing.T) {
 	assert.True(t, versions[0].Builds[0].Activated)
 	require.Empty(t, versions[0].Builds[0].Tasks) // not including tasks
 
-	opts = GetVersionsOptions{Limit: 1, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{Limit: 1, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_ident", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 1)
@@ -384,7 +349,7 @@ func TestGetVersionsWithOptions(t *testing.T) {
 	assert.Empty(t, versions[0].Builds)
 	assert.Len(t, versions[0].BuildVariants, 2)
 
-	opts = GetVersionsOptions{Skip: 1, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{Skip: 1, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 3)
@@ -392,34 +357,34 @@ func TestGetVersionsWithOptions(t *testing.T) {
 	assert.Equal(t, "another_version", versions[1].Id)
 	assert.Equal(t, "seven_version", versions[2].Id)
 
-	opts = GetVersionsOptions{Start: 9, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{Start: 9, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 2)
 	assert.Equal(t, "another_version", versions[0].Id)
 	assert.Equal(t, "seven_version", versions[1].Id)
 
-	opts = GetVersionsOptions{Start: 9, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{Start: 9, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 2)
 	assert.Equal(t, "another_version", versions[0].Id)
 	assert.Equal(t, "seven_version", versions[1].Id)
 
-	opts = GetVersionsOptions{RevisionEnd: 9, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{RevisionEnd: 9, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 2)
 	assert.Equal(t, "my_version", versions[0].Id)
 	assert.Equal(t, "your_version", versions[1].Id)
 
-	opts = GetVersionsOptions{Start: 9, RevisionEnd: 8, Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{Start: 9, RevisionEnd: 8, Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 1)
 	assert.Equal(t, "another_version", versions[0].Id)
 
-	opts = GetVersionsOptions{CreatedAfter: start.Add(-3 * time.Minute), CreatedBefore: start.Add(-1 * time.Minute), Requester: evergreen.RepotrackerVersionRequester}
+	opts = GetVersionsOptions{CreatedAfter: start.Add(-3 * time.Minute), CreatedBefore: start.Add(-1 * time.Minute), Requesters: []string{evergreen.RepotrackerVersionRequester}}
 	versions, err = GetVersionsWithOptions(t.Context(), "my_project", opts)
 	assert.NoError(t, err)
 	require.Len(t, versions, 3)
@@ -767,13 +732,27 @@ func TestUpdateAggregateTaskCosts(t *testing.T) {
 		// Insert tasks using BSON directly to avoid import cycle
 		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
 			"_id": "t1", "version": "v1", "display_only": false,
-			"cost":           bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0},
-			"predicted_cost": bson.M{"on_demand_ec2_cost": 3.0, "adjusted_ec2_cost": 2.4},
+			"cost": bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0, "on_demand_s3_artifact_put_cost": 0.05, "on_demand_s3_log_put_cost": 0.02},
+			"predicted_cost": bson.M{
+				"on_demand_ec2_cost": 3.0, "adjusted_ec2_cost": 2.4,
+				"adjusted_s3_artifact_put_cost": 0.10, "adjusted_s3_log_put_cost": 0.04,
+			},
+			"s3_usage": bson.M{
+				"artifacts": bson.M{"put_requests": 100, "upload_bytes": int64(5000), "count": 10},
+				"logs":      bson.M{"put_requests": 20, "upload_bytes": int64(1000)},
+			},
 		}))
 		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
 			"_id": "t2", "version": "v1", "display_only": false,
-			"cost":           bson.M{"on_demand_ec2_cost": 5.0, "adjusted_ec2_cost": 4.0},
-			"predicted_cost": bson.M{"on_demand_ec2_cost": 2.0, "adjusted_ec2_cost": 1.6},
+			"cost": bson.M{"on_demand_ec2_cost": 5.0, "adjusted_ec2_cost": 4.0, "on_demand_s3_artifact_put_cost": 0.03, "on_demand_s3_log_put_cost": 0.01},
+			"predicted_cost": bson.M{
+				"on_demand_ec2_cost": 2.0, "adjusted_ec2_cost": 1.6,
+				"adjusted_s3_artifact_put_cost": 0.20, "adjusted_s3_log_put_cost": 0.02,
+			},
+			"s3_usage": bson.M{
+				"artifacts": bson.M{"put_requests": 50, "upload_bytes": int64(3000), "count": 5},
+				"logs":      bson.M{"put_requests": 10, "upload_bytes": int64(500)},
+			},
 		}))
 
 		err := v.UpdateAggregateTaskCosts(ctx)
@@ -791,11 +770,13 @@ func TestUpdateAggregateTaskCosts(t *testing.T) {
 
 		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
 			"_id": "t1", "version": "v2", "display_only": false,
-			"cost": bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0},
+			"cost":     bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0, "on_demand_s3_artifact_put_cost": 0.05},
+			"s3_usage": bson.M{"artifacts": bson.M{"put_requests": 100}},
 		}))
 		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
 			"_id": "display", "version": "v2", "display_only": true,
-			"cost": bson.M{"on_demand_ec2_cost": 100.0, "adjusted_ec2_cost": 80.0},
+			"cost":     bson.M{"on_demand_ec2_cost": 100.0, "adjusted_ec2_cost": 80.0, "on_demand_s3_artifact_put_cost": 9.99},
+			"s3_usage": bson.M{"artifacts": bson.M{"put_requests": 99999}},
 		}))
 
 		err := v.UpdateAggregateTaskCosts(ctx)
@@ -811,11 +792,13 @@ func TestUpdateAggregateTaskCosts(t *testing.T) {
 
 		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
 			"_id": "t1", "version": "v3", "display_only": false,
-			"cost": bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0},
+			"cost":     bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0, "on_demand_s3_log_put_cost": 0.01},
+			"s3_usage": bson.M{"logs": bson.M{"put_requests": 30, "upload_bytes": int64(2000)}},
 		}))
 		require.NoError(t, db.Insert(ctx, oldTaskCollection, bson.M{
 			"_id": "t1_old", "version": "v3", "display_only": false,
-			"cost": bson.M{"on_demand_ec2_cost": 5.0, "adjusted_ec2_cost": 4.0},
+			"cost":     bson.M{"on_demand_ec2_cost": 5.0, "adjusted_ec2_cost": 4.0, "on_demand_s3_log_put_cost": 0.005},
+			"s3_usage": bson.M{"logs": bson.M{"put_requests": 10, "upload_bytes": int64(500)}},
 		}))
 
 		err := v.UpdateAggregateTaskCosts(ctx)
@@ -823,4 +806,154 @@ func TestUpdateAggregateTaskCosts(t *testing.T) {
 		assert.InDelta(t, 15.0, v.Cost.OnDemandEC2Cost, 0.01)
 		assert.InDelta(t, 12.0, v.Cost.AdjustedEC2Cost, 0.01)
 	})
+
+	t.Run("TasksWithoutS3DataAreAggregatedSafely", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(VersionCollection, taskCollection))
+		v := &Version{Id: "v4"}
+		require.NoError(t, v.Insert(ctx))
+
+		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
+			"_id": "t1", "version": "v4", "display_only": false,
+			"cost": bson.M{"on_demand_ec2_cost": 10.0, "adjusted_ec2_cost": 8.0},
+		}))
+		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
+			"_id": "t2", "version": "v4", "display_only": false,
+			"cost": bson.M{"on_demand_ec2_cost": 5.0, "adjusted_ec2_cost": 4.0, "on_demand_s3_artifact_put_cost": 0.03},
+			"s3_usage": bson.M{
+				"artifacts": bson.M{"put_requests": 50, "upload_bytes": int64(3000), "count": 5},
+			},
+		}))
+
+		err := v.UpdateAggregateTaskCosts(ctx)
+		require.NoError(t, err)
+		assert.InDelta(t, 15.0, v.Cost.OnDemandEC2Cost, 0.01)
+	})
+
+	t.Run("AggregatesEBSCosts", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(VersionCollection, taskCollection))
+		v := &Version{Id: "v5"}
+		require.NoError(t, v.Insert(ctx))
+
+		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
+			"_id": "t1", "version": "v5", "display_only": false,
+			"cost": bson.M{
+				"on_demand_ec2_cost":            1.0,
+				"on_demand_ebs_throughput_cost": 0.10,
+				"adjusted_ebs_throughput_cost":  0.08,
+				"on_demand_ebs_storage_cost":    0.20,
+				"adjusted_ebs_storage_cost":     0.16,
+			},
+		}))
+		require.NoError(t, db.Insert(ctx, taskCollection, bson.M{
+			"_id": "t2", "version": "v5", "display_only": false,
+			"cost": bson.M{
+				"on_demand_ec2_cost":            1.0,
+				"on_demand_ebs_throughput_cost": 0.05,
+				"adjusted_ebs_throughput_cost":  0.04,
+				"on_demand_ebs_storage_cost":    0.10,
+				"adjusted_ebs_storage_cost":     0.08,
+			},
+		}))
+
+		err := v.UpdateAggregateTaskCosts(ctx)
+		require.NoError(t, err)
+		assert.InDelta(t, 0.15, v.Cost.OnDemandEBSThroughputCost, 0.001)
+		assert.InDelta(t, 0.12, v.Cost.AdjustedEBSThroughputCost, 0.001)
+		assert.InDelta(t, 0.30, v.Cost.OnDemandEBSStorageCost, 0.001)
+		assert.InDelta(t, 0.24, v.Cost.AdjustedEBSStorageCost, 0.001)
+	})
+
+}
+
+func TestIncrementVersionS3CostAndUsage(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("WithS3CostAndUsageShouldIncrementVersionFields", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(VersionCollection))
+		v := &Version{Id: mgobson.NewObjectId().Hex()}
+		require.NoError(t, v.Insert(ctx))
+
+		taskCost := cost.Cost{
+			OnDemandS3ArtifactPutCost: 0.05,
+			AdjustedS3ArtifactPutCost: 0.035,
+			OnDemandS3LogPutCost:      0.02,
+			AdjustedS3LogPutCost:      0.014,
+		}
+		usage := s3usage.S3Usage{
+			Artifacts: s3usage.ArtifactMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 100, UploadBytes: 5000}, Count: 10},
+			Logs:      s3usage.LogMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 20, UploadBytes: 1000}},
+		}
+
+		require.NoError(t, IncrementVersionS3CostAndUsage(ctx, v.Id, taskCost, usage))
+
+		updated, err := VersionFindOneId(ctx, v.Id)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+		assert.InDelta(t, 0.05, updated.Cost.OnDemandS3ArtifactPutCost, 0.001)
+		assert.InDelta(t, 0.035, updated.Cost.AdjustedS3ArtifactPutCost, 0.001)
+		assert.InDelta(t, 0.02, updated.Cost.OnDemandS3LogPutCost, 0.001)
+		assert.InDelta(t, 0.014, updated.Cost.AdjustedS3LogPutCost, 0.001)
+		assert.Zero(t, updated.Cost.OnDemandEC2Cost)
+		assert.Zero(t, updated.Cost.AdjustedEC2Cost)
+		assert.Equal(t, 100, updated.S3Usage.Artifacts.PutRequests)
+		assert.Equal(t, int64(5000), updated.S3Usage.Artifacts.UploadBytes)
+		assert.Equal(t, 10, updated.S3Usage.Artifacts.Count)
+		assert.Equal(t, 20, updated.S3Usage.Logs.PutRequests)
+		assert.Equal(t, int64(1000), updated.S3Usage.Logs.UploadBytes)
+	})
+
+	t.Run("MultipleCallsShouldAccumulateS3Fields", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(VersionCollection))
+		v := &Version{Id: mgobson.NewObjectId().Hex()}
+		require.NoError(t, v.Insert(ctx))
+
+		first := cost.Cost{OnDemandS3ArtifactPutCost: 0.05}
+		firstUsage := s3usage.S3Usage{
+			Artifacts: s3usage.ArtifactMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 100, UploadBytes: 5000}, Count: 10},
+		}
+		require.NoError(t, IncrementVersionS3CostAndUsage(ctx, v.Id, first, firstUsage))
+
+		second := cost.Cost{OnDemandS3ArtifactPutCost: 0.03}
+		secondUsage := s3usage.S3Usage{
+			Artifacts: s3usage.ArtifactMetrics{S3UploadMetrics: s3usage.S3UploadMetrics{PutRequests: 50, UploadBytes: 2000}, Count: 5},
+		}
+		require.NoError(t, IncrementVersionS3CostAndUsage(ctx, v.Id, second, secondUsage))
+
+		updated, err := VersionFindOneId(ctx, v.Id)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+		assert.InDelta(t, 0.08, updated.Cost.OnDemandS3ArtifactPutCost, 0.001)
+		assert.Equal(t, 150, updated.S3Usage.Artifacts.PutRequests)
+		assert.Equal(t, int64(7000), updated.S3Usage.Artifacts.UploadBytes)
+		assert.Equal(t, 15, updated.S3Usage.Artifacts.Count)
+	})
+
+	t.Run("ZeroCostAndUsageShouldSkipDBWrite", func(t *testing.T) {
+		require.NoError(t, db.ClearCollections(VersionCollection))
+		v := &Version{Id: mgobson.NewObjectId().Hex()}
+		require.NoError(t, v.Insert(ctx))
+
+		require.NoError(t, IncrementVersionS3CostAndUsage(ctx, v.Id, cost.Cost{}, s3usage.S3Usage{}))
+
+		// Version should remain at zero — the function short-circuits without touching the DB.
+		updated, err := VersionFindOneId(ctx, v.Id)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+		assert.Zero(t, updated.Cost.OnDemandS3ArtifactPutCost)
+		assert.Zero(t, updated.S3Usage.Artifacts.PutRequests)
+	})
+}
+
+func TestGetManifestModuleWiki(t *testing.T) {
+	ctx := t.Context()
+	pRef := &ProjectRef{Owner: "foo", Repo: "bar"}
+	mod := Module{Name: "w", Owner: "myorg", Repo: "service.wiki", Branch: "master"}
+	m, err := getManifestModule(ctx, pRef, mod, evergreen.RepotrackerVersionRequester, "abc123")
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, "myorg", m.Owner)
+	assert.Equal(t, "service.wiki", m.Repo)
+	assert.Empty(t, m.Revision)
+	assert.Equal(t, "master", m.Branch)
+	assert.Empty(t, m.URL)
 }

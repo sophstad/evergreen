@@ -12,27 +12,101 @@ import (
 	"github.com/pkg/errors"
 )
 
-func DoProjectActivation(ctx context.Context, id string, ts time.Time) (bool, error) {
+const (
+	runEveryMainlineCommitLimit = 20
+)
+
+func DoProjectActivation(ctx context.Context, projectRef *ProjectRef, ts time.Time) ([]string, error) {
+	if !projectRef.IsWaterfallEnabled() {
+		return nil, nil
+	}
+	if projectRef.RunEveryMainlineCommit {
+		return activateEveryRecentMainlineCommitForProject(ctx, projectRef, ts)
+	}
+	return activateMostRecentNonIgnoredCommitForProject(ctx, projectRef, ts)
+}
+
+func activateMostRecentNonIgnoredCommitForProject(ctx context.Context, projectRef *ProjectRef, ts time.Time) ([]string, error) {
 	// fetch the most recent, non-ignored version (before the given time) to activate
-	activateVersion, err := VersionFindOne(ctx, VersionByMostRecentNonIgnored(id, ts))
+	activateVersion, err := VersionFindOne(ctx, VersionByMostRecentNonIgnored(projectRef.Id, ts))
 	if err != nil {
-		return false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	if activateVersion == nil {
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":   "no version to activate for repository",
-			"project":   id,
+			"project":   projectRef.Id,
 			"operation": "project-activation",
 		})
-		return false, nil
+		return nil, nil
 	}
 	activated, err := ActivateElapsedBuildsAndTasks(ctx, activateVersion)
 	if err != nil {
-		return false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
-	return activated, nil
+	if activated {
+		return []string{activateVersion.Id}, nil
+	}
+	return nil, nil
+}
 
+// activateEveryRecentMainlineCommitForProject activates all unactivated non-ignored versions
+// up to the limit specified, runEveryMainlineCommitLimit or up to the last activated version,
+// whichever is less.
+func activateEveryRecentMainlineCommitForProject(ctx context.Context, projectRef *ProjectRef, ts time.Time) ([]string, error) {
+	lastActivatedVersion, err := VersionFindOne(ctx, VersionByMostRecentActivated(projectRef.Id, ts))
+	if err != nil {
+		return nil, errors.Wrap(err, "finding most recently activated version")
+	}
+
+	var activateVersions []Version
+	if lastActivatedVersion == nil {
+		// If there is no previous activated versions, this may be a new project or a project's first activation.
+		// In that case, activate previous unactivated non-ignored versions rather than since last activated.
+		activateVersions, err = VersionFind(ctx, VersionsAllUnactivatedNonIgnored(projectRef.Id, ts, runEveryMainlineCommitLimit))
+		if err != nil {
+			return nil, errors.Wrapf(err, "finding all unactivated non-ignored versions")
+		}
+	} else {
+		// If there is a last activated version, activate only versions since that one.
+		activateVersions, err = VersionFind(ctx, VersionsUnactivatedSinceLastActivated(projectRef.Id, ts, lastActivatedVersion.RevisionOrderNumber, runEveryMainlineCommitLimit))
+		if err != nil {
+			return nil, errors.Wrapf(err, "finding unactivated versions since last activated version '%s'", lastActivatedVersion.Id)
+		}
+	}
+
+	if len(activateVersions) == 0 {
+		grip.Info(ctx, message.Fields{
+			"message":   "no versions to activate for repository",
+			"project":   projectRef.Id,
+			"operation": "project-activation-every-commit",
+		})
+		return nil, nil
+	}
+
+	// Activate all eligible versions.
+	activatedVersions := []string{}
+	for _, version := range activateVersions {
+		activated, err := ActivateElapsedBuildsAndTasks(ctx, &version)
+		if err != nil {
+			grip.Error(ctx, message.WrapError(err, message.Fields{
+				"message":              "error activating version",
+				"project":              projectRef.Id,
+				"version":              version.Id,
+				"revision":             version.Revision,
+				"operation":            "project-activation-every-commit",
+				"total_versions_found": len(activateVersions),
+			}))
+			// Continue with other versions even if one fails.
+			continue
+		}
+		if activated {
+			activatedVersions = append(activatedVersions, version.Id)
+		}
+	}
+
+	return activatedVersions, nil
 }
 
 // ActivateElapsedBuildsAndTasks activates any builds/tasks if their BatchTimes have elapsed.
@@ -49,11 +123,6 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 	}
 
 	for i, bv := range v.BuildVariants {
-		// Skip ignored build variants (similar to how ignored versions are skipped)
-		if bv.Ignored {
-			continue
-		}
-
 		// If there are batchtime tasks, consider if these should/shouldn't be activated, regardless of build
 		ignoreTasks := []string{}
 		readyTasks := []string{}
@@ -73,7 +142,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 		if !isElapsedBuild && len(readyTasks) == 0 {
 			continue
 		}
-		grip.Info(message.Fields{
+		grip.Info(ctx, message.Fields{
 			"message":   "activating revision",
 			"operation": "project-activation",
 			"variant":   bv.BuildVariant,
@@ -83,7 +152,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 
 		// we only get this far if something in the build is being updated
 		if !bv.Activated {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":       "activating build",
 				"operation":     "project-activation",
 				"variant":       bv.BuildVariant,
@@ -97,7 +166,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 		// If it's an elapsed build, update all tasks for the build, minus batch time tasks that aren't ready.
 		// If it's elapsed tasks, update only those tasks.
 		if isElapsedBuild {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":      "activating tasks for build",
 				"operation":    "project-activation",
 				"variant":      bv.BuildVariant,
@@ -113,7 +182,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 			elapsedBuildIds = append(elapsedBuildIds, bv.BuildId)
 			allIgnoreTaskIds = append(allIgnoreTaskIds, ignoreTasks...)
 		} else {
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":           "activating batchtime tasks",
 				"operation":         "project-activation",
 				"variant":           bv.BuildVariant,
@@ -132,7 +201,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 	if len(buildIdsToActivate) > 0 {
 		// Don't need to set the version in here since we do it ourselves in a single update
 		if err := build.UpdateActivation(ctx, buildIdsToActivate, true, evergreen.BuildActivator); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"operation": "project-activation",
 				"message":   "problem activating builds",
 				"build_ids": buildIdsToActivate,
@@ -143,7 +212,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 
 	if len(elapsedBuildIds) > 0 {
 		if err := setTaskActivationForBuilds(ctx, elapsedBuildIds, true, true, allIgnoreTaskIds, evergreen.ElapsedBuildActivator); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"operation": "project-activation",
 				"message":   "problem activating tasks for builds",
 				"builds":    elapsedBuildIds,
@@ -153,7 +222,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 	}
 	if len(allReadyTaskIds) > 0 {
 		if err := task.ActivateTasksByIdsWithDependencies(ctx, allReadyTaskIds, evergreen.ElapsedTaskActivator); err != nil {
-			grip.Error(message.WrapError(err, message.Fields{
+			grip.Error(ctx, message.WrapError(err, message.Fields{
 				"operation": "project-activation",
 				"message":   "problem activating batchtime tasks",
 				"tasks":     allReadyTaskIds,
@@ -162,7 +231,7 @@ func ActivateElapsedBuildsAndTasks(ctx context.Context, v *Version) (bool, error
 		}
 	}
 	if err := v.UpdateAggregateTaskCosts(ctx); err != nil {
-		grip.Error(message.WrapError(err, message.Fields{
+		grip.Error(ctx, message.WrapError(err, message.Fields{
 			"message": "failed to update version expected costs after task activation",
 			"version": v.Id,
 		}))

@@ -6,10 +6,21 @@ mutation {
         url: "http://localhost:8080"
         corpUrl: "https://evergreen-staging.corp.mongodb.com"
       }
+      rateLimit: {
+        elevatedUserIds: ["user1", "user2"]
+        graphqlComplexityLimit: 1000
+        graphqlServiceBurst: 40
+        graphqlServicePerHour: 400
+        graphqlUserBurst: 30
+        graphqlUserPerHour: 300
+        restServiceBurst: 20
+        restServicePerHour: 200
+        restUserBurst: 10
+        restUserPerHour: 100
+      }
       disabledGQLQueries: ["query1", "query2", "query3", "query4"]
       ui: {
         url: "http://localhost:600"
-        helpUrl: "https://help.example.com"
         uiv2Url: "http://localhost:3000"
         parsleyUrl: "http://localhost:4173"
         httpListenAddr: ":3000"
@@ -22,7 +33,7 @@ mutation {
         csrfKey: "12345678901234567890123456789012"
         cacheTemplates: true
         stagingEnvironment: "not-staging"
-        betaFeatures: { spruceWaterfallEnabled: false, parsleyAIEnabled: false }
+        betaFeatures: { spruceWaterfallEnabled: false }
       }
     }
   ) {
@@ -31,9 +42,20 @@ mutation {
       url
       corpUrl
     }
+    rateLimit {
+      elevatedUserIds
+      graphqlComplexityLimit
+      graphqlServiceBurst
+      graphqlServicePerHour
+      graphqlUserBurst
+      graphqlUserPerHour
+      restServiceBurst
+      restServicePerHour
+      restUserBurst
+      restUserPerHour
+    }
     ui {
       url
-      helpUrl
       uiv2Url
       parsleyUrl
       httpListenAddr
@@ -48,7 +70,6 @@ mutation {
       stagingEnvironment
       betaFeatures {
         spruceWaterfallEnabled
-        parsleyAIEnabled
       }
     }
     disabledGQLQueries

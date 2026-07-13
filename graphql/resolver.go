@@ -75,12 +75,17 @@ func New(apiURL string) Config {
 	c.Directives.RequireHostAccess = func(ctx context.Context, obj any, next graphql.Resolver, access HostAccessLevel) (any, error) {
 		args, isStringMap := obj.(map[string]interface{})
 		if !isStringMap {
-			return nil, ResourceNotFound.Send(ctx, "host not specified")
+			return nil, ResourceNotFound.Send(ctx, "converting args into map")
 		}
 		hostId, hasHostId := args["hostId"].(string)
 		hostIdsInterface, hasHostIds := args["hostIds"].([]interface{})
+
+		// If no host ID is present, the field is optional and null, so skip the access check.
 		if !hasHostId && !hasHostIds {
-			return nil, ResourceNotFound.Send(ctx, "host not specified")
+			return next(ctx)
+		}
+		if (hasHostId && hostId == "") || (hasHostIds && len(hostIdsInterface) == 0) {
+			return nil, ResourceNotFound.Send(ctx, "must specify host ID(s)")
 		}
 
 		hostIdsToCheck := []string{hostId}
@@ -123,7 +128,6 @@ func New(apiURL string) Config {
 
 		// If directive is checking for create permissions, no distro ID is required.
 		if access == DistroSettingsAccessCreate {
-
 			if user.HasDistroCreatePermission(ctx) {
 				return next(ctx)
 			}
@@ -241,6 +245,69 @@ func New(apiURL string) Config {
 
 		return nil, Forbidden.Send(ctx, fmt.Sprintf("user %s does not have permission to access the %s resolver", user.Username(), operationContext))
 	}
+	c.Directives.RequireRepoAccess = func(ctx context.Context, obj any, next graphql.Resolver, access AccessLevel) (any, error) {
+		usr := mustHaveUser(ctx)
+
+		args, isStringMap := obj.(map[string]any)
+		if !isStringMap {
+			return nil, InternalServerError.Send(ctx, "converting args into map")
+		}
+		projectId, hasProjectId := args["projectId"].(string)
+		if !hasProjectId || projectId == "" {
+			return nil, ResourceNotFound.Send(ctx, "project not specified")
+		}
+
+		pRef, err := model.FindBranchProjectRef(ctx, projectId)
+		if err != nil {
+			return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding project '%s': %s", projectId, err.Error()))
+		}
+		if pRef == nil {
+			return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("project '%s' not found", projectId))
+		}
+
+		repoRef, err := model.FindRepoRefByOwnerAndRepo(ctx, pRef.Owner, pRef.Repo)
+		if err != nil {
+			return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding repo for '%s/%s': %s", pRef.Owner, pRef.Repo, err.Error()))
+		}
+
+		// When no repo exists yet, a project admin may attach the project and
+		// becomes the admin of the newly created repo.
+		if repoRef == nil {
+			if usr.HasPermission(ctx, gimlet.PermissionOpts{
+				Resource:      pRef.Id,
+				ResourceType:  evergreen.ProjectResourceType,
+				Permission:    evergreen.PermissionProjectSettings,
+				RequiredLevel: evergreen.ProjectSettingsEdit.Value,
+			}) {
+				return next(ctx)
+			}
+			return nil, Forbidden.Send(ctx, fmt.Sprintf("user '%s' must be an admin of project '%s' to attach it to a new repo", usr.Username(), projectId))
+		}
+
+		switch access {
+		case AccessLevelAdmin:
+			if usr.HasPermission(ctx, gimlet.PermissionOpts{
+				Resource:      repoRef.Id,
+				ResourceType:  evergreen.ProjectResourceType,
+				Permission:    evergreen.PermissionProjectSettings,
+				RequiredLevel: evergreen.ProjectSettingsEdit.Value,
+			}) {
+				return next(ctx)
+			}
+			return nil, Forbidden.Send(ctx, fmt.Sprintf("user '%s' is not an admin of repo '%s/%s'", usr.Username(), pRef.Owner, pRef.Repo))
+		case AccessLevelView:
+			hasViewPermission, err := model.UserHasRepoViewPermission(ctx, usr, repoRef.Id)
+			if err != nil {
+				return nil, InternalServerError.Send(ctx, fmt.Sprintf("checking repo view permission for repo '%s/%s': %s", pRef.Owner, pRef.Repo, err.Error()))
+			}
+			if hasViewPermission {
+				return next(ctx)
+			}
+			return nil, Forbidden.Send(ctx, fmt.Sprintf("user '%s' does not have permission to view repo '%s/%s'", usr.Username(), pRef.Owner, pRef.Repo))
+		default:
+			return nil, InputValidationError.Send(ctx, fmt.Sprintf("invalid access level '%s' for repo", access))
+		}
+	}
 	c.Directives.RequireProjectAccess = func(ctx context.Context, obj any, next graphql.Resolver, permission ProjectPermission, access AccessLevel) (any, error) {
 		usr := mustHaveUser(ctx)
 
@@ -339,6 +406,34 @@ func New(apiURL string) Config {
 			return next(ctx)
 		}
 		return nil, Forbidden.Send(ctx, fmt.Sprintf("User '%s' lacks required admin permissions", dbUser.Username()))
+	}
+	c.Directives.RequireVolumeAccess = func(ctx context.Context, obj any, next graphql.Resolver) (any, error) {
+		args, isStringMap := obj.(map[string]interface{})
+		if !isStringMap {
+			return nil, ResourceNotFound.Send(ctx, "converting args into map")
+		}
+
+		volumeId, hasVolumeId := args["volumeId"].(string)
+		// If no volume ID is present, the field is optional and null, so skip the access check.
+		if !hasVolumeId {
+			return next(ctx)
+		}
+		if volumeId == "" {
+			return nil, InputValidationError.Send(ctx, "must specify volume ID")
+		}
+
+		dbUser := mustHaveUser(ctx)
+		v, err := host.FindVolumeByID(ctx, volumeId)
+		if err != nil {
+			return nil, InternalServerError.Send(ctx, fmt.Sprintf("finding volume '%s': %s", volumeId, err.Error()))
+		}
+		if v == nil {
+			return nil, ResourceNotFound.Send(ctx, fmt.Sprintf("volume '%s' not found", volumeId))
+		}
+		if userHasVolumePermission(ctx, dbUser, volumeId, v.CreatedBy) {
+			return next(ctx)
+		}
+		return nil, Forbidden.Send(ctx, fmt.Sprintf("user '%s' does not have permission to access volume '%s'", dbUser.Username(), volumeId))
 	}
 
 	return c

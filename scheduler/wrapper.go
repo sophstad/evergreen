@@ -32,14 +32,14 @@ func PlanDistro(ctx context.Context, conf Configuration, s *evergreen.Settings) 
 
 	distro, err := distro.FindOneId(ctx, conf.DistroID)
 	if err != nil {
-		return errors.Wrap(err, "problem finding distro")
+		return errors.Wrap(err, "finding distro")
 	}
 	if distro == nil {
 		return errors.Errorf("distro '%s' not found", conf.DistroID)
 	}
 
 	if err = underwaterUnschedule(ctx, distro.Id); err != nil {
-		return errors.Wrap(err, "problem unscheduling underwater tasks")
+		return errors.Wrap(err, "unscheduling underwater tasks")
 	}
 
 	if distro.Disabled {
@@ -49,7 +49,7 @@ func PlanDistro(ctx context.Context, conf Configuration, s *evergreen.Settings) 
 		queueInfo, err = model.GetDistroQueueInfo(ctx, distro.Id)
 		if err != nil {
 			// Skip erroring if the queue doesn't exist, since we would've just cleared it anyway.
-			grip.ErrorWhen(!adb.ResultsNotFound(err), message.WrapError(err, message.Fields{
+			grip.ErrorWhen(ctx, !adb.ResultsNotFound(err), message.WrapError(err, message.Fields{
 				"message": "cannot get distro queue information for disabled distro",
 				"distro":  distro.Id,
 			}))
@@ -57,18 +57,18 @@ func PlanDistro(ctx context.Context, conf Configuration, s *evergreen.Settings) 
 		if queueInfo.Length > 0 {
 			err = model.ClearTaskQueue(ctx, distro.Id)
 			if err != nil {
-				grip.Error(message.WrapError(err, message.Fields{
+				grip.Error(ctx, message.WrapError(err, message.Fields{
 					"message": "cannot clear task queue for disabled distro",
 					"distro":  distro.Id,
 				}))
 			}
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"distro":      distro.Id,
 				"removed_len": queueInfo.Length,
 				"operation":   "removed queue of disabled distro",
 			})
 		}
-		grip.InfoWhen(sometimes.Quarter(), message.Fields{
+		grip.InfoWhen(ctx, sometimes.Quarter(), message.Fields{
 			"message": "scheduling for distro is disabled",
 			"runner":  RunnerName,
 			"distro":  distro.Id,
@@ -88,9 +88,9 @@ func PlanDistro(ctx context.Context, conf Configuration, s *evergreen.Settings) 
 	finder := GetTaskFinder(conf.TaskFinder)
 	tasks, err := finder(ctx, *distro)
 	if err != nil {
-		return errors.Wrapf(err, "problem while running task finder for distro '%s'", distro.Id)
+		return errors.Wrapf(err, "running task finder for distro '%s'", distro.Id)
 	}
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"runner":        RunnerName,
 		"distro":        distro.Id,
 		"operation":     "runtime-stats",
@@ -105,15 +105,16 @@ func PlanDistro(ctx context.Context, conf Configuration, s *evergreen.Settings) 
 
 	planningPhaseBegins := time.Now()
 	prioritizedTasks, err := PrioritizeTasks(ctx, distro, tasks, TaskPlannerOptions{
-		StartedAt:        taskFindingBegins,
-		ID:               schedulerInstanceID,
-		IsSecondaryQueue: false,
+		StartedAt:                  taskFindingBegins,
+		ID:                         schedulerInstanceID,
+		IsSecondaryQueue:           false,
+		MaxScheduledTasksPerDistro: s.TaskLimits.MaxScheduledTasksPerDistro,
 	})
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
-	grip.Info(message.Fields{
+	grip.Info(ctx, message.Fields{
 		"runner":        RunnerName,
 		"distro":        distro.Id,
 		"alias":         false,
@@ -155,7 +156,7 @@ func doStaticHostUpdate(ctx context.Context, d distro.Distro) ([]string, error) 
 	for _, h := range settings.Hosts {
 		dbHost, err := host.FindOneId(ctx, h.Name)
 		if err != nil {
-			return nil, errors.Wrapf(err, "error finding host named %s", h.Name)
+			return nil, errors.Wrapf(err, "finding host named '%s'", h.Name)
 		}
 		provisionChange := needsReprovisioning(d, dbHost)
 
@@ -179,7 +180,7 @@ func doStaticHostUpdate(ctx context.Context, d distro.Distro) ([]string, error) 
 			}
 			if dbHost != nil {
 				event.LogHostStatusChanged(ctx, dbHost.Id, dbHost.Status, staticHost.Status, evergreen.User, "host status changed by host allocator")
-				grip.Info(message.Fields{
+				grip.Info(ctx, message.Fields{
 					"message":    "static host status updated",
 					"operation":  "doStaticHostUpdate",
 					"host_id":    dbHost.Id,
@@ -202,7 +203,7 @@ func doStaticHostUpdate(ctx context.Context, d distro.Distro) ([]string, error) 
 				event.LogHostConvertingProvisioning(ctx, staticHost.Id, staticHost.Distro.BootstrapSettings.Method, evergreen.User)
 			}
 
-			grip.Info(message.Fields{
+			grip.Info(ctx, message.Fields{
 				"message":               "set needs reprovision",
 				"host_id":               dbHost.Id,
 				"distro":                dbHost.Distro.Id,

@@ -2480,3 +2480,529 @@ func TestAddDependencies(t *testing.T) {
 		assert.Equal(t, task.AllStatuses, dep.Status)
 	}
 }
+
+// TestInactiveGeneratedTaskDoesNotAutoActivateSameVariantDependency ensures a
+// prerequisite_task pulled in only for an inactive generated task
+// (inactive_generated_task, activate: false) is not auto-activated when it
+// shares the same variant as the generated buildvariant entry.
+func TestInactiveGeneratedTaskDoesNotAutoActivateSameVariantDependency(t *testing.T) {
+	require.NoError(t, db.ClearCollections(task.Collection, build.Collection, VersionCollection, ParserProjectCollection, ProjectRefCollection))
+	ref := ProjectRef{Id: "proj"}
+	require.NoError(t, ref.Insert(t.Context()))
+	ref2 := ProjectRef{Id: ""}
+	require.NoError(t, ref2.Insert(t.Context()))
+	env := &mock.Environment{}
+	require.NoError(t, env.Configure(t.Context()))
+	originalConfig, err := evergreen.GetConfig(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if originalConfig != nil {
+			assert.NoError(t, evergreen.UpdateConfig(context.Background(), originalConfig))
+		}
+	})
+
+	genTask := &task.Task{
+		Id:          "generator_task",
+		DisplayName: "generator_task",
+		BuildId:     "b1",
+		Version:     "v1",
+		Activated:   true,
+	}
+	require.NoError(t, genTask.Insert(t.Context()))
+	existingGenBuild := build.Build{
+		Id:           "b1",
+		BuildVariant: "shared_bv",
+		Version:      "v1",
+		Activated:    true,
+	}
+	require.NoError(t, existingGenBuild.Insert(t.Context()))
+	v := &Version{
+		Id:         "v1",
+		Identifier: "proj",
+		BuildIds:   []string{"b1"},
+	}
+	require.NoError(t, v.Insert(t.Context()))
+
+	parserProj := ParserProject{}
+	initialConfig := `
+tasks:
+- name: generator_task
+- name: prerequisite_task
+
+buildvariants:
+- name: shared_bv
+  run_on:
+  - arch
+  tasks:
+  - name: generator_task
+  - name: prerequisite_task
+`
+	require.NoError(t, util.UnmarshalYAMLWithFallback([]byte(initialConfig), &parserProj))
+	parserProj.Id = "v1"
+	require.NoError(t, parserProj.Insert(t.Context()))
+
+	generateTasksJSON := `
+{
+	"tasks": [
+		{
+			"name": "inactive_generated_task",
+			"commands": [
+				{
+					"command": "shell.exec"
+				}
+			],
+			"depends_on": [
+				{
+					"name": "prerequisite_task"
+				}
+			]
+		}
+	],
+	"buildvariants": [
+		{
+			"name": "shared_bv",
+			"tasks": [
+				{
+					"name": "inactive_generated_task",
+					"activate": false
+				}
+			]
+		}
+	]
+}
+`
+	g, err := ParseProjectFromJSONString(generateTasksJSON)
+	require.NoError(t, err)
+	g.Task = genTask
+
+	p, pp, err := FindAndTranslateProjectForVersion(t.Context(), env.Settings(), v, false)
+	require.NoError(t, err)
+	p, pp, v, err = g.NewVersion(t.Context(), p, pp, v)
+	require.NoError(t, err)
+	require.NoError(t, g.Save(t.Context(), env.Settings(), p, pp, v))
+
+	prerequisiteTask := task.Task{}
+	require.NoError(t, db.FindOneQ(t.Context(), task.Collection, db.Query(bson.M{task.DisplayNameKey: "prerequisite_task"}), &prerequisiteTask))
+	assert.False(t, prerequisiteTask.Activated,
+		"prerequisite_task must stay inactive; failing means it was auto-activated though only inactive_generated_task needed it")
+
+	inactiveGeneratedTask := task.Task{}
+	require.NoError(t, db.FindOneQ(t.Context(), task.Collection, db.Query(bson.M{task.DisplayNameKey: "inactive_generated_task"}), &inactiveGeneratedTask))
+	assert.False(t, inactiveGeneratedTask.Activated)
+	require.Len(t, inactiveGeneratedTask.DependsOn, 1)
+	assert.Equal(t, prerequisiteTask.Id, inactiveGeneratedTask.DependsOn[0].TaskId)
+}
+
+// TestSharedPrerequisiteActivationInfoMergeRecordsInactiveForSharedPrerequisite
+// exercises only GetNewTasksAndActivationInfo (no DB), after merging generated
+// tasks into the parser project like NewVersion. It documents whether
+// prerequisite_task ends up in activationInfo when one generated sibling is
+// active and another is activate: false, both depending on the same prerequisite.
+// Inactive=true in deactivateGeneratedDeps is not cleared by the active sibling's
+// assignment of false for that prerequisite key.
+func TestSharedPrerequisiteActivationInfoMergeRecordsInactiveForSharedPrerequisite(t *testing.T) {
+	baseYAML := `
+tasks:
+- name: generator_task
+- name: prerequisite_task
+buildvariants:
+- name: shared_bv
+  run_on:
+  - arch
+  tasks:
+  - name: generator_task
+  - name: prerequisite_task
+`
+	generateTasksJSON := `
+{
+	"tasks": [
+		{
+			"name": "active_generated_task",
+			"commands": [{"command": "shell.exec"}],
+			"depends_on": [{"name": "prerequisite_task"}]
+		},
+		{
+			"name": "inactive_generated_task",
+			"commands": [{"command": "shell.exec"}],
+			"depends_on": [{"name": "prerequisite_task"}]
+		}
+	],
+	"buildvariants": [
+		{
+			"name": "shared_bv",
+			"tasks": [
+				{"name": "active_generated_task"},
+				{"name": "inactive_generated_task", "activate": false}
+			]
+		}
+	]
+}
+`
+	pp := &ParserProject{}
+	require.NoError(t, util.UnmarshalYAMLWithFallback([]byte(baseYAML), &pp))
+	p0, err := TranslateProject(t.Context(), pp)
+	require.NoError(t, err)
+
+	g, err := ParseProjectFromJSONString(generateTasksJSON)
+	require.NoError(t, err)
+	g.Task = &task.Task{Id: "gen"}
+	cached := cacheProjectData(p0)
+	mergedPP, err := g.addGeneratedProjectToConfig(pp, cached)
+	require.NoError(t, err)
+	p, err := TranslateProject(t.Context(), mergedPP)
+	require.NoError(t, err)
+
+	v := &Version{Requester: evergreen.RepotrackerVersionRequester}
+
+	g.NewTVPairs, g.ActivationInfo = nil, nil
+	_, activationInfo := g.GetNewTasksAndActivationInfo(t.Context(), v, p)
+
+	assert.True(t, activationInfo.taskHasSpecificActivation("shared_bv", "prerequisite_task"),
+		"inactive sibling's dependency edge marks shared prerequisite in activationInfo; active sibling's false does not clear it")
+}
+
+// TestSharedPrerequisiteBetweenActiveAndInactiveGeneratedTasks checks the full
+// generate.tasks save path. Even when activationInfo marks shared prerequisite_task
+// as having specific activation (see TestSharedPrerequisiteActivationInfoMergeRecordsInactiveForSharedPrerequisite),
+// addNewTasksToExistingBuilds activates recursive dependencies of newly-activated
+// tasks, so prerequisite_task still ends up Activated in the DB.
+func TestSharedPrerequisiteBetweenActiveAndInactiveGeneratedTasks(t *testing.T) {
+	require.NoError(t, db.ClearCollections(task.Collection, build.Collection, VersionCollection, ParserProjectCollection, ProjectRefCollection))
+	ref := ProjectRef{Id: "proj"}
+	require.NoError(t, ref.Insert(t.Context()))
+	ref2 := ProjectRef{Id: ""}
+	require.NoError(t, ref2.Insert(t.Context()))
+	env := &mock.Environment{}
+	require.NoError(t, env.Configure(t.Context()))
+	originalConfig, err := evergreen.GetConfig(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if originalConfig != nil {
+			assert.NoError(t, evergreen.UpdateConfig(context.Background(), originalConfig))
+		}
+	})
+
+	genTask := &task.Task{
+		Id:          "generator_task",
+		DisplayName: "generator_task",
+		BuildId:     "b1",
+		Version:     "v1",
+		Activated:   true,
+	}
+	require.NoError(t, genTask.Insert(t.Context()))
+	existingGenBuild := build.Build{
+		Id:           "b1",
+		BuildVariant: "shared_bv",
+		Version:      "v1",
+		Activated:    true,
+	}
+	require.NoError(t, existingGenBuild.Insert(t.Context()))
+	v := &Version{
+		Id:         "v1",
+		Identifier: "proj",
+		BuildIds:   []string{"b1"},
+	}
+	require.NoError(t, v.Insert(t.Context()))
+
+	parserProj := ParserProject{}
+	initialConfig := `
+tasks:
+- name: generator_task
+- name: prerequisite_task
+
+buildvariants:
+- name: shared_bv
+  run_on:
+  - arch
+  tasks:
+  - name: generator_task
+  - name: prerequisite_task
+`
+	require.NoError(t, util.UnmarshalYAMLWithFallback([]byte(initialConfig), &parserProj))
+	parserProj.Id = "v1"
+	require.NoError(t, parserProj.Insert(t.Context()))
+
+	generateTasksJSON := `
+{
+	"tasks": [
+		{
+			"name": "active_generated_task",
+			"commands": [
+				{
+					"command": "shell.exec"
+				}
+			],
+			"depends_on": [
+				{
+					"name": "prerequisite_task"
+				}
+			]
+		},
+		{
+			"name": "inactive_generated_task",
+			"commands": [
+				{
+					"command": "shell.exec"
+				}
+			],
+			"depends_on": [
+				{
+					"name": "prerequisite_task"
+				}
+			]
+		}
+	],
+	"buildvariants": [
+		{
+			"name": "shared_bv",
+			"tasks": [
+				{
+					"name": "active_generated_task"
+				},
+				{
+					"name": "inactive_generated_task",
+					"activate": false
+				}
+			]
+		}
+	]
+}
+`
+	g, err := ParseProjectFromJSONString(generateTasksJSON)
+	require.NoError(t, err)
+	g.Task = genTask
+
+	p, pp, err := FindAndTranslateProjectForVersion(t.Context(), env.Settings(), v, false)
+	require.NoError(t, err)
+	p, pp, v, err = g.NewVersion(t.Context(), p, pp, v)
+	require.NoError(t, err)
+	require.NoError(t, g.Save(t.Context(), env.Settings(), p, pp, v))
+
+	prerequisiteTask := task.Task{}
+	require.NoError(t, db.FindOneQ(t.Context(), task.Collection, db.Query(bson.M{task.DisplayNameKey: "prerequisite_task"}), &prerequisiteTask))
+
+	activeGeneratedTask := task.Task{}
+	require.NoError(t, db.FindOneQ(t.Context(), task.Collection, db.Query(bson.M{task.DisplayNameKey: "active_generated_task"}), &activeGeneratedTask))
+	require.True(t, activeGeneratedTask.Activated, "sanity: default-active generated task should be activated")
+
+	inactiveGeneratedTask := task.Task{}
+	require.NoError(t, db.FindOneQ(t.Context(), task.Collection, db.Query(bson.M{task.DisplayNameKey: "inactive_generated_task"}), &inactiveGeneratedTask))
+	require.False(t, inactiveGeneratedTask.Activated)
+
+	require.Len(t, activeGeneratedTask.DependsOn, 1)
+	require.Len(t, inactiveGeneratedTask.DependsOn, 1)
+	assert.Equal(t, prerequisiteTask.Id, activeGeneratedTask.DependsOn[0].TaskId)
+	assert.Equal(t, prerequisiteTask.Id, inactiveGeneratedTask.DependsOn[0].TaskId)
+
+	assert.True(t, prerequisiteTask.Activated,
+		"shared prerequisite_task should activate when a generated sibling is active and depends on it "+
+			"(if false, inactive sibling's deactivateGeneratedDeps=true likely overwrote the active sibling's false)")
+}
+
+func TestTaskGroupActivation(t *testing.T) {
+	// Test that activate: false on a task group reference properly
+	// expands to all tasks within the group.
+	for tName, tCase := range map[string]func(t *testing.T){
+		"ExpandsTaskGroupWithActivateFalse": func(t *testing.T) {
+			g := GeneratedProject{
+				Task: &task.Task{},
+				BuildVariants: []parserBV{
+					{
+						Name: "variant1",
+						Tasks: []parserBVTaskUnit{
+							{
+								Name:     "my-task-group",
+								Activate: utility.FalsePtr(),
+							},
+						},
+					},
+				},
+				Tasks: []parserTask{
+					{Name: "task1"},
+					{Name: "task2"},
+					{Name: "task3"},
+				},
+				TaskGroups: []parserTaskGroup{
+					{
+						Name:  "my-task-group",
+						Tasks: []string{"task1", "task2", "task3"},
+					},
+				},
+			}
+
+			activationInfo := g.findTasksAndVariantsWithSpecificActivations(evergreen.RepotrackerVersionRequester)
+
+			// Verify that all individual tasks in the group are marked as having specific activation
+			require.Contains(t, activationInfo.activationTasks, "variant1")
+			tasksWithSpecificActivation := activationInfo.activationTasks["variant1"]
+			assert.ElementsMatch(t, []string{"task1", "task2", "task3"}, tasksWithSpecificActivation,
+				"all tasks in the group should be marked with specific activation")
+
+			// Verify individual task activation checks work correctly
+			assert.True(t, activationInfo.taskHasSpecificActivation("variant1", "task1"))
+			assert.True(t, activationInfo.taskHasSpecificActivation("variant1", "task2"))
+			assert.True(t, activationInfo.taskHasSpecificActivation("variant1", "task3"))
+		},
+		"ExpandsTaskGroupWithBatchTime": func(t *testing.T) {
+			batchTime := 60
+			g := GeneratedProject{
+				Task: &task.Task{},
+				BuildVariants: []parserBV{
+					{
+						Name: "variant1",
+						Tasks: []parserBVTaskUnit{
+							{
+								Name:      "my-task-group",
+								BatchTime: &batchTime,
+							},
+						},
+					},
+				},
+				Tasks: []parserTask{
+					{Name: "task1"},
+					{Name: "task2"},
+				},
+				TaskGroups: []parserTaskGroup{
+					{
+						Name:  "my-task-group",
+						Tasks: []string{"task1", "task2"},
+					},
+				},
+			}
+
+			activationInfo := g.findTasksAndVariantsWithSpecificActivations(evergreen.RepotrackerVersionRequester)
+
+			// Verify that all individual tasks in the group are marked as having specific activation
+			require.Contains(t, activationInfo.activationTasks, "variant1")
+			tasksWithSpecificActivation := activationInfo.activationTasks["variant1"]
+			assert.ElementsMatch(t, []string{"task1", "task2"}, tasksWithSpecificActivation,
+				"all tasks in the group should be marked with specific activation")
+		},
+		"ExpandsTaskGroupInStepback": func(t *testing.T) {
+			g := GeneratedProject{
+				Task: &task.Task{
+					ActivatedBy: evergreen.StepbackTaskActivator,
+					GeneratedTasksToActivate: map[string][]string{
+						"variant1": {"task2"}, // Only task2 should be activated via stepback
+					},
+				},
+				BuildVariants: []parserBV{
+					{
+						Name: "variant1",
+						Tasks: []parserBVTaskUnit{
+							{
+								Name:     "my-task-group",
+								Activate: utility.FalsePtr(),
+							},
+						},
+					},
+				},
+				Tasks: []parserTask{
+					{Name: "task1"},
+					{Name: "task2"},
+					{Name: "task3"},
+				},
+				TaskGroups: []parserTaskGroup{
+					{
+						Name:  "my-task-group",
+						Tasks: []string{"task1", "task2", "task3"},
+					},
+				},
+			}
+
+			activationInfo := g.findTasksAndVariantsWithSpecificActivations(evergreen.RepotrackerVersionRequester)
+
+			// Verify stepback info contains all tasks from the group
+			require.Contains(t, activationInfo.stepbackTasks, "variant1")
+			stepbackTasks := activationInfo.stepbackTasks["variant1"]
+			require.Len(t, stepbackTasks, 3, "all tasks in the group should have stepback info")
+
+			// Verify only task2 should be activated (it's in GeneratedTasksToActivate)
+			for _, st := range stepbackTasks {
+				if st.task == "task2" {
+					assert.True(t, st.activate, "task2 should be activated via stepback")
+				} else {
+					assert.False(t, st.activate, "task1 and task3 should not be activated")
+				}
+			}
+		},
+		"ExpandsTaskGroupInStepbackByGroupName": func(t *testing.T) {
+			// Test that when stepback stores the task group name (not individual task names),
+			// all tasks in the group are properly activated.
+			g := GeneratedProject{
+				Task: &task.Task{
+					ActivatedBy: evergreen.StepbackTaskActivator,
+					GeneratedTasksToActivate: map[string][]string{
+						"variant1": {"my-task-group"}, // Stepback stores the task GROUP name
+					},
+				},
+				BuildVariants: []parserBV{
+					{
+						Name: "variant1",
+						Tasks: []parserBVTaskUnit{
+							{
+								Name:     "my-task-group",
+								Activate: utility.FalsePtr(),
+							},
+						},
+					},
+				},
+				Tasks: []parserTask{
+					{Name: "task1"},
+					{Name: "task2"},
+					{Name: "task3"},
+				},
+				TaskGroups: []parserTaskGroup{
+					{
+						Name:  "my-task-group",
+						Tasks: []string{"task1", "task2", "task3"},
+					},
+				},
+			}
+
+			activationInfo := g.findTasksAndVariantsWithSpecificActivations(evergreen.RepotrackerVersionRequester)
+
+			// Verify stepback info contains all tasks from the group
+			require.Contains(t, activationInfo.stepbackTasks, "variant1")
+			stepbackTasks := activationInfo.stepbackTasks["variant1"]
+			require.Len(t, stepbackTasks, 3, "all tasks in the group should have stepback info")
+
+			// All tasks should be activated because the task group name is in GeneratedTasksToActivate
+			for _, st := range stepbackTasks {
+				assert.True(t, st.activate, "all tasks in the group should be activated when task group name is in stepback list")
+			}
+		},
+		"DoesNotExpandRegularTask": func(t *testing.T) {
+			g := GeneratedProject{
+				Task: &task.Task{},
+				BuildVariants: []parserBV{
+					{
+						Name: "variant1",
+						Tasks: []parserBVTaskUnit{
+							{
+								Name:     "regular-task",
+								Activate: utility.FalsePtr(),
+							},
+						},
+					},
+				},
+				Tasks: []parserTask{
+					{Name: "regular-task"},
+				},
+				TaskGroups: []parserTaskGroup{},
+			}
+
+			activationInfo := g.findTasksAndVariantsWithSpecificActivations(evergreen.RepotrackerVersionRequester)
+
+			// Verify the regular task (not a group) is handled correctly
+			require.Contains(t, activationInfo.activationTasks, "variant1")
+			tasksWithSpecificActivation := activationInfo.activationTasks["variant1"]
+			assert.Equal(t, []string{"regular-task"}, tasksWithSpecificActivation,
+				"regular task should be in the list as-is, not expanded")
+		},
+	} {
+		t.Run(tName, func(t *testing.T) {
+			tCase(t)
+		})
+	}
+}

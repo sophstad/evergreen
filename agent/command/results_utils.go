@@ -9,14 +9,15 @@ import (
 	"github.com/evergreen-ci/evergreen/agent/internal/client"
 	"github.com/evergreen-ci/evergreen/agent/internal/redactor"
 	"github.com/evergreen-ci/evergreen/agent/internal/taskoutput"
+	agentutil "github.com/evergreen-ci/evergreen/agent/util"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/testlog"
 	"github.com/evergreen-ci/evergreen/model/testresult"
 	"github.com/evergreen-ci/pail"
 	"github.com/evergreen-ci/utility"
-	goparquet "github.com/fraugster/parquet-go"
-	"github.com/fraugster/parquet-go/floor"
+	"github.com/mongodb/grip"
+	"github.com/parquet-go/parquet-go"
 	"github.com/pkg/errors"
 )
 
@@ -26,37 +27,44 @@ func sendTestResults(ctx context.Context, comm client.Communicator, logger clien
 		return errors.New("cannot send nil results")
 	}
 
-	logger.Task().Info("Attaching test results...")
+	logger.Task().Info(ctx, "Attaching test results...")
 	td := client.TaskData{ID: conf.Task.Id, Secret: conf.Task.Secret}
 
 	if err := attachTestResults(ctx, conf, td, comm, results); err != nil {
 		return errors.Wrap(err, "sending test results")
 	}
 
-	logger.Task().Info("Successfully attached results.")
+	logger.Task().Info(ctx, "Successfully attached results.")
 
 	return nil
 }
 
 // sendTestLogsAndResults sends the test logs and test results to backend
-// logging and results services.
+// logging and results services. Test logs are uploaded in parallel using a
+// worker pool for improved performance.
 func sendTestLogsAndResults(ctx context.Context, comm client.Communicator, logger client.LoggerProducer, conf *internal.TaskConfig, logs []testlog.TestLog, results []testresult.TestResult) error {
-	logger.Task().Info("Posting test logs...")
-	for _, log := range logs {
-		if err := ctx.Err(); err != nil {
-			return errors.Wrap(err, "canceled while sending test logs")
-		}
-
-		if err := taskoutput.AppendTestLog(ctx, &conf.Task, redactor.RedactionOptions{
-			Expansions:         conf.NewExpansions,
-			Redacted:           conf.Redacted,
-			InternalRedactions: conf.InternalRedactions,
-		}, &log); err != nil {
-			// Continue on error to let the other logs get posted.
-			logger.Task().Error(errors.Wrap(err, "sending test log"))
-		}
+	if len(logs) == 0 {
+		return sendTestResults(ctx, comm, logger, conf, results)
 	}
-	logger.Task().Info("Finished posting test logs.")
+
+	logger.Task().Info(ctx, "Posting test logs...")
+
+	opts := redactor.RedactionOptions{
+		Expansions:         conf.NewExpansions,
+		Redacted:           conf.Redacted,
+		InternalRedactions: conf.InternalRedactions,
+	}
+
+	succeeded, err := agentutil.ParallelWorkerExec(ctx, "sending test log", logs, logger.Task(),
+		func(log *testlog.TestLog) error {
+			return taskoutput.AppendTestLog(ctx, &conf.Task, opts, log, conf.S3Usage)
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	logger.Task().Infof(ctx, "Finished posting test logs (%d of %d succeeded).", succeeded, len(logs))
 
 	return sendTestResults(ctx, comm, logger, conf, results)
 }
@@ -85,8 +93,21 @@ func attachTestResults(ctx context.Context, conf *internal.TaskConfig, td client
 	}
 }
 
+const maxTestResultsInterval = 24 * time.Hour
+
+const failedTestsSampleSize = 10
+
 func uploadTestResults(ctx context.Context, comm client.Communicator, conf *internal.TaskConfig, results []testresult.TestResult, td client.TaskData, output *task.TaskOutput) (bool, error) {
-	createdAt := conf.Task.CreateTime
+	createdAt := conf.TestResultsCreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+		conf.TestResultsCreatedAt = createdAt
+	}
+	if time.Since(conf.TestResultsCreatedAt) > maxTestResultsInterval {
+		err := errors.Errorf("Cannot append test results more than %s after the first upload. Consider uploading all test results at the end of the task. (DEVPROD-32331)", maxTestResultsInterval)
+		grip.Alert(ctx, err)
+		return false, err
+	}
 	info := makeTestResultsInfo(conf.Task, conf.DisplayTaskInfo)
 	newResults := makeTestResults(&conf.Task, results)
 	key := testresult.PartitionKey(createdAt, info.Project, info.ID())
@@ -108,15 +129,17 @@ func uploadTestResults(ctx context.Context, comm client.Communicator, conf *inte
 
 	var failedCount int
 	var failedTests []string
-	for _, result := range results {
+	for _, result := range allResults {
 		if result.Status == evergreen.TestFailedStatus {
-			failedTests = append(failedTests, result.GetDisplayTestName())
+			if len(failedTests) < failedTestsSampleSize {
+				failedTests = append(failedTests, result.GetDisplayTestName())
+			}
 			failedCount++
 		}
 	}
 	tr.Stats = testresult.TaskTestResultsStats{
 		FailedCount: failedCount,
-		TotalCount:  len(newResults),
+		TotalCount:  len(allResults),
 	}
 	tr.FailedTestsSample = failedTests
 
@@ -137,10 +160,7 @@ func uploadParquet(ctx context.Context, credentials evergreen.S3Credentials, out
 	}
 	defer w.Close()
 
-	pw := floor.NewWriter(goparquet.NewFileWriter(w, goparquet.WithSchemaDefinition(task.ParquetTestResultsSchemaDef)))
-	defer pw.Close()
-
-	return errors.Wrap(pw.Write(results), "writing Parquet test results")
+	return errors.Wrap(parquet.Write(w, []testresult.ParquetTestResults{*results}), "writing Parquet test results")
 }
 
 func makeTestResultsInfo(t task.Task, displayTaskInfo *apimodels.DisplayTaskInfo) testresult.TestResultsInfo {
