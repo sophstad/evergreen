@@ -320,9 +320,14 @@ var StatusFields = []string{
 	StatusKey,
 	DetailsKey,
 	StartTimeKey,
+	FinishTimeKey,
 	TimeTakenKey,
 	ActivatedKey,
+	AbortedKey,
 	DependsOnKey,
+	OverrideDependenciesKey,
+	IsEssentialToSucceedKey,
+	IsGithubCheckKey,
 }
 
 // ById creates a query that finds a task by its _id.

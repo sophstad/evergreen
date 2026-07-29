@@ -1760,6 +1760,85 @@ func TestGetBuildStatus(t *testing.T) {
 
 }
 
+// TestStatusFieldsProjectionSupportsBuildState verifies that task.StatusFields is
+// a sufficient projection for recomputing build state. The build state helpers
+// reach fields through predicates like (*task.Task).Blocked and WillRun, so a
+// predicate that starts reading a field outside the projection would silently
+// observe a zero value rather than fail to compile.
+func TestStatusFieldsProjectionSupportsBuildState(t *testing.T) {
+	ctx := t.Context()
+	started := time.Now().Add(-time.Hour)
+
+	// Each case covers a branch of the build state computation, setting the fields
+	// that branch depends on to non-default values.
+	for name, buildTasks := range map[string][]task.Task{
+		"UnscheduledTasks": {
+			{Id: "unscheduled", Status: evergreen.TaskUndispatched},
+		},
+		"BlockedTasks": {
+			{Id: "blocked", Status: evergreen.TaskUndispatched, Activated: true, DependsOn: []task.Dependency{{TaskId: "dep", Unattainable: true}}},
+		},
+		"BlockedTasksOverridingDependencies": {
+			{Id: "overriding", Status: evergreen.TaskUndispatched, Activated: true, OverrideDependencies: true, DependsOn: []task.Dependency{{TaskId: "dep", Unattainable: true}}},
+		},
+		"InProgressTasks": {
+			{Id: "started", Status: evergreen.TaskStarted, Activated: true, StartTime: started},
+		},
+		"AbortedTasks": {
+			{Id: "aborted", Status: evergreen.TaskUndispatched, Activated: true, Aborted: true},
+		},
+		"UnfinishedEssentialTasks": {
+			{Id: "essential", Status: evergreen.TaskUndispatched, Activated: true, IsEssentialToSucceed: true},
+			{Id: "essentialSucceeded", Status: evergreen.TaskSucceeded, Activated: true},
+		},
+		"GitHubCheckTasks": {
+			{Id: "githubCheck", Status: evergreen.TaskFailed, Activated: true, IsGithubCheck: true},
+			{Id: "githubCheckSucceeded", Status: evergreen.TaskSucceeded, Activated: true},
+		},
+		"FinishedTasksWithDependencies": {
+			{Id: "first", Status: evergreen.TaskSucceeded, Activated: true, StartTime: started, FinishTime: started.Add(time.Minute), TimeTaken: time.Minute},
+			{Id: "second", Status: evergreen.TaskSucceeded, Activated: true, StartTime: started.Add(time.Minute), FinishTime: started.Add(3 * time.Minute), TimeTaken: 2 * time.Minute, DependsOn: []task.Dependency{{TaskId: "first"}}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, db.ClearCollections(task.Collection))
+			buildID := fmt.Sprintf("build-%s", name)
+			for _, tsk := range buildTasks {
+				tsk.BuildId = buildID
+				require.NoError(t, tsk.Insert(ctx))
+			}
+
+			full, err := task.Find(ctx, task.ByBuildId(buildID))
+			require.NoError(t, err)
+			require.Len(t, full, len(buildTasks))
+			projected, err := task.FindWithFields(ctx, task.ByBuildId(buildID), task.StatusFields...)
+			require.NoError(t, err)
+			require.Len(t, projected, len(buildTasks))
+
+			assert.Equal(t, getBuildStatus(full), getBuildStatus(projected))
+			assert.Equal(t, CalculateActualMakespan(full), CalculateActualMakespan(projected))
+			assert.Equal(t, FindPredictedMakespan(full).TotalTime, FindPredictedMakespan(projected).TotalTime)
+
+			projectedByID := make(map[string]task.Task, len(projected))
+			for _, tsk := range projected {
+				projectedByID[tsk.Id] = tsk
+			}
+			for _, tsk := range full {
+				projectedTask, ok := projectedByID[tsk.Id]
+				require.True(t, ok, "task '%s' missing from projected results", tsk.Id)
+				assert.Equal(t, tsk.Blocked(), projectedTask.Blocked())
+				assert.Equal(t, tsk.WillRun(), projectedTask.WillRun())
+				assert.Equal(t, tsk.IsUnscheduled(), projectedTask.IsUnscheduled())
+				assert.Equal(t, tsk.IsInProgress(), projectedTask.IsInProgress())
+				assert.Equal(t, tsk.IsFinished(), projectedTask.IsFinished())
+				assert.Equal(t, tsk.Aborted, projectedTask.Aborted)
+				assert.Equal(t, tsk.IsEssentialToSucceed, projectedTask.IsEssentialToSucceed)
+				assert.Equal(t, tsk.IsGithubCheck, projectedTask.IsGithubCheck)
+			}
+		})
+	}
+}
+
 func TestGetVersionStatus(t *testing.T) {
 	t.Run("VersionCreatedForAllCreatedButInactiveBuilds", func(t *testing.T) {
 		versionBuilds := []build.Build{

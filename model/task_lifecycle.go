@@ -1378,19 +1378,32 @@ func checkUpdateBuildPRStatusPending(ctx context.Context, b *build.Build) error 
 	return nil
 }
 
-// updateBuildStatus updates the status of the build based on its tasks' statuses
-// Returns true if the build's status has changed or if all the build's tasks become blocked / unscheduled.
-func updateBuildStatus(ctx context.Context, b *build.Build) (bool, error) {
-	buildTasks, err := task.Find(ctx, task.ByBuildId(b.Id))
+// findTasksForBuildStatus returns the tasks in the given builds keyed by build
+// ID, projected to the fields needed to recompute build state. Builds with no
+// tasks are absent from the result.
+func findTasksForBuildStatus(ctx context.Context, buildIDs []string) (map[string][]task.Task, error) {
+	tasks, err := task.FindWithFields(ctx, task.ByBuildIds(buildIDs), task.StatusFields...)
 	if err != nil {
-		return false, errors.Wrapf(err, "getting tasks in build '%s'", b.Id)
+		return nil, errors.Wrap(err, "finding tasks in builds")
 	}
 
+	tasksByBuild := make(map[string][]task.Task, len(buildIDs))
+	for _, t := range tasks {
+		tasksByBuild[t.BuildId] = append(tasksByBuild[t.BuildId], t)
+	}
+	return tasksByBuild, nil
+}
+
+// updateBuildStatus updates the status of the build based on its tasks' statuses.
+// Returns true if the build's status has changed or if all the build's tasks become blocked / unscheduled.
+// buildTasks must be all of the build's non-display tasks, with at least
+// task.StatusFields populated.
+func updateBuildStatus(ctx context.Context, b *build.Build, buildTasks []task.Task) (bool, error) {
 	buildStatus := getBuildStatus(buildTasks)
 	// If all the tasks are unscheduled, set active to false
 	if buildStatus.allTasksUnscheduled {
 		if b.Activated {
-			if err = b.SetActivated(ctx, false); err != nil {
+			if err := b.SetActivated(ctx, false); err != nil {
 				return true, errors.Wrapf(err, "setting build '%s' as inactive", b.Id)
 			}
 			return true, nil
@@ -1403,7 +1416,7 @@ func updateBuildStatus(ctx context.Context, b *build.Build) (bool, error) {
 
 	blockedChanged := buildStatus.allTasksBlocked != b.AllTasksBlocked
 
-	if err = b.SetAllTasksBlocked(ctx, buildStatus.allTasksBlocked); err != nil {
+	if err := b.SetAllTasksBlocked(ctx, buildStatus.allTasksBlocked); err != nil {
 		return false, errors.Wrapf(err, "setting build '%s' as blocked", b.Id)
 	}
 
@@ -1423,7 +1436,7 @@ func updateBuildStatus(ctx context.Context, b *build.Build) (bool, error) {
 	}
 	isAborted = len(utility.StringSliceIntersection(taskStatuses, evergreen.TaskFailureStatuses)) == 0 && isAborted
 	if isAborted != b.Aborted {
-		if err = b.SetAborted(ctx, isAborted); err != nil {
+		if err := b.SetAborted(ctx, isAborted); err != nil {
 			return false, errors.Wrapf(err, "setting build '%s' as aborted", b.Id)
 		}
 	}
@@ -1434,25 +1447,25 @@ func updateBuildStatus(ctx context.Context, b *build.Build) (bool, error) {
 
 	// if the status has changed, re-activate the build if it's not blocked
 	if shouldActivate {
-		if err = b.SetActivated(ctx, true); err != nil {
+		if err := b.SetActivated(ctx, true); err != nil {
 			return true, errors.Wrapf(err, "setting build '%s' as active", b.Id)
 		}
 	}
 
 	if evergreen.IsFinishedBuildStatus(buildStatus.status) {
-		if err = b.MarkFinished(ctx, buildStatus.status, time.Now()); err != nil {
+		if err := b.MarkFinished(ctx, buildStatus.status, time.Now()); err != nil {
 			return true, errors.Wrapf(err, "marking build as finished with status '%s'", buildStatus.status)
 		}
-		if err = updateMakespans(ctx, b, buildTasks); err != nil {
+		if err := updateMakespans(ctx, b, buildTasks); err != nil {
 			return true, errors.Wrapf(err, "updating makespan information for '%s'", b.Id)
 		}
 	} else {
-		if err = b.UpdateStatus(ctx, buildStatus.status); err != nil {
+		if err := b.UpdateStatus(ctx, buildStatus.status); err != nil {
 			return true, errors.Wrap(err, "updating build status")
 		}
 	}
 
-	if err = updateBuildGithubStatus(ctx, b, buildTasks); err != nil {
+	if err := updateBuildGithubStatus(ctx, b, buildTasks); err != nil {
 		return true, errors.Wrap(err, "updating build GitHub status")
 	}
 
@@ -1656,7 +1669,11 @@ func UpdateBuildAndVersionStatusForTask(ctx context.Context, t *task.Task) error
 	if taskBuild == nil {
 		return errors.Errorf("no build '%s' found for task '%s'", t.BuildId, t.Id)
 	}
-	buildStatusChanged, err := updateBuildStatus(ctx, taskBuild)
+	tasksByBuild, err := findTasksForBuildStatus(ctx, []string{taskBuild.Id})
+	if err != nil {
+		return err
+	}
+	buildStatusChanged, err := updateBuildStatus(ctx, taskBuild, tasksByBuild[taskBuild.Id])
 	if err != nil {
 		return errors.Wrapf(err, "updating build '%s' status", taskBuild.Id)
 	}
@@ -2060,9 +2077,14 @@ func UpdateVersionAndPatchStatusForBuilds(ctx context.Context, buildIds []string
 		return errors.Wrapf(err, "fetching builds")
 	}
 
+	tasksByBuild, err := findTasksForBuildStatus(ctx, buildIds)
+	if err != nil {
+		return err
+	}
+
 	versionsToUpdate := make(map[string]bool)
 	for _, build := range builds {
-		buildStatusChanged, err := updateBuildStatus(ctx, &build)
+		buildStatusChanged, err := updateBuildStatus(ctx, &build, tasksByBuild[build.Id])
 		if err != nil {
 			return errors.Wrapf(err, "updating build '%s' status", build.Id)
 		}
